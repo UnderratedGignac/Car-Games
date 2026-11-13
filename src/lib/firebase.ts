@@ -6,8 +6,10 @@ let authInstance: Auth | null = null;
 const googleProvider = new GoogleAuthProvider();
 
 try {
-  const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-  authInstance = getAuth(app);
+  if (firebaseConfig.apiKey && firebaseConfig.apiKey.trim().length > 0) {
+    const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+    authInstance = getAuth(app);
+  }
 } catch (err) {
   console.warn('Firebase Auth client initialization warning:', err);
 }
