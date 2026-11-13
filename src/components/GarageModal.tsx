@@ -20,9 +20,11 @@ import {
   SOUND_OPTIONS,
   TIRE_OPTIONS,
   UNDERGLOW_OPTIONS,
+  VehicleCategory,
   WINDOW_OPTIONS,
   WING_OPTIONS,
   computeEffectiveCarStats,
+  getCarCategory,
   getUpgradeCost,
   resolveCarAppearance,
 } from '../game/rules';
@@ -47,6 +49,18 @@ interface GarageModalProps {
 
 type GarageTabId = 'performance' | 'body' | 'wheels_aero' | 'power_audio';
 
+const CATEGORY_TABS: { id: VehicleCategory; label: string; icon: string }[] = [
+  { id: 'all', label: 'All', icon: '🌐' },
+  { id: 'tuner', label: 'Tuner', icon: '🏎️' },
+  { id: 'super', label: 'Super', icon: '🚀' },
+  { id: 'truck', label: 'Trucks', icon: '🛻' },
+  { id: 'motorcycle', label: 'Motos', icon: '🏍️' },
+  { id: 'muscle', label: 'Muscle', icon: '⚡' },
+  { id: 'van', label: 'Vans', icon: '🚐' },
+  { id: 'formula', label: 'Formula', icon: '🏁' },
+  { id: 'rally_kei', label: 'Rally & Kei', icon: '🌲' },
+];
+
 export const GarageModal: React.FC<GarageModalProps> = ({
   isOpen,
   onClose,
@@ -63,12 +77,27 @@ export const GarageModal: React.FC<GarageModalProps> = ({
   onClearCustomSprite,
 }) => {
   const [previewCarId, setPreviewCarId] = useState<string>(selectedCarId);
+  const [categoryFilter, setCategoryFilter] = useState<VehicleCategory | 'all'>('all');
   const [previewDir, setPreviewDir] = useState<DiagonalDirection>('right');
   const [activeTab, setActiveTab] = useState<GarageTabId>('body');
   const [previewFlashing, setPreviewFlashing] = useState<boolean>(false);
   const [previewRevving, setPreviewRevving] = useState<boolean>(false);
   const [previewSpin, setPreviewSpin] = useState<number>(0);
   const spriteCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  const filteredCars = React.useMemo(() => {
+    if (categoryFilter === 'all') return CAR_ROSTER;
+    return CAR_ROSTER.filter((c) => getCarCategory(c) === categoryFilter);
+  }, [categoryFilter]);
+
+  const categoryCounts = React.useMemo(() => {
+    const counts: Record<string, number> = { all: CAR_ROSTER.length };
+    for (const c of CAR_ROSTER) {
+      const cat = getCarCategory(c);
+      counts[cat] = (counts[cat] || 0) + 1;
+    }
+    return counts;
+  }, []);
 
   useEffect(() => {
     setPreviewCarId(selectedCarId);
@@ -171,7 +200,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
       <div className="flex items-center justify-between gap-2 px-3 sm:px-5 py-2.5 border-b border-slate-800 bg-[#090e1a] shrink-0 pt-safe">
         <div className="min-w-0">
           <p className="text-[10px] sm:text-[11px] font-mono tracking-wider text-amber-400 truncate">
-            {CAR_ROSTER.length} CHASSIS · 3D SHOWROOM
+            {CAR_ROSTER.length} VEHICLES · 90-CAR ROSTER · MOD SHOP
           </p>
           <h2 className="text-base sm:text-xl font-bold tracking-tight font-display text-white truncate">
             Neon Redline Garage
@@ -197,9 +226,39 @@ export const GarageModal: React.FC<GarageModalProps> = ({
         </div>
       </div>
 
-      {/* 2. 14-CAR ROSTER STRIP (Touch-Scrollable Horizontal Carousel on Mobile) */}
+      {/* 2. CATEGORY FILTER TABS */}
+      <div className="flex overflow-x-auto scrollbar-none gap-1.5 px-3 sm:px-5 py-1.5 bg-slate-950/90 border-b border-slate-800/80 shrink-0">
+        {CATEGORY_TABS.map((tab) => {
+          const count = categoryCounts[tab.id] || 0;
+          const isActive = categoryFilter === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setCategoryFilter(tab.id)}
+              className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 flex items-center gap-1.5 transition-colors ${
+                isActive
+                  ? 'bg-amber-400 text-slate-950 font-bold shadow-[0_0_10px_rgba(251,191,36,0.3)]'
+                  : 'bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-white border border-slate-800'
+              }`}
+            >
+              <span>{tab.icon}</span>
+              <span>{tab.label}</span>
+              <span
+                className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
+                  isActive ? 'bg-slate-950/20 text-slate-950' : 'bg-slate-800 text-slate-400'
+                }`}
+              >
+                {count}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* 3. EXPANDED VEHICLE ROSTER STRIP (Touch-Scrollable Horizontal Carousel on Mobile) */}
       <div className="flex overflow-x-auto scrollbar-none snap-x gap-1.5 px-3 sm:px-5 py-2 bg-slate-950/60 border-b border-slate-800/80 shrink-0">
-        {CAR_ROSTER.map((car) => {
+        {filteredCars.map((car) => {
           const unlocked = unlockedCarIds.includes(car.id);
           const active = previewCar.id === car.id;
           const equipped = selectedCarId === car.id;

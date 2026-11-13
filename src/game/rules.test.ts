@@ -46,10 +46,14 @@ import {
   resolveSkyAtmosphere,
 } from './skyArt';
 
-test('CAR_ROSTER has 14 distinct progressive drift cars from T1 to T14', () => {
-  assert.equal(CAR_ROSTER.length, 14);
+test('CAR_ROSTER has 90 distinct progressive vehicles from T1 to T90', () => {
+  assert.equal(CAR_ROSTER.length, 90);
   const ids = CAR_ROSTER.map((c) => c.id);
-  assert.deepEqual(ids, [
+  const uniqueIds = new Set(ids);
+  assert.equal(uniqueIds.size, 90, 'All 90 vehicle IDs must be unique');
+
+  // Verify first 14 legacy cars are preserved in order
+  const legacyIds = [
     'blue_jdm',
     'crimson_tuner',
     'emerald_truck',
@@ -64,10 +68,28 @@ test('CAR_ROSTER has 14 distinct progressive drift cars from T1 to T14', () => {
     'crimson_wagon',
     'neon_interceptor',
     'apex_valkyrie',
-  ]);
+  ];
+  for (let i = 0; i < legacyIds.length; i++) {
+    assert.equal(ids[i], legacyIds[i], `Legacy car at index ${i} should be ${legacyIds[i]}`);
+  }
 
+  // Verify progressive tiers 1..90
   const tiers = CAR_ROSTER.map((c) => c.tier);
-  assert.deepEqual(tiers, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+  const expectedTiers = Array.from({ length: 90 }, (_, i) => i + 1);
+  assert.deepEqual(tiers, expectedTiers, 'Tiers must increment strictly 1..90');
+
+  // Verify diverse body shapes
+  const shapes = new Set(CAR_ROSTER.map((c) => c.bodyShape));
+  assert.ok(shapes.has('motorcycle'), 'Must have motorcycle shape');
+  assert.ok(shapes.has('cyber_bike'), 'Must have cyber_bike shape');
+  assert.ok(shapes.has('truck'), 'Must have truck shape');
+  assert.ok(shapes.has('semi'), 'Must have semi shape');
+  assert.ok(shapes.has('van'), 'Must have van shape');
+  assert.ok(shapes.has('formula'), 'Must have formula shape');
+  assert.ok(shapes.has('classic'), 'Must have classic shape');
+  assert.ok(shapes.has('supercar'), 'Must have supercar shape');
+  assert.ok(shapes.has('rally'), 'Must have rally shape');
+  assert.ok(shapes.has('kei'), 'Must have kei shape');
 
   const blueJdm = CAR_ROSTER.find((c) => c.id === 'blue_jdm')!;
   assert.equal(blueJdm.decalText, '73');
