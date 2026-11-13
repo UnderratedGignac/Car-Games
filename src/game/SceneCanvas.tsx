@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -53,7 +53,7 @@ import {
   renderWeirdRoadsideLandmarks3D,
   renderWorldObject3D,
 } from './world3d';
-import { soundFX } from './audio';
+import { soundFX, triggerHaptic } from './audio';
 import {
   ANIME_CLOUD_COUNT,
   SkyAtmosphereConfig,
@@ -99,6 +99,9 @@ interface SceneCanvasProps {
   restartTriggerCount: number;
   flashTriggerCount?: number;
   hornTriggerCount?: number;
+  screenShakeIntensity?: number; // 0.0 (no shake, accessibility safe) to 1.0 (default 1.0)
+  screenShakeMultiplier?: number;
+  controlScheme?: 'classic' | 'wheel' | 'swipe'; // default 'classic'
   onTelemetryUpdate: (telemetry: LiveTelemetry) => void;
   onGameOver: (finalStats: {
     score: number;
@@ -187,6 +190,17 @@ interface FloatingCallout {
   halfW: number;
 }
 
+interface FloatingTextParticle {
+  active: boolean;
+  x: number;
+  y: number;
+  z: number;
+  text: string;
+  color: string;
+  life: number;
+  maxLife: number;
+}
+
 export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
   gamePhase,
   gameMode = 'drift',
@@ -202,6 +216,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
   restartTriggerCount,
   flashTriggerCount = 0,
   hornTriggerCount = 0,
+  screenShakeIntensity,
+  screenShakeMultiplier = 1.0,
+  controlScheme = 'classic',
   onTelemetryUpdate,
   onGameOver,
 }) => {
@@ -209,6 +226,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
   const phaseRef = useRef<GamePhase>(gamePhase);
   phaseRef.current = gamePhase;
+
+  const effectiveShake = screenShakeIntensity !== undefined ? screenShakeIntensity : screenShakeMultiplier;
+  const shakeMultiplierRef = useRef<number>(effectiveShake);
+  shakeMultiplierRef.current = effectiveShake;
+
+  const controlSchemeRef = useRef<'classic' | 'wheel' | 'swipe'>(controlScheme);
+  controlSchemeRef.current = controlScheme;
 
   const gameModeRef = useRef<GameModeId>(gameMode);
   gameModeRef.current = gameMode;
@@ -553,6 +577,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let screenFlashColor = '#ffffff';
     let highBeamTimer = 0;
     let lastBiomeId: RoadBiomeId = resolveRoadBiome(roadModeRef.current, 0).id;
+    let wasGassing = true;
+    let prevSpeedKmh = 0;
+    let turboChirpCooldown = 0;
 
     // Ring buffers for rear & front skid marks + bounded pools for particles & reusable 3D render slices
     const MAX_SKID = 160;
@@ -694,6 +721,52 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       ctx.font = 'bold 8px "Chakra Petch", monospace';
       const halfW = Math.ceil(ctx.measureText(text).width * 0.5) + 4;
       callouts.push({ x, y, z, text, color, life, maxLife: life, halfW });
+    };
+
+    // Pre-allocated pool of 24 floating animated reward text popups (+50 CR, +150 CR) for zero-GC churn
+    const MAX_FLOATING_TEXTS = 24;
+    const floatingTextPool: FloatingTextParticle[] = Array.from({ length: MAX_FLOATING_TEXTS }, () => ({
+      active: false,
+      x: 0,
+      y: 0,
+      z: 0,
+      text: '',
+      color: '#fbbf24',
+      life: 0,
+      maxLife: 0.75,
+    }));
+
+    const spawnFloatingText = (
+      x: number,
+      y: number,
+      z: number,
+      text: string,
+      color = '#fbbf24',
+      duration = 0.75
+    ) => {
+      let slot: FloatingTextParticle | null = null;
+      let minLife = Infinity;
+      let oldestSlot: FloatingTextParticle = floatingTextPool[0];
+      for (let i = 0; i < MAX_FLOATING_TEXTS; i++) {
+        const item = floatingTextPool[i];
+        if (!item.active) {
+          slot = item;
+          break;
+        }
+        if (item.life < minLife) {
+          minLife = item.life;
+          oldestSlot = item;
+        }
+      }
+      const target = slot || oldestSlot;
+      target.active = true;
+      target.x = x;
+      target.y = y;
+      target.z = z;
+      target.text = text;
+      target.color = color;
+      target.life = duration;
+      target.maxLife = duration;
     };
 
     // Pre-allocated 3D road slice pool, prop sort buffer, vehicle sort buffer & scratch projected structs
@@ -882,6 +955,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       debrisChunks.length = 0;
       shockwaves.length = 0;
       callouts.length = 0;
+      for (let i = 0; i < MAX_FLOATING_TEXTS; i++) {
+        floatingTextPool[i].active = false;
+        floatingTextPool[i].life = 0;
+      }
+      wasGassing = true;
+      prevSpeedKmh = 0;
+      turboChirpCooldown = 0;
       valleyProps.length = 0;
       propSpawnCursorZ = driftState.z + 22;
       populateTreesAround(driftState.z);
@@ -913,21 +993,42 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let keyDown = false;
     let keyHandbrake = false;
     const activePointers = new Map<number, number>();
+    const pointerStartX = new Map<number, number>();
+    const pointerCurrentX = new Map<number, number>();
     let pointerSteer = 0;
     let tapImpulseTimer = 0;
     let tapImpulseDir = 0;
 
     const recalcPointerSteer = () => {
-      if (activePointers.size === 0) {
+      if (pointerCurrentX.size === 0) {
         pointerSteer = 0;
         return;
       }
-      let sumX = 0;
-      activePointers.forEach((cx) => {
-        sumX += cx;
-      });
-      const avgX = sumX / activePointers.size;
-      pointerSteer = avgX < window.innerWidth * 0.5 ? -1 : 1;
+      if (controlSchemeRef.current === 'swipe') {
+        let totalSteer = 0;
+        let count = 0;
+        pointerCurrentX.forEach((curX, id) => {
+          const startX = pointerStartX.get(id) ?? curX;
+          const deltaX = curX - startX;
+          if (Math.abs(deltaX) > 10) {
+            // Dragging finger left/right maps to smooth steering hold -1 to +1
+            const dragRatio = Math.max(-1, Math.min(1, deltaX / 75));
+            totalSteer += dragRatio;
+          } else {
+            // Tapping left half steers left (-1) and right half steers right (+1)
+            totalSteer += curX < window.innerWidth * 0.5 ? -1 : 1;
+          }
+          count++;
+        });
+        pointerSteer = count > 0 ? Math.max(-1, Math.min(1, totalSteer / count)) : 0;
+      } else {
+        let sumX = 0;
+        pointerCurrentX.forEach((cx) => {
+          sumX += cx;
+        });
+        const avgX = sumX / pointerCurrentX.size;
+        pointerSteer = avgX < window.innerWidth * 0.5 ? -1 : 1;
+      }
     };
 
     const onPointerDown = (e: PointerEvent) => {
@@ -936,17 +1037,21 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       const target = e.target as HTMLElement | null;
       if (target && target.closest('button[data-hud-btn="true"]')) return;
       activePointers.set(e.pointerId, e.clientX);
+      pointerStartX.set(e.pointerId, e.clientX);
+      pointerCurrentX.set(e.pointerId, e.clientX);
       recalcPointerSteer();
     };
 
     const onPointerMove = (e: PointerEvent) => {
-      if (!activePointers.has(e.pointerId)) return;
-      activePointers.set(e.pointerId, e.clientX);
+      if (!pointerCurrentX.has(e.pointerId)) return;
+      pointerCurrentX.set(e.pointerId, e.clientX);
       recalcPointerSteer();
     };
 
     const onPointerUp = (e: PointerEvent) => {
       activePointers.delete(e.pointerId);
+      pointerStartX.delete(e.pointerId);
+      pointerCurrentX.delete(e.pointerId);
       recalcPointerSteer();
     };
 
@@ -977,6 +1082,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       keyDown = false;
       keyHandbrake = false;
       activePointers.clear();
+      pointerStartX.clear();
+      pointerCurrentX.clear();
       pointerSteer = 0;
     };
 
@@ -1290,6 +1397,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             screenFlashAlpha = 0.28;
             screenFlashColor = '#22d3ee';
             soundFX.playFeverBurst();
+            triggerHaptic('fever');
             pushShockwave({
               x: driftState.x,
               y: driftState.y + 0.15,
@@ -1386,6 +1494,22 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           const stepDist = curSpeed * simDt;
           distance += stepDist;
           wheelSpinPhase += stepDist * 0.65;
+
+          const speedKmhNow = curSpeed * 7.2;
+          if (turboChirpCooldown > 0) turboChirpCooldown -= dt;
+          const isGassingNow = accelInput > 0;
+          if (
+            phase === 'playing' &&
+            !isFalling &&
+            turboChirpCooldown <= 0 &&
+            speedKmhNow > 90 &&
+            ((wasGassing && !isGassingNow) || (brakeInput > 0 && prevSpeedKmh - speedKmhNow > 1.2))
+          ) {
+            turboChirpCooldown = 0.95;
+            soundFX.playTurboChirp();
+          }
+          wasGassing = isGassingNow;
+          prevSpeedKmh = speedKmhNow;
 
           const speedRatio = curSpeed / Math.max(12, stats.topSpeed);
           soundFX.updateEngineSound({
@@ -1506,72 +1630,132 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
           // Check Road / Guardrail Bounds
           if (!roadCheck.onRoad) {
-            // STAGE 1: BREACHED GUARDRAIL -> Shatter Steel Rail, Flash, Shockwave & Launch Over Edge!
-            isFalling = true;
-            fallTimer = 0;
-            explodedInFall = false;
-            breachedSliceIdx = roadCheck.closestPoint ? roadCheck.closestPoint.index : -1;
-            breachedSide = roadCheck.signedPerpOffset >= 0 ? 1 : -1;
-            fallVelX = driftState.vx * 0.86 + breachedSide * 3.8;
-            fallVelZ = driftState.vz * 0.86;
-            fallVelY = 5.4; // Dramatic vault over guardrail
-            hitstopTimer = 0.08;
-            cameraTrauma = 1.0;
-            screenFlashAlpha = 0.72;
-            screenFlashColor = '#fef08a';
-            soundFX.playFallAndDestroy();
+            if (gameModeRef.current === 'zen') {
+              // ZEN MODE: NEVER FALL OR BREACH! Soft rebound & boundary clamping
+              const halfW = roadCheck.halfWidth || 4.9;
+              const maxLat = Math.max(0.5, halfW - 0.20);
+              const clampedLat = Math.max(-maxLat, Math.min(maxLat, roadCheck.signedPerpOffset));
 
-            pushShockwave({
-              x: driftState.x,
-              y: driftState.y + 0.4,
-              z: driftState.z,
-              radius: 0.4,
-              maxRadius: 4.8,
-              color: '#fbbf24',
-              life: 0.36,
-              maxLife: 0.36,
-            });
-            pushCallout(driftState.x, driftState.y + 1.6, driftState.z, 'GUARDRAIL BREACH!', '#fbbf24', 0.85);
+              if (roadCheck.closestPoint) {
+                driftState.x = roadCheck.closestPoint.x + roadCheck.closestPoint.nx * clampedLat;
+                driftState.z = roadCheck.closestPoint.z + roadCheck.closestPoint.nz * clampedLat;
 
-            // Shatter Twisted Steel Guardrail Beam Chunks + Blazing Sparks!
-            const activeBiomeNow = resolveRoadBiome(roadModeRef.current, distance);
-            for (let i = 0; i < 8; i++) {
-              const ang = Math.random() * Math.PI * 2;
-              const spd = 3 + Math.random() * 7;
-              pushDebrisChunk({
+                const vFwd = driftState.vx * roadCheck.closestPoint.tx + driftState.vz * roadCheck.closestPoint.tz;
+                const vLat = driftState.vx * roadCheck.closestPoint.nx + driftState.vz * roadCheck.closestPoint.nz;
+                const bounceSign = clampedLat >= 0 ? -1 : 1;
+                const reboundVLat = bounceSign * Math.abs(vLat) * 0.4;
+
+                driftState.vx = roadCheck.closestPoint.tx * vFwd + roadCheck.closestPoint.nx * reboundVLat;
+                driftState.vz = roadCheck.closestPoint.tz * vFwd + roadCheck.closestPoint.nz * reboundVLat;
+              }
+
+              soundFX.playGearShift();
+              triggerHaptic('light');
+              cameraTrauma = Math.min(0.25, cameraTrauma + 0.12);
+              pushCallout(driftState.x, driftState.y + 1.6, driftState.z, 'CHILL FLOW', '#38bdf8', 0.65);
+
+              // Soft dust and gentle sparks
+              for (let i = 0; i < 4; i++) {
+                const ang = Math.random() * Math.PI * 2;
+                pushDebrisChunk({
+                  x: driftState.x,
+                  y: driftState.y + 0.35,
+                  z: driftState.z,
+                  vx: Math.cos(ang) * (1.5 + Math.random() * 2.5),
+                  vy: 1.2 + Math.random() * 1.8,
+                  vz: Math.sin(ang) * (1.5 + Math.random() * 2.5),
+                  size: 0.18,
+                  w: 0.25,
+                  h: 0.15,
+                  gravity: 10,
+                  rot: Math.random() * 4,
+                  vRot: (Math.random() - 0.5) * 6,
+                  life: 0.4,
+                  color: '#93c5fd',
+                });
+              }
+              pushSmokePuff({
                 x: driftState.x,
-                y: driftState.y + 0.5,
+                y: driftState.y + 0.2,
                 z: driftState.z,
-                vx: Math.cos(ang) * spd + breachedSide * 2.4,
-                vy: 3.5 + Math.random() * 5,
-                vz: Math.sin(ang) * spd,
-                size: 0.5,
-                w: 1.4,
-                h: 0.24,
-                gravity: 22,
-                rot: Math.random() * 6,
-                vRot: (Math.random() - 0.5) * 16,
-                life: 1.05,
-                color: i % 2 === 0 ? activeBiomeNow.railLight : '#334155',
+                vx: (Math.random() - 0.5) * 1.2,
+                vy: 0.8 + Math.random() * 0.6,
+                vz: (Math.random() - 0.5) * 1.2,
+                radius: 0.3,
+                maxRadius: 0.9,
+                life: 0.35,
+                maxLife: 0.35,
+                tint: 'cyan',
               });
-            }
-            for (let i = 0; i < 24; i++) {
-              const ang = Math.random() * Math.PI * 2;
-              const spd = 5 + Math.random() * 12;
-              pushDebrisChunk({
+            } else {
+              // STAGE 1: BREACHED GUARDRAIL -> Shatter Steel Rail, Flash, Shockwave & Launch Over Edge!
+              isFalling = true;
+              fallTimer = 0;
+              explodedInFall = false;
+              breachedSliceIdx = roadCheck.closestPoint ? roadCheck.closestPoint.index : -1;
+              breachedSide = roadCheck.signedPerpOffset >= 0 ? 1 : -1;
+              fallVelX = driftState.vx * 0.86 + breachedSide * 3.8;
+              fallVelZ = driftState.vz * 0.86;
+              fallVelY = 5.4; // Dramatic vault over guardrail
+              hitstopTimer = 0.08;
+              cameraTrauma = 1.0;
+              screenFlashAlpha = 0.72;
+              screenFlashColor = '#fef08a';
+              soundFX.playFallAndDestroy();
+              triggerHaptic('heavy');
+
+              pushShockwave({
                 x: driftState.x,
-                y: driftState.y + 0.6,
+                y: driftState.y + 0.4,
                 z: driftState.z,
-                vx: Math.cos(ang) * spd,
-                vy: 3 + Math.random() * 7,
-                vz: Math.sin(ang) * spd,
-                size: 0.24 + Math.random() * 0.28,
-                gravity: 18,
-                rot: Math.random() * 6,
-                vRot: (Math.random() - 0.5) * 18,
-                life: 0.65,
-                color: i % 3 === 0 ? '#fef08a' : i % 3 === 1 ? '#fbbf24' : '#f97316',
+                radius: 0.4,
+                maxRadius: 4.8,
+                color: '#fbbf24',
+                life: 0.36,
+                maxLife: 0.36,
               });
+              pushCallout(driftState.x, driftState.y + 1.6, driftState.z, 'GUARDRAIL BREACH!', '#fbbf24', 0.85);
+
+              // Shatter Twisted Steel Guardrail Beam Chunks + Blazing Sparks!
+              const activeBiomeNow = resolveRoadBiome(roadModeRef.current, distance);
+              for (let i = 0; i < 8; i++) {
+                const ang = Math.random() * Math.PI * 2;
+                const spd = 3 + Math.random() * 7;
+                pushDebrisChunk({
+                  x: driftState.x,
+                  y: driftState.y + 0.5,
+                  z: driftState.z,
+                  vx: Math.cos(ang) * spd + breachedSide * 2.4,
+                  vy: 3.5 + Math.random() * 5,
+                  vz: Math.sin(ang) * spd,
+                  size: 0.5,
+                  w: 1.4,
+                  h: 0.24,
+                  gravity: 22,
+                  rot: Math.random() * 6,
+                  vRot: (Math.random() - 0.5) * 16,
+                  life: 1.05,
+                  color: i % 2 === 0 ? activeBiomeNow.railLight : '#334155',
+                });
+              }
+              for (let i = 0; i < 24; i++) {
+                const ang = Math.random() * Math.PI * 2;
+                const spd = 5 + Math.random() * 12;
+                pushDebrisChunk({
+                  x: driftState.x,
+                  y: driftState.y + 0.6,
+                  z: driftState.z,
+                  vx: Math.cos(ang) * spd,
+                  vy: 3 + Math.random() * 7,
+                  vz: Math.sin(ang) * spd,
+                  size: 0.24 + Math.random() * 0.28,
+                  gravity: 18,
+                  rot: Math.random() * 6,
+                  vRot: (Math.random() - 0.5) * 18,
+                  life: 0.65,
+                  color: i % 3 === 0 ? '#fef08a' : i % 3 === 1 ? '#fbbf24' : '#f97316',
+                });
+              }
             }
           } else {
             if (coinStreakTimer > 0) {
@@ -1594,17 +1778,35 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             if (driftingNow) {
               const curSide = visualDriftAngle >= 0 ? 1 : -1;
               if (lastDriftSide !== 0 && curSide !== lastDriftSide && Math.abs(visualDriftAngle) > 0.32) {
+                const prevCombo = combo;
                 combo = Math.min(25, combo + 1);
                 if (combo > maxCombo) maxCombo = combo;
                 const switchBonus = 250 * combo;
                 score += switchBonus;
                 soundFX.playStyleSwitch(combo);
+                triggerHaptic('medium');
+
+                const hitMilestone =
+                  (prevCombo < 5 && combo >= 5) ||
+                  (prevCombo < 10 && combo >= 10) ||
+                  (prevCombo < 15 && combo >= 15) ||
+                  (prevCombo < 20 && combo >= 20);
+                if (hitMilestone) {
+                  triggerHaptic('double');
+                }
+
+                let hypeCallout = '';
+                if (combo >= 20) hypeCallout = 'UNSTOPPABLE DRIFT GOD!';
+                else if (combo >= 15) hypeCallout = 'APEX PREDATOR!';
+                else if (combo >= 10) hypeCallout = 'DRIFT DEMON!';
+                else if (combo >= 5) hypeCallout = 'SLICK WEAVE!';
+
                 pushCallout(
                   driftState.x,
                   driftState.y + 1.85,
                   driftState.z,
-                  `STYLE SWITCH! +${switchBonus}`,
-                  '#22d3ee',
+                  hypeCallout ? `${hypeCallout} +${switchBonus}` : `STYLE SWITCH! +${switchBonus}`,
+                  combo >= 15 ? '#ec4899' : '#22d3ee',
                   0.95
                 );
                 lastDriftSide = curSide;
@@ -1616,16 +1818,43 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               driftSustainTimer += simDt;
               if (!wasDrifting || driftSustainTimer > 0.65) {
                 driftSustainTimer = 0;
+                const prevCombo = combo;
                 combo = Math.min(25, combo + 1);
                 if (combo > maxCombo) maxCombo = combo;
                 soundFX.playDriftFlip(combo, isFever);
+
+                const hitMilestone =
+                  (prevCombo < 5 && combo >= 5) ||
+                  (prevCombo < 10 && combo >= 10) ||
+                  (prevCombo < 15 && combo >= 15) ||
+                  (prevCombo < 20 && combo >= 20);
+                if (hitMilestone) {
+                  triggerHaptic('double');
+                }
+
+                let hypeCallout = '';
+                let hypeColor = isFever ? '#22d3ee' : '#fbbf24';
+                if (combo >= 20) {
+                  hypeCallout = 'UNSTOPPABLE DRIFT GOD!';
+                  hypeColor = '#ec4899';
+                } else if (combo >= 15) {
+                  hypeCallout = 'APEX PREDATOR!';
+                  hypeColor = '#a855f7';
+                } else if (combo >= 10) {
+                  hypeCallout = 'DRIFT DEMON!';
+                  hypeColor = '#ef4444';
+                } else if (combo >= 5) {
+                  hypeCallout = 'SLICK WEAVE!';
+                  hypeColor = '#22d3ee';
+                }
+
                 pushCallout(
                   driftState.x,
-                  driftState.y + 1.4,
+                  driftState.y + (hypeCallout ? 1.6 : 1.4),
                   driftState.z,
-                  `DRIFT x${combo}`,
-                  isFever ? '#22d3ee' : '#fbbf24',
-                  0.75
+                  hypeCallout ? `${hypeCallout} x${combo}` : `DRIFT x${combo}`,
+                  hypeColor,
+                  hypeCallout ? 0.95 : 0.75
                 );
               }
             } else {
@@ -1640,6 +1869,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               isFever,
               nearEdge: hardRailScrape,
               isDrifting: driftingNow,
+              gameMode: gameModeRef.current,
             });
             score += scoreDelta;
 
@@ -1651,6 +1881,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 screenFlashAlpha = 0.26;
                 screenFlashColor = '#22d3ee';
                 soundFX.playFeverBurst();
+                triggerHaptic('fever');
                 pushShockwave({
                   x: driftState.x,
                   y: driftState.y + 0.15,
@@ -1661,14 +1892,17 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   life: 0.42,
                   maxLife: 0.42,
                 });
-                nearMissText = 'OVERDRIVE FEVER x2.5!';
+                nearMissText = gameModeRef.current === 'zen' ? 'ZEN FLOW BOOST!' : 'OVERDRIVE FEVER x2.5!';
                 nearMissTimer = 1.6;
               }
             }
 
             if (hardRailScrape) {
               if (nearMissTimer <= 0) {
-                nearMissText = `RAIL SCRAPE! +${Math.round(scoreDelta * 4)}`;
+                nearMissText =
+                  gameModeRef.current === 'zen'
+                    ? 'ZEN FLOW'
+                    : `RAIL SCRAPE! +${Math.round(scoreDelta * 4)}`;
                 nearMissTimer = 0.65;
               }
               if (Math.random() < 0.75) {
@@ -1690,6 +1924,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               if (sparkAudioCooldown <= 0) {
                 sparkAudioCooldown = 0.15;
                 soundFX.playGuardrailSpark();
+                triggerHaptic('heavy');
               }
             }
 
@@ -1751,7 +1986,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                     const gained = Math.max(1, Math.round(2 * stats.coinMultiplier));
                     coinsRun += gained;
                     score += 50 * combo + coinStreak * 20;
-                    soundFX.playCoinPickup(combo);
+                    soundFX.playCoinPickup(coinStreak);
+                    triggerHaptic('light');
+                    spawnFloatingText(pt.coinX, pt.y + 0.85, pt.coinZ, '+50 CR', '#fbbf24', 0.75);
                     // Golden pickup sparkle burst
                     for (let k = 0; k < 6; k++) {
                       const a = (k / 6) * Math.PI * 2 + Math.random() * 0.4;
@@ -1795,6 +2032,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                     fever = Math.min(100, fever + 25);
                     score += 250 * combo;
                     soundFX.playStarPickup();
+                    triggerHaptic('light');
+                    spawnFloatingText(pt.coinX, pt.y + 0.85, pt.coinZ, '+150 CR', '#fef08a', 0.75);
                     pushShockwave({
                       x: pt.coinX,
                       y: pt.y + 0.65,
@@ -1847,6 +2086,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   screenFlashAlpha = 0.22;
                   screenFlashColor = '#22d3ee';
                   soundFX.playFeverBurst();
+                  triggerHaptic('fever');
                   pushShockwave({
                     x: pt.boostX,
                     y: pt.y + 0.15,
@@ -1965,87 +2205,132 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
               if (trafficEval.collidedCar) {
                 const hit = trafficEval.collidedCar;
-                isTrafficCrash = true;
-                trafficCrashTimer = 0;
-                crashReason = hit.isOncoming ? 'Head-On Collision' : 'Traffic Impact';
-                hitstopTimer = 0.09;
-                cameraTrauma = 1.0;
-                screenFlashAlpha = 0.85;
-                screenFlashColor = hit.isOncoming ? '#fef08a' : '#ef4444';
-                soundFX.playFallAndDestroy();
+                if (gameModeRef.current === 'zen') {
+                  // ZEN MODE: Gentle deflection occurs without wrecking
+                  const defSide: -1 | 1 = roadCheck.signedPerpOffset >= hit.lateralOffset ? 1 : -1;
+                  const halfW = roadCheck.halfWidth || 4.9;
+                  const maxLat = Math.max(0.5, halfW - 0.20);
+                  const targetOffset = hit.lateralOffset + defSide * (0.90 + hit.halfWidth + 0.35);
+                  const clampedLat = Math.max(-maxLat, Math.min(maxLat, targetOffset));
 
-                pushShockwave({
-                  x: driftState.x,
-                  y: driftState.y + 0.3,
-                  z: driftState.z,
-                  radius: 0.5,
-                  maxRadius: 7.2,
-                  color: '#fef08a',
-                  life: 0.5,
-                  maxLife: 0.5,
-                });
-                pushShockwave({
-                  x: driftState.x,
-                  y: driftState.y + 0.3,
-                  z: driftState.z,
-                  radius: 0.4,
-                  maxRadius: 5.5,
-                  color: '#ef4444',
-                  life: 0.4,
-                  maxLife: 0.4,
-                });
-                pushCallout(
-                  driftState.x,
-                  driftState.y + 2.1,
-                  driftState.z,
-                  hit.isOncoming ? 'HEAD-ON CRASH!' : 'TRAFFIC WRECK!',
-                  '#ef4444',
-                  0.9
-                );
+                  if (roadCheck.closestPoint) {
+                    driftState.x = roadCheck.closestPoint.x + roadCheck.closestPoint.nx * clampedLat;
+                    driftState.z = roadCheck.closestPoint.z + roadCheck.closestPoint.nz * clampedLat;
 
-                const wreckColors = [
-                  currentCar.primaryColor,
-                  hit.color,
-                  '#1e293b',
-                  '#ef4444',
-                  '#f97316',
-                  '#fef08a',
-                ];
-                for (let k = 0; k < 44; k++) {
-                  const ang = Math.random() * Math.PI * 2;
-                  const spd = 4 + Math.random() * 14;
-                  const isPanel = k < 12;
-                  pushDebrisChunk({
+                    const vFwd = driftState.vx * roadCheck.closestPoint.tx + driftState.vz * roadCheck.closestPoint.tz;
+                    const reboundVLat = defSide * Math.max(1.5, Math.abs(driftState.vx * roadCheck.closestPoint.nx + driftState.vz * roadCheck.closestPoint.nz) * 0.4);
+                    driftState.vx = roadCheck.closestPoint.tx * vFwd + roadCheck.closestPoint.nx * reboundVLat;
+                    driftState.vz = roadCheck.closestPoint.tz * vFwd + roadCheck.closestPoint.nz * reboundVLat;
+                  }
+
+                  soundFX.playGearShift();
+                  triggerHaptic('light');
+                  cameraTrauma = Math.min(0.2, cameraTrauma + 0.1);
+                  pushCallout(driftState.x, driftState.y + 1.8, driftState.z, 'SMOOTH DEFLECT', '#38bdf8', 0.65);
+
+                  for (let k = 0; k < 5; k++) {
+                    const ang = Math.random() * Math.PI * 2;
+                    pushDebrisChunk({
+                      x: driftState.x,
+                      y: driftState.y + 0.35,
+                      z: driftState.z,
+                      vx: Math.cos(ang) * (1.8 + Math.random() * 2),
+                      vy: 1.2 + Math.random() * 1.5,
+                      vz: Math.sin(ang) * (1.8 + Math.random() * 2),
+                      size: 0.18,
+                      w: 0.2,
+                      h: 0.2,
+                      gravity: 10,
+                      rot: Math.random() * 4,
+                      vRot: (Math.random() - 0.5) * 6,
+                      life: 0.35,
+                      color: '#67e8f9',
+                    });
+                  }
+                } else {
+                  isTrafficCrash = true;
+                  trafficCrashTimer = 0;
+                  crashReason = hit.isOncoming ? 'Head-On Collision' : 'Traffic Impact';
+                  hitstopTimer = 0.09;
+                  cameraTrauma = 1.0;
+                  screenFlashAlpha = 0.85;
+                  screenFlashColor = hit.isOncoming ? '#fef08a' : '#ef4444';
+                  soundFX.playFallAndDestroy();
+                  triggerHaptic('heavy');
+
+                  pushShockwave({
                     x: driftState.x,
-                    y: driftState.y + 0.5,
+                    y: driftState.y + 0.3,
                     z: driftState.z,
-                    vx: Math.cos(ang) * spd,
-                    vy: 5 + Math.random() * 11,
-                    vz: Math.sin(ang) * spd,
-                    size: isPanel ? 0.52 : 0.36 + Math.random() * 0.4,
-                    w: isPanel ? 0.85 : undefined,
-                    h: isPanel ? 0.42 : undefined,
-                    gravity: 23,
-                    rot: Math.random() * 6,
-                    vRot: (Math.random() - 0.5) * 18,
-                    life: 0.95,
-                    color: wreckColors[k % wreckColors.length],
+                    radius: 0.5,
+                    maxRadius: 7.2,
+                    color: '#fef08a',
+                    life: 0.5,
+                    maxLife: 0.5,
                   });
-                }
-                for (let k = 0; k < 18; k++) {
-                  pushSmokePuff({
-                    x: driftState.x + (Math.random() - 0.5) * 2.0,
-                    y: driftState.y + 0.5,
-                    z: driftState.z + (Math.random() - 0.5) * 2.0,
-                    vx: (Math.random() - 0.5) * 6,
-                    vy: 3.0 + Math.random() * 5.5,
-                    vz: (Math.random() - 0.5) * 6,
-                    radius: 0.85,
-                    maxRadius: 2.9,
-                    life: 0.8,
-                    maxLife: 0.8,
-                    tint: k % 3 === 0 ? 'dark' : 'fire',
+                  pushShockwave({
+                    x: driftState.x,
+                    y: driftState.y + 0.3,
+                    z: driftState.z,
+                    radius: 0.4,
+                    maxRadius: 5.5,
+                    color: '#ef4444',
+                    life: 0.4,
+                    maxLife: 0.4,
                   });
+                  pushCallout(
+                    driftState.x,
+                    driftState.y + 2.1,
+                    driftState.z,
+                    hit.isOncoming ? 'HEAD-ON CRASH!' : 'TRAFFIC WRECK!',
+                    '#ef4444',
+                    0.9
+                  );
+
+                  const wreckColors = [
+                    currentCar.primaryColor,
+                    hit.color,
+                    '#1e293b',
+                    '#ef4444',
+                    '#f97316',
+                    '#fef08a',
+                  ];
+                  for (let k = 0; k < 44; k++) {
+                    const ang = Math.random() * Math.PI * 2;
+                    const spd = 4 + Math.random() * 14;
+                    const isPanel = k < 12;
+                    pushDebrisChunk({
+                      x: driftState.x,
+                      y: driftState.y + 0.5,
+                      z: driftState.z,
+                      vx: Math.cos(ang) * spd,
+                      vy: 5 + Math.random() * 11,
+                      vz: Math.sin(ang) * spd,
+                      size: isPanel ? 0.52 : 0.36 + Math.random() * 0.4,
+                      w: isPanel ? 0.85 : undefined,
+                      h: isPanel ? 0.42 : undefined,
+                      gravity: 23,
+                      rot: Math.random() * 6,
+                      vRot: (Math.random() - 0.5) * 18,
+                      life: 0.95,
+                      color: wreckColors[k % wreckColors.length],
+                    });
+                  }
+                  for (let k = 0; k < 18; k++) {
+                    pushSmokePuff({
+                      x: driftState.x + (Math.random() - 0.5) * 2.0,
+                      y: driftState.y + 0.5,
+                      z: driftState.z + (Math.random() - 0.5) * 2.0,
+                      vx: (Math.random() - 0.5) * 6,
+                      vy: 3.0 + Math.random() * 5.5,
+                      vz: (Math.random() - 0.5) * 6,
+                      radius: 0.85,
+                      maxRadius: 2.9,
+                      life: 0.8,
+                      maxLife: 0.8,
+                      tint: k % 3 === 0 ? 'dark' : 'fire',
+                    });
+                  }
                 }
               } else {
                 // Slipstream Drafting evaluation behind same-lane traffic!
@@ -2070,6 +2355,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 // Near Miss / Oncoming Dodge Rewards
                 for (const nm of trafficEval.newlyNearMissed) {
                   nearMisses += 1;
+                  const prevCombo = combo;
                   combo = Math.min(25, combo + 1);
                   if (combo > maxCombo) maxCombo = combo;
                   overtakeChain += 1;
@@ -2078,10 +2364,35 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   score += bonus;
                   fever = Math.min(100, fever + (nm.isOncoming ? 18 : 13));
                   soundFX.playNearMiss(nm.isOncoming);
+                  triggerHaptic('medium');
+
+                  const hitMilestone =
+                    (prevCombo < 5 && combo >= 5) ||
+                    (prevCombo < 10 && combo >= 10) ||
+                    (prevCombo < 15 && combo >= 15) ||
+                    (prevCombo < 20 && combo >= 20);
+                  if (hitMilestone) {
+                    triggerHaptic('double');
+                  }
                   cameraTrauma = Math.min(1, cameraTrauma + 0.18);
-                  nearMissText = nm.isOncoming
-                    ? `ONCOMING DODGE! +${bonus}`
-                    : `CLOSE PASS! +${bonus}`;
+                  if (gameModeRef.current === 'zen') {
+                    const zenPhrases = ['CHILL VIBES', 'SMOOTH FLOW', 'SERENITY CRUISE'];
+                    const phrase = zenPhrases[Math.floor(Math.random() * zenPhrases.length)];
+                    nearMissText = `${phrase}! +${bonus}`;
+                    pushCallout(driftState.x, driftState.y + 1.85, driftState.z, phrase, '#38bdf8', 0.95);
+                  } else {
+                    nearMissText = nm.isOncoming
+                      ? `ONCOMING DODGE! +${bonus}`
+                      : `CLOSE PASS! +${bonus}`;
+                    pushCallout(
+                      driftState.x,
+                      driftState.y + 1.85,
+                      driftState.z,
+                      nm.isOncoming ? `ONCOMING DODGE! +${bonus}` : `NEAR MISS! +${bonus}`,
+                      nm.isOncoming ? '#f472b6' : '#22d3ee',
+                      0.95
+                    );
+                  }
                   nearMissTimer = 1.2;
                   pushShockwave({
                     x: driftState.x,
@@ -2093,14 +2404,6 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                     life: 0.3,
                     maxLife: 0.3,
                   });
-                  pushCallout(
-                    driftState.x,
-                    driftState.y + 1.85,
-                    driftState.z,
-                    nm.isOncoming ? `ONCOMING DODGE! +${bonus}` : `NEAR MISS! +${bonus}`,
-                    nm.isOncoming ? '#f472b6' : '#22d3ee',
-                    0.95
-                  );
                 }
 
                 // Clean Overtake & Slipstream Slingshot Rewards
@@ -2110,6 +2413,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   if (combo > maxCombo) maxCombo = combo;
                   overtakeChain += 1;
                   overtakeChainTimer = 3.4;
+                  if (overtakeChain >= 2) {
+                    triggerHaptic('double');
+                  }
                   const wasSlipstreamed = slipstreamCarId === ov.id && slipstreamCharge >= 0.32;
                   const streakLabel = getOvertakeStreakLabel(overtakeChain);
                   const ovBonus = (ov.isOncoming ? 260 : 220) * combo + (wasSlipstreamed ? 350 : 0);
@@ -2406,7 +2712,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
       cameraTrauma = Math.max(0, cameraTrauma - dt * 2.1);
       if (screenFlashAlpha > 0) screenFlashAlpha = Math.max(0, screenFlashAlpha - dt * 2.4);
-      const shakeMag = cameraTrauma * cameraTrauma * 9;
+      const shakeMag = cameraTrauma * cameraTrauma * 9 * (shakeMultiplierRef.current ?? 1.0);
       const shakeX = (Math.random() - 0.5) * shakeMag;
       const shakeY = (Math.random() - 0.5) * shakeMag;
 
@@ -3453,17 +3759,21 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   ? 'brake'
                   : 'gas'
                 : 'coast';
+            const isWrecked =
+              gameModeRef.current === 'zen'
+                ? false
+                : (isFalling && explodedInFall) || isTrafficCrash;
             const spriteCanvas = getPixelCarCanvas(
               currentCar,
               visualDriftAngle,
               isFever,
-              (isFalling && explodedInFall) || isTrafficCrash,
+              isWrecked,
               wheelSpinPhase,
               carCustomRef.current,
               activePedalMode,
               isHighBeamPulse
             );
-            if (isFalling || isTrafficCrash) {
+            if ((isFalling || isTrafficCrash) && gameModeRef.current !== 'zen') {
               ctx.save();
               ctx.translate(cx, cy);
               ctx.rotate(fallRotation);
@@ -3600,6 +3910,39 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         }
       }
 
+      // L1. Floating Animated Reward Text Popups (+50 CR, +150 CR) with Zero GC Churn
+      for (let i = 0; i < MAX_FLOATING_TEXTS; i++) {
+        const ftp = floatingTextPool[i];
+        if (!ftp.active) continue;
+        ftp.life -= dt;
+        if (ftp.life <= 0) {
+          ftp.active = false;
+          continue;
+        }
+        const progress = 1 - ftp.life / ftp.maxLife; // 0 to 1
+        const riseY = ftp.y + progress * 1.5;
+        if (!projectInto(ftp.x, riseY, ftp.z, pScratchTmp)) continue;
+
+        const tx = Math.round(pScratchTmp.x);
+        const ty = Math.round(pScratchTmp.y);
+        if (tx < -40 || tx > pxW + 40 || ty < -20 || ty > pxH + 20) continue;
+
+        const alpha = Math.max(0, Math.min(1, ftp.life / (ftp.maxLife * 0.4)));
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.font = 'bold 9px "Chakra Petch", monospace';
+        ctx.textAlign = 'center';
+
+        // Drop shadow outline for crisp readability
+        ctx.fillStyle = '#090d16';
+        ctx.fillText(ftp.text, tx + 1, ty + 1);
+
+        // Golden reward text
+        ctx.fillStyle = ftp.color;
+        ctx.fillText(ftp.text, tx, ty);
+        ctx.restore();
+      }
+
       // L2. Slipstream Wind-Tunnel Ribbons connecting drafted traffic car -> hero car hood!
       if (phase === 'playing' && isHighwayMode && slipstreamCarId !== null && slipstreamCharge > 0.15) {
         let draftTarget: TrafficCarState | undefined;
@@ -3659,6 +4002,62 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           ctx.lineTo(Math.round(vpX + Math.cos(ang) * rEnd), Math.round(vpY + Math.sin(ang) * rEnd * 1.15));
         }
         ctx.stroke();
+      }
+
+      // N. Dynamic Speed Vignette Border Glow (cyan in fever, amber/gold in high speed > 180 km/h)
+      const currentKmh = curSpeedNow * 7.2;
+      const showSpeedVignette = phase === 'playing' && (isFever || currentKmh > 180);
+      if (showSpeedVignette) {
+        ctx.save();
+        const pulse = 0.65 + Math.sin(now * 0.009) * 0.25;
+        const isFeverVignette = isFever;
+        const edgeColorCenter = isFeverVignette
+          ? 'rgba(34, 211, 238, 0)'
+          : 'rgba(251, 191, 36, 0)';
+        const edgeColorMid = isFeverVignette
+          ? `rgba(34, 211, 238, ${(0.14 * pulse).toFixed(3)})`
+          : `rgba(251, 191, 36, ${(0.12 * pulse).toFixed(3)})`;
+        const edgeColorOuter = isFeverVignette
+          ? `rgba(34, 211, 238, ${(0.38 * pulse).toFixed(3)})`
+          : `rgba(251, 191, 36, ${(0.32 * pulse).toFixed(3)})`;
+
+        // Soft radial vignette glow from screen center to perimeter
+        const cx = pxW * 0.5;
+        const cy = pxH * 0.5;
+        const rInner = Math.min(pxW, pxH) * 0.38;
+        const rOuter = Math.hypot(cx, cy);
+        const vigGrad = ctx.createRadialGradient(cx, cy, rInner, cx, cy, rOuter);
+        vigGrad.addColorStop(0, edgeColorCenter);
+        vigGrad.addColorStop(0.68, edgeColorMid);
+        vigGrad.addColorStop(1, edgeColorOuter);
+        ctx.fillStyle = vigGrad;
+        ctx.fillRect(0, 0, pxW, pxH);
+
+        // Neon border edge pulse outline
+        ctx.strokeStyle = isFeverVignette
+          ? `rgba(34, 211, 238, ${(0.45 * pulse).toFixed(3)})`
+          : `rgba(251, 191, 36, ${(0.40 * pulse).toFixed(3)})`;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(1, 1, pxW - 2, pxH - 2);
+
+        // Subtle corner glow accents
+        const cornerLen = 14;
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = isFeverVignette
+          ? `rgba(165, 243, 252, ${(0.65 * pulse).toFixed(3)})`
+          : `rgba(254, 240, 138, ${(0.60 * pulse).toFixed(3)})`;
+        ctx.beginPath();
+        // Top-left
+        ctx.moveTo(1, cornerLen); ctx.lineTo(1, 1); ctx.lineTo(cornerLen, 1);
+        // Top-right
+        ctx.moveTo(pxW - cornerLen - 1, 1); ctx.lineTo(pxW - 1, 1); ctx.lineTo(pxW - 1, cornerLen);
+        // Bottom-left
+        ctx.moveTo(1, pxH - cornerLen - 1); ctx.lineTo(1, pxH - 1); ctx.lineTo(cornerLen, pxH - 1);
+        // Bottom-right
+        ctx.moveTo(pxW - cornerLen - 1, pxH - 1); ctx.lineTo(pxW - 1, pxH - 1); ctx.lineTo(pxW - 1, pxH - 1 - cornerLen);
+        ctx.stroke();
+
+        ctx.restore();
       }
 
       // O. Impact & Overdrive Screen Flash Overlay

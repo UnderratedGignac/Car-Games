@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -3316,8 +3316,21 @@ export function calculateDriftScoreStep(params: {
   isFever: boolean;
   nearEdge: boolean;
   isDrifting?: boolean;
+  gameMode?: GameModeId;
 }): { scoreDelta: number; feverDelta: number } {
-  const { distanceDelta, combo, isFever, nearEdge, isDrifting } = params;
+  const { distanceDelta, combo, isFever, nearEdge, isDrifting, gameMode } = params;
+
+  if (gameMode === 'zen') {
+    const zen = calculateZenScoreStep({
+      distanceDelta,
+      smoothFlowBonus: !nearEdge,
+    });
+    return {
+      scoreDelta: zen.scoreDelta,
+      feverDelta: distanceDelta * 2.0,
+    };
+  }
+
   const base = distanceDelta * 12;
   const driftBonus = isDrifting ? 1.8 : 1.0;
   const edgeBonus = nearEdge ? 1.65 : 1.0;
@@ -3332,10 +3345,120 @@ export function calculateDriftScoreStep(params: {
 
 /**
  * ============================================================================
+ * ZEN CRUISE MODE (Endless, Stress-Free Scenic Touge & Highway Cruise)
+ * ============================================================================
+ */
+export interface ZenBounceResult {
+  bounced: boolean;
+  clampedOffset: number;
+  reboundVelocity: number;
+}
+
+/**
+ * In Zen mode, guardrail contact gently bounces the vehicle inward with soft dampening
+ * (Math.abs(lateralVelocity) * 0.4) and clamps position within track boundaries without wrecking.
+ */
+export function evaluateZenGuardrailBounce(params: {
+  lateralOffset: number;
+  lateralVelocity: number;
+  halfRoadWidth: number;
+  boundaryPadding?: number;
+}): ZenBounceResult {
+  const { lateralOffset, lateralVelocity, halfRoadWidth, boundaryPadding } = params;
+  const padding = boundaryPadding ?? (halfRoadWidth > 40 ? 20 : 0.20);
+  const maxBound = Math.max(0.5, halfRoadWidth - padding);
+  const minBound = -maxBound;
+
+  if (lateralOffset > maxBound) {
+    return {
+      bounced: true,
+      clampedOffset: maxBound,
+      reboundVelocity: -Math.abs(lateralVelocity) * 0.4,
+    };
+  }
+
+  if (lateralOffset < minBound) {
+    return {
+      bounced: true,
+      clampedOffset: minBound,
+      reboundVelocity: Math.abs(lateralVelocity) * 0.4,
+    };
+  }
+
+  return {
+    bounced: false,
+    clampedOffset: lateralOffset,
+    reboundVelocity: lateralVelocity,
+  };
+}
+
+export interface ZenDeflectionResult {
+  deflected: boolean;
+  newPlayerOffset: number;
+  deflectionImpulse: number;
+}
+
+/**
+ * In Zen mode, obstacles or traffic cause gentle sideways deflection without fatal wrecks.
+ */
+export function evaluateZenTrafficDeflection(params: {
+  playerLateralOffset: number;
+  trafficLateralOffset: number;
+  playerHalfWidth?: number;
+  trafficHalfWidth?: number;
+  roadHalfWidth?: number;
+}): ZenDeflectionResult {
+  const {
+    playerLateralOffset,
+    trafficLateralOffset,
+    playerHalfWidth = 0.90,
+    trafficHalfWidth = 0.94,
+    roadHalfWidth = 4.9, // Half of 9.8m HIGHWAY_ROAD_WIDTH
+  } = params;
+
+  const minSeparation = (playerHalfWidth + trafficHalfWidth) * 0.82;
+  const diff = playerLateralOffset - trafficLateralOffset;
+  if (Math.abs(diff) < minSeparation) {
+    const sideSign = diff >= 0 ? 1 : -1;
+    const padding = roadHalfWidth > 40 ? 20 : 0.20;
+    const maxBound = Math.max(0.5, roadHalfWidth - padding);
+    const targetOffset = trafficLateralOffset + sideSign * (playerHalfWidth + trafficHalfWidth + 0.35);
+    const clampedOffset = Math.max(-maxBound, Math.min(maxBound, targetOffset));
+    return {
+      deflected: true,
+      newPlayerOffset: Number(clampedOffset.toFixed(2)),
+      deflectionImpulse: sideSign * 2.5,
+    };
+  }
+
+  return {
+    deflected: false,
+    newPlayerOffset: playerLateralOffset,
+    deflectionImpulse: 0,
+  };
+}
+
+/**
+ * Zen scoring calculates smooth "Chill Cruise Distance" and "Zen Flow" points
+ * with zero timer stress or punishing multipliers.
+ */
+export function calculateZenScoreStep(params: {
+  distanceDelta: number;
+  smoothFlowBonus?: boolean;
+}): { scoreDelta: number; flowPoints: number; distancePoints: number } {
+  const { distanceDelta, smoothFlowBonus = true } = params;
+  const distancePoints = Math.max(0, distanceDelta * 10);
+  const flowPoints = smoothFlowBonus ? Math.max(0, distanceDelta * 6) : 0;
+  const scoreDelta = Math.round(distancePoints + flowPoints);
+  return { scoreDelta, flowPoints, distancePoints };
+}
+
+/**
+ * ============================================================================
  * 2-LANE HIGHWAY TRAFFIC MODE (Overtaking Same-Lane & Dodging Oncoming Cars)
  * ============================================================================
  */
-export type GameModeId = 'drift' | 'highway_traffic';
+export type GameModeId = 'drift' | 'highway_traffic' | 'zen';
 
 export type TrafficVehicleKind = 'sedan' | 'hatch' | 'van' | 'box_truck' | 'sports';
 
@@ -3361,6 +3484,7 @@ export interface TrafficCarState {
 }
 
 export const HIGHWAY_ROAD_WIDTH = 9.8;
+export const ROAD_WIDTH = HIGHWAY_ROAD_WIDTH;
 export const HIGHWAY_LANE_OFFSET = 2.25;
 
 const TRAFFIC_CATALOG: {

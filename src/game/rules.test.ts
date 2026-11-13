@@ -1,4 +1,4 @@
-import test from 'node:test';
+﻿import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CAR_ROSTER,
@@ -32,7 +32,12 @@ import {
   triggerTrafficFlashYield,
   stepTrafficCars,
   compactInPlace,
+  ROAD_WIDTH,
+  evaluateZenGuardrailBounce,
+  evaluateZenTrafficDeflection,
+  calculateZenScoreStep,
 } from './rules';
+import { computeMixerVolume, SoundFXSystem, soundFX } from './audio';
 import { getPixelCarTireAnchors } from './pixelSprites';
 import {
   AI_SFX_SLOTS,
@@ -742,6 +747,216 @@ test('SKY_THEME_OPTIONS & resolveSkyAtmosphere support Sun, Sunset, Big Moon, Re
   assert.equal(auroraSky.hasAurora, true);
   assert.equal(auroraSky.hasShootingStars, true);
 });
+
+test('triggerHaptic safely handles SSR and invokes navigator.vibrate with exact sprint specs', async () => {
+  const { triggerHaptic, soundFX } = await import('./audio');
+
+  // SSR / headless environment safe check
+  const ssrResult = triggerHaptic('light');
+  assert.equal(typeof ssrResult, 'boolean');
+
+  // Mock navigator.vibrate safely
+  const calls: (number | number[])[] = [];
+  const mockVibrate = (pattern: number | number[]) => {
+    calls.push(pattern);
+    return true;
+  };
+
+  const nav = typeof navigator !== 'undefined' ? navigator : (globalThis as unknown as { navigator: Navigator }).navigator;
+  const originalVibrate = (nav as unknown as { vibrate?: unknown })?.vibrate;
+  Object.defineProperty(nav, 'vibrate', {
+    value: mockVibrate,
+    configurable: true,
+    writable: true,
+  });
+
+  try {
+    assert.equal(triggerHaptic('light'), true);
+    assert.equal(calls[calls.length - 1], 18);
+
+    assert.equal(triggerHaptic('medium'), true);
+    assert.equal(calls[calls.length - 1], 38);
+
+    assert.equal(triggerHaptic('heavy'), true);
+    assert.equal(calls[calls.length - 1], 65);
+
+    assert.equal(triggerHaptic('double'), true);
+    assert.deepEqual(calls[calls.length - 1], [25, 45, 35]);
+
+    assert.equal(triggerHaptic('fever'), true);
+    assert.deepEqual(calls[calls.length - 1], [45, 35, 45, 35, 75]);
+
+    // Method on soundFX
+    assert.equal(soundFX.triggerHaptic('light'), true);
+    assert.equal(calls[calls.length - 1], 18);
+
+    // Sound FX methods execute safely without throwing
+    assert.doesNotThrow(() => soundFX.playCoinPickup(0));
+    assert.doesNotThrow(() => soundFX.playCoinPickup(5));
+    assert.doesNotThrow(() => soundFX.playTurboChirp());
+    assert.doesNotThrow(() => soundFX.playDriftFlip(5, false));
+    assert.doesNotThrow(() => soundFX.playDriftFlip(10, false));
+    assert.doesNotThrow(() => soundFX.playDriftFlip(15, false));
+    assert.doesNotThrow(() => soundFX.playDriftFlip(20, true));
+    assert.doesNotThrow(() => soundFX.playGearShift());
+  } finally {
+    if (originalVibrate) {
+      Object.defineProperty(nav, 'vibrate', {
+        value: originalVibrate,
+        configurable: true,
+        writable: true,
+      });
+    } else {
+      delete (nav as unknown as { vibrate?: unknown }).vibrate;
+    }
+  }
+});
+
+test('evaluateZenGuardrailBounce softly rebounds vehicle without wrecking and clamps to track boundary', () => {
+  const halfRoadWidth = 4.9; // 9.8m road half width
+
+  // 1. Exceeding right guardrail
+  const rightHit = evaluateZenGuardrailBounce({
+    lateralOffset: 5.2,
+    lateralVelocity: 3.5,
+    halfRoadWidth,
+  });
+  assert.equal(rightHit.bounced, true);
+  assert.equal(rightHit.clampedOffset, 4.7); // 4.9 - 0.20 padding
+  // Soft dampening rebound: -Math.abs(3.5) * 0.4 = -1.4
+  assert.ok(Math.abs(rightHit.reboundVelocity - (-1.4)) < 0.001);
+
+  // 2. Exceeding left guardrail
+  const leftHit = evaluateZenGuardrailBounce({
+    lateralOffset: -5.4,
+    lateralVelocity: -2.8,
+    halfRoadWidth,
+  });
+  assert.equal(leftHit.bounced, true);
+  assert.equal(leftHit.clampedOffset, -4.7);
+  // Inward rebound to the right: +Math.abs(-2.8) * 0.4 = +1.12
+  assert.ok(Math.abs(leftHit.reboundVelocity - 1.12) < 0.001);
+
+  // 3. Safe center driving (no bounce)
+  const safe = evaluateZenGuardrailBounce({
+    lateralOffset: 1.2,
+    lateralVelocity: 0.5,
+    halfRoadWidth,
+  });
+  assert.equal(safe.bounced, false);
+  assert.equal(safe.clampedOffset, 1.2);
+  assert.equal(safe.reboundVelocity, 0.5);
+
+  // 4. Custom boundary padding check
+  const custom = evaluateZenGuardrailBounce({
+    lateralOffset: 50,
+    lateralVelocity: 4.0,
+    halfRoadWidth: 50,
+    boundaryPadding: 20,
+  });
+  assert.equal(custom.bounced, true);
+  assert.equal(custom.clampedOffset, 30);
+  assert.ok(Math.abs(custom.reboundVelocity - (-1.6)) < 0.001);
+});
+
+test('evaluateZenTrafficDeflection gently deflects player around traffic without fatal wreck', () => {
+  // 1. Player in overlap with traffic car
+  const def = evaluateZenTrafficDeflection({
+    playerLateralOffset: 2.3,
+    trafficLateralOffset: 2.25,
+    playerHalfWidth: 0.90,
+    trafficHalfWidth: 0.94,
+    roadHalfWidth: 4.9,
+  });
+  assert.equal(def.deflected, true);
+  // Player was slightly to the right, gets safely pushed further right
+  assert.ok(def.newPlayerOffset > 2.3);
+  assert.ok(def.newPlayerOffset <= 4.7); // Clamped within road bounds
+  assert.ok(def.deflectionImpulse > 0);
+
+  // 2. Player well clear in adjacent lane (no deflection)
+  const clear = evaluateZenTrafficDeflection({
+    playerLateralOffset: -2.25,
+    trafficLateralOffset: 2.25,
+    playerHalfWidth: 0.90,
+    trafficHalfWidth: 0.94,
+    roadHalfWidth: 4.9,
+  });
+  assert.equal(clear.deflected, false);
+  assert.equal(clear.newPlayerOffset, -2.25);
+  assert.equal(clear.deflectionImpulse, 0);
+});
+
+test('Zen scoring accumulates smooth Chill Cruise Distance and Zen Flow points without timer stress', () => {
+  const zen1 = calculateZenScoreStep({ distanceDelta: 10, smoothFlowBonus: true });
+  assert.equal(zen1.distancePoints, 100); // 10 * 10
+  assert.equal(zen1.flowPoints, 60);       // 10 * 6
+  assert.equal(zen1.scoreDelta, 160);
+
+  const zen2 = calculateZenScoreStep({ distanceDelta: 10, smoothFlowBonus: false });
+  assert.equal(zen2.distancePoints, 100);
+  assert.equal(zen2.flowPoints, 0);
+  assert.equal(zen2.scoreDelta, 100);
+
+  // Integrated into calculateDriftScoreStep with gameMode === 'zen'
+  const driftScore = calculateDriftScoreStep({
+    distanceDelta: 5,
+    combo: 1,
+    isFever: false,
+    nearEdge: false,
+    gameMode: 'zen',
+  });
+  assert.ok(driftScore.scoreDelta > 0);
+  assert.equal(driftScore.feverDelta, 10); // 5 * 2.0
+});
+
+test('Audio Mixer Channels - volume multipliers, clamping and gain math', () => {
+  const engine = new SoundFXSystem();
+
+  // 1. Default volumes match specifications
+  const defaults = engine.getMixerVolumes();
+  assert.equal(defaults.master, 1.0);
+  assert.equal(defaults.music, 0.8);
+  assert.equal(defaults.sfx, 0.9);
+  assert.equal(defaults.engine, 0.7);
+
+  // 2. setMixerVolumes updates independent channels and clamps to [0, 1]
+  engine.setMixerVolumes({
+    master: 0.85,
+    music: 0.6,
+    sfx: 0.75,
+    engine: 0.5,
+  });
+  const updated = engine.getMixerVolumes();
+  assert.equal(updated.master, 0.85);
+  assert.equal(updated.music, 0.6);
+  assert.equal(updated.sfx, 0.75);
+  assert.equal(updated.engine, 0.5);
+
+  // 3. Clamping bounds check (< 0 and > 1)
+  engine.setMixerVolumes({
+    master: -0.5,
+    music: 1.8,
+  });
+  const clamped = engine.getMixerVolumes();
+  assert.equal(clamped.master, 0.0);
+  assert.equal(clamped.music, 1.0);
+
+  // 4. Channel volume scaling math
+  assert.equal(computeMixerVolume(0.8, 1.0), 0.8);
+  assert.equal(computeMixerVolume(0.9, 0.5), 0.45);
+  assert.equal(computeMixerVolume(0.7, 0.0), 0.0); // Zero master mutes channel
+  assert.equal(computeMixerVolume(1.5, 1.0), 1.0); // Clamped
+
+  // 5. Deck snapshot exposes mixer channels for UI subscribers
+  engine.setMixerVolumes({ master: 0.9, music: 0.7, sfx: 0.8, engine: 0.65 });
+  const snapshot = engine.getDeckSnapshot();
+  assert.equal(snapshot.masterVolume, 0.9);
+  assert.equal(snapshot.musicVolume, 0.7);
+  assert.equal(snapshot.sfxVolume, 0.8);
+  assert.equal(snapshot.engineVolume, 0.65);
+});
+
 
 
 

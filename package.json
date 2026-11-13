@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/game/rules.test.ts"
+    "test": "tsx --test src/game/rules.test.ts src/game/missions.test.ts src/game/settingsAndShare.test.ts"
   },
   "dependencies": {
     "@capacitor/android": "^8.6.2",

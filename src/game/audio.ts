@@ -1,4 +1,4 @@
-import type { HornStyleId, SoundProfileId } from './rules';
+﻿import type { HornStyleId, SoundProfileId } from './rules';
 import {
   AI_SFX_SLOT_MAP,
   AiSfxSlotId,
@@ -24,8 +24,10 @@ export interface AudioDeckSnapshot {
   musicPlaying: boolean;
   aiSfxEnabled: boolean;
   dspEnabled: boolean;
+  masterVolume: number; // 0 .. 1
   musicVolume: number; // 0 .. 1
   sfxVolume: number; // 0 .. 1
+  engineVolume: number; // 0 .. 1
   activeTrackId: string;
   activeTrackTitle: string;
   loadedTrackIds: string[];
@@ -33,6 +35,43 @@ export interface AudioDeckSnapshot {
   dspModeLabel: string;
   dspLowpassHz: number;
   dspPlaybackRate: number;
+}
+
+export type HapticType = 'light' | 'medium' | 'heavy' | 'double' | 'fever';
+
+/**
+ * Mobile haptic vibration helper using the Web Vibration API.
+ * Safely guards against SSR and environments without vibration support.
+ */
+export function triggerHaptic(type: HapticType): boolean {
+  if (typeof navigator === 'undefined' || typeof navigator.vibrate !== 'function') {
+    return false;
+  }
+  try {
+    let pattern: number | number[];
+    switch (type) {
+      case 'light':
+        pattern = 18; // 18ms (coin pickup)
+        break;
+      case 'medium':
+        pattern = 38; // 38ms (near miss, style switch)
+        break;
+      case 'heavy':
+        pattern = 65; // 65ms (guardrail scrape, crash impact)
+        break;
+      case 'double':
+        pattern = [25, 45, 35]; // [25, 45, 35] (combo level up, overtake streak)
+        break;
+      case 'fever':
+        pattern = [45, 35, 45, 35, 75]; // [45, 35, 45, 35, 75] (fever activation)
+        break;
+      default:
+        pattern = 18;
+    }
+    return navigator.vibrate(pattern);
+  } catch {
+    return false;
+  }
 }
 
 function makeSaturationCurve(drive: number): Float32Array<ArrayBuffer> {
@@ -47,7 +86,7 @@ function makeSaturationCurve(drive: number): Float32Array<ArrayBuffer> {
 }
 
 // Procedural Web Audio API Synthesizer + AI Music DSP Rack & AI SFX Sampler
-class DriftAudioEngine {
+export class SoundFXSystem {
   private ctx: AudioContext | null = null;
   public muted = false;
 
@@ -71,8 +110,12 @@ class DriftAudioEngine {
   private musicPlaying = false;
   private aiSfxEnabled = true;
   private dspEnabled = true;
-  private musicVolume = 0.58;
-  private sfxVolume = 0.82;
+
+  // Independent Channel Volume Multipliers (Sprint 3 Specifications)
+  private masterVolume = 1.0;
+  private musicVolume = 0.8;
+  private sfxVolume = 0.9;
+  private engineVolume = 0.7;
 
   // Standardized Official Soundtrack for all players
   private activeTrackId = 'neon_redline_ost';
@@ -143,8 +186,10 @@ class DriftAudioEngine {
       musicPlaying: this.musicPlaying,
       aiSfxEnabled: this.aiSfxEnabled,
       dspEnabled: this.dspEnabled,
+      masterVolume: this.masterVolume,
       musicVolume: this.musicVolume,
       sfxVolume: this.sfxVolume,
+      engineVolume: this.engineVolume,
       activeTrackId: this.activeTrackId,
       activeTrackTitle: this.activeTrackTitle,
       loadedTrackIds,
@@ -235,7 +280,7 @@ class DriftAudioEngine {
 
   private computeEffectiveMusicGain(dspMultiplier: number): number {
     if (this.muted || !this.musicEnabled) return 0;
-    return Math.max(0, Math.min(1, this.musicVolume * dspMultiplier * 0.72));
+    return Math.max(0, Math.min(1, this.musicVolume * this.masterVolume * dspMultiplier * 0.72));
   }
 
   private async decodeUrlToBuffer(ctx: AudioContext, url: string): Promise<AudioBuffer | null> {
@@ -398,8 +443,20 @@ class DriftAudioEngine {
     this.notifyListeners();
   }
 
-  public setMusicVolume(vol: number) {
-    this.musicVolume = Math.max(0, Math.min(1, vol));
+  public setMixerVolumes(volumes: { master?: number; music?: number; sfx?: number; engine?: number }) {
+    if (volumes.master !== undefined && !Number.isNaN(volumes.master)) {
+      this.masterVolume = Math.max(0, Math.min(1, volumes.master));
+    }
+    if (volumes.music !== undefined && !Number.isNaN(volumes.music)) {
+      this.musicVolume = Math.max(0, Math.min(1, volumes.music));
+    }
+    if (volumes.sfx !== undefined && !Number.isNaN(volumes.sfx)) {
+      this.sfxVolume = Math.max(0, Math.min(1, volumes.sfx));
+    }
+    if (volumes.engine !== undefined && !Number.isNaN(volumes.engine)) {
+      this.engineVolume = Math.max(0, Math.min(1, volumes.engine));
+    }
+
     if (this.ctx && this.musicGainNode) {
       const mult = this.dspEnabled ? this.lastDspParams.gainMultiplier : 1.0;
       this.musicGainNode.gain.setTargetAtTime(
@@ -408,12 +465,27 @@ class DriftAudioEngine {
         0.05
       );
     }
+    if (this.ctx && this.engGain && this.engRunning && this.lastEngVol > 0) {
+      this.engGain.gain.setTargetAtTime(this.lastEngVol, this.ctx.currentTime, 0.05);
+    }
     this.notifyListeners();
   }
 
+  public getMixerVolumes(): { master: number; music: number; sfx: number; engine: number } {
+    return {
+      master: this.masterVolume,
+      music: this.musicVolume,
+      sfx: this.sfxVolume,
+      engine: this.engineVolume,
+    };
+  }
+
+  public setMusicVolume(vol: number) {
+    this.setMixerVolumes({ music: vol });
+  }
+
   public setSfxVolume(vol: number) {
-    this.sfxVolume = Math.max(0, Math.min(1, vol));
-    this.notifyListeners();
+    this.setMixerVolumes({ sfx: vol });
   }
 
   public stopMusic() {
@@ -549,7 +621,7 @@ class DriftAudioEngine {
     const spec = AI_SFX_SLOT_MAP[slotId];
     const now = ctx.currentTime;
     const dur = Math.max(0.18, entry.durationSec);
-    const vol = Math.max(0.05, Math.min(1.0, (spec?.baseGain ?? 0.55) * this.sfxVolume * gainScale));
+    const vol = Math.max(0.05, Math.min(1.0, (spec?.baseGain ?? 0.55) * this.sfxVolume * this.masterVolume * gainScale));
 
     const src = ctx.createBufferSource();
     src.buffer = entry.buffer;
@@ -602,11 +674,54 @@ class DriftAudioEngine {
   }
 
   private get sfxScale(): number {
-    return Math.max(0, Math.min(1.25, this.sfxVolume));
+    return Math.max(0, Math.min(1.25, this.sfxVolume * this.masterVolume));
   }
 
-  // Light pitch-varied tire screech + turbo flutter on diagonal direction flip (/ <-> \)
-  public playDriftFlip(combo: number, isFever: boolean) {
+  private get engineScale(): number {
+    return Math.max(0, Math.min(1.25, this.engineVolume * this.masterVolume));
+  }
+
+  public triggerHaptic(type: HapticType): boolean {
+    return triggerHaptic(type);
+  }
+
+  // Subtle mechanical gear shift / soft thump sound (Zen mode guardrails & traffic bump)
+  public playGearShift() {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(140, now);
+    osc.frequency.exponentialRampToValueAtTime(60, now + 0.08);
+
+    gain.gain.setValueAtTime(0.12 * this.sfxScale, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+
+    osc.connect(gain);
+    gain.connect(this.getOutputNode(ctx));
+    osc.start(now);
+    osc.stop(now + 0.1);
+
+    // Soft mechanical click transient
+    const clickOsc = ctx.createOscillator();
+    const clickGain = ctx.createGain();
+    clickOsc.type = 'sine';
+    clickOsc.frequency.setValueAtTime(480, now);
+    clickOsc.frequency.exponentialRampToValueAtTime(180, now + 0.03);
+
+    clickGain.gain.setValueAtTime(0.08 * this.sfxScale, now);
+    clickGain.gain.exponentialRampToValueAtTime(0.001, now + 0.035);
+
+    clickOsc.connect(clickGain);
+    clickGain.connect(this.getOutputNode(ctx));
+    clickOsc.start(now);
+    clickOsc.stop(now + 0.04);
+  }
+
+  // Light pitch-varied tire screech + turbo flutter + hype combo stings on diagonal direction flip (/ <-> \)
+  public playDriftFlip(combo: number, isFever = false) {
     const ctx = this.ensureContext();
     if (!ctx) return;
 
@@ -656,27 +771,150 @@ class DriftAudioEngine {
     filter.connect(nGain);
     nGain.connect(this.getOutputNode(ctx));
     noise.start(now);
+
+    // Hype combo stings layered on top as combo climbs (SLICK WEAVE -> DRIFT DEMON -> APEX PREDATOR -> DRIFT GOD)
+    if (combo >= 5) {
+      const stingScale = this.sfxScale * (hasAi ? 0.45 : 0.82);
+      if (combo >= 20) {
+        // Combo >= 20: "UNSTOPPABLE DRIFT GOD!" 4-note ascending euphoric synth fanfare
+        [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => {
+          const sOsc = ctx.createOscillator();
+          const sGain = ctx.createGain();
+          sOsc.type = 'sawtooth';
+          sOsc.frequency.setValueAtTime(f, now + i * 0.024);
+          sGain.gain.setValueAtTime(0.12 * stingScale, now + i * 0.024);
+          sGain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.024 + 0.18);
+          sOsc.connect(sGain);
+          sGain.connect(this.getOutputNode(ctx));
+          sOsc.start(now + i * 0.024);
+          sOsc.stop(now + i * 0.024 + 0.19);
+        });
+      } else if (combo >= 15) {
+        // Combo >= 15: "APEX PREDATOR!" Triple chord ascending arpeggio
+        [440, 554.37, 659.25].forEach((f, i) => {
+          const sOsc = ctx.createOscillator();
+          const sGain = ctx.createGain();
+          sOsc.type = 'sawtooth';
+          sOsc.frequency.setValueAtTime(f, now + i * 0.028);
+          sGain.gain.setValueAtTime(0.10 * stingScale, now + i * 0.028);
+          sGain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.028 + 0.15);
+          sOsc.connect(sGain);
+          sGain.connect(this.getOutputNode(ctx));
+          sOsc.start(now + i * 0.028);
+          sOsc.stop(now + i * 0.028 + 0.16);
+        });
+      } else if (combo >= 10) {
+        // Combo >= 10: "DRIFT DEMON!" Punchy dual harmonic fifth
+        [349.23, 523.25].forEach((f, i) => {
+          const sOsc = ctx.createOscillator();
+          const sGain = ctx.createGain();
+          sOsc.type = 'triangle';
+          sOsc.frequency.setValueAtTime(f, now + i * 0.03);
+          sGain.gain.setValueAtTime(0.11 * stingScale, now + i * 0.03);
+          sGain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.03 + 0.13);
+          sOsc.connect(sGain);
+          sGain.connect(this.getOutputNode(ctx));
+          sOsc.start(now + i * 0.03);
+          sOsc.stop(now + i * 0.03 + 0.14);
+        });
+      } else {
+        // Combo >= 5: "SLICK WEAVE!" Crisp single harmonic overtone
+        const sOsc = ctx.createOscillator();
+        const sGain = ctx.createGain();
+        sOsc.type = 'sine';
+        sOsc.frequency.setValueAtTime(baseFreq * 1.5, now + 0.02);
+        sGain.gain.setValueAtTime(0.09 * stingScale, now + 0.02);
+        sGain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+        sOsc.connect(sGain);
+        sGain.connect(this.getOutputNode(ctx));
+        sOsc.start(now + 0.02);
+        sOsc.stop(now + 0.13);
+      }
+    }
   }
 
-  // Rising dopamine coin pickup chime
-  public playCoinPickup(combo: number) {
+  // Rising dopamine coin pickup chime with escalating pitch streak
+  public playCoinPickup(streak = 0) {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const now = ctx.currentTime;
-    const mult = Math.pow(1.05, Math.min(14, combo));
+    const safeStreak = Math.max(0, Math.min(24, streak));
+    // Escalating pitch: each consecutive coin pitches up slightly for maximum satisfaction!
+    const pitchMult = Math.pow(1.059463, safeStreak % 12) * (1 + Math.floor(safeStreak / 12) * 0.28);
     const scale = this.sfxScale;
 
-    [587.33, 880].forEach((freq, idx) => {
+    // Base dual-tone ping + high shimmer overtone on higher streaks
+    const baseFreqs = safeStreak >= 3 ? [587.33, 880.0, 1174.66] : [587.33, 880.0];
+
+    baseFreqs.forEach((freq, idx) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(freq * mult, now + idx * 0.045);
-      gain.gain.setValueAtTime(0.16 * scale, now + idx * 0.045);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.045 + 0.16);
+      const startFreq = freq * pitchMult;
+      osc.frequency.setValueAtTime(startFreq, now + idx * 0.038);
+      osc.frequency.exponentialRampToValueAtTime(startFreq * 1.04, now + idx * 0.038 + 0.12);
+
+      const noteVol = (idx === 2 ? 0.09 : 0.16) * scale;
+      gain.gain.setValueAtTime(noteVol, now + idx * 0.038);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.038 + 0.16);
+
       osc.connect(gain);
       gain.connect(this.getOutputNode(ctx));
-      osc.start(now + idx * 0.045);
-      osc.stop(now + idx * 0.045 + 0.17);
+      osc.start(now + idx * 0.038);
+      osc.stop(now + idx * 0.038 + 0.17);
+    });
+  }
+
+  // Turbo blow-off valve chirp & flutter on throttle lift / speed deceleration
+  public playTurboChirp() {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const scale = this.sfxScale;
+
+    // Stage 1: Compressed air whoosh / hiss burst
+    const hissLen = Math.floor(ctx.sampleRate * 0.16);
+    const hissBuf = ctx.createBuffer(1, hissLen, ctx.sampleRate);
+    const hissData = hissBuf.getChannelData(0);
+    for (let i = 0; i < hissLen; i++) {
+      hissData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / hissLen, 1.8);
+    }
+    const hissNode = ctx.createBufferSource();
+    hissNode.buffer = hissBuf;
+
+    const hissFilter = ctx.createBiquadFilter();
+    hissFilter.type = 'highpass';
+    hissFilter.frequency.setValueAtTime(2600, now);
+    hissFilter.frequency.exponentialRampToValueAtTime(1100, now + 0.15);
+
+    const hissGain = ctx.createGain();
+    hissGain.gain.setValueAtTime(0.16 * scale, now);
+    hissGain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+
+    hissNode.connect(hissFilter);
+    hissFilter.connect(hissGain);
+    hissGain.connect(this.getOutputNode(ctx));
+    hissNode.start(now);
+
+    // Stage 2: Iconic 3-pulse flutter chirps (su-tu-tu-tu)
+    const flutterOffsets = [0, 0.042, 0.084];
+    const flutterPitches = [2450, 2180, 1860];
+    flutterOffsets.forEach((offset, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      const f = flutterPitches[idx] * (0.96 + Math.random() * 0.08);
+      osc.frequency.setValueAtTime(f, now + offset);
+      osc.frequency.exponentialRampToValueAtTime(f * 0.72, now + offset + 0.055);
+
+      const amp = (0.13 - idx * 0.025) * scale;
+      gain.gain.setValueAtTime(amp, now + offset);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.06);
+
+      osc.connect(gain);
+      gain.connect(this.getOutputNode(ctx));
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.065);
     });
   }
 
@@ -724,6 +962,24 @@ class DriftAudioEngine {
       osc.start(now + i * 0.035);
       osc.stop(now + i * 0.035 + 0.15);
     });
+  }
+
+  // High-frequency tactile sector tick / boundary flipper sound for prize wheel & style flips
+  public playStyleFlip() {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(950, now);
+    osc.frequency.exponentialRampToValueAtTime(1400, now + 0.02);
+    gain.gain.setValueAtTime(0.09 * this.sfxScale, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.032);
+    osc.connect(gain);
+    gain.connect(this.getOutputNode(ctx));
+    osc.start(now);
+    osc.stop(now + 0.035);
   }
 
   // Metallic guardrail scrape spark sound
@@ -1146,7 +1402,7 @@ class DriftAudioEngine {
 
     const effectiveCutoff = cutoff + (params.isGassing ? 240 : 0);
     const baseVol = params.isGassing ? 0.046 : params.isBraking ? 0.02 : 0.03;
-    const targetVol = baseVol * this.sfxScale;
+    const targetVol = baseVol * this.engineScale;
 
     if (this.engOscA.type !== oscTypeA) this.engOscA.type = oscTypeA;
     if (this.engOscB.type !== oscTypeB) this.engOscB.type = oscTypeB;
@@ -1173,7 +1429,7 @@ class DriftAudioEngine {
       tOsc.type = 'sine';
       tOsc.frequency.setValueAtTime(1650, now);
       tOsc.frequency.exponentialRampToValueAtTime(2400, now + 0.14);
-      tGain.gain.setValueAtTime(0.02 * this.sfxScale, now);
+      tGain.gain.setValueAtTime(0.02 * this.engineScale, now);
       tGain.gain.exponentialRampToValueAtTime(0.0005, now + 0.16);
       tOsc.connect(tGain);
       tGain.connect(this.getOutputNode(ctx));
@@ -1204,4 +1460,14 @@ class DriftAudioEngine {
   }
 }
 
-export const soundFX = new DriftAudioEngine();
+/**
+ * Computes effective channel volume multiplier clamped between 0 and 1.
+ */
+export function computeMixerVolume(channelVolume: number, masterVolume: number): number {
+  const c = Math.max(0, Math.min(1, channelVolume));
+  const m = Math.max(0, Math.min(1, masterVolume));
+  return Number((c * m).toFixed(4));
+}
+
+export const soundFX = new SoundFXSystem();
+export { SoundFXSystem as DriftAudioEngine };

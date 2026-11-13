@@ -29,6 +29,16 @@ import { GarageModal } from './components/GarageModal';
 import { LeaderboardEntry, LeaderboardModal } from './components/LeaderboardModal';
 import { ArtGalleryModal } from './components/ArtGalleryModal';
 import { SteeringWheel } from './components/SteeringWheel';
+import { DailyRewardModal, isDailySpinReady } from './components/DailyRewardModal';
+import { MissionModal } from './components/MissionModal';
+import { GameSettings, SettingsModal, loadGameSettings } from './components/SettingsModal';
+import { ShareCardModal } from './components/ShareCardModal';
+import {
+  getClaimableMissionsCount,
+  getDailyMissions,
+  hasClaimableMissions,
+  recordMissionProgress,
+} from './game/missions';
 
 const INITIAL_UPGRADES: Record<string, CarUpgradeLevels> = {
   blue_jdm: { speed: 1, handling: 1, magnet: 1 },
@@ -49,7 +59,18 @@ export default function App() {
   // Player Progression State (synced with Cloud SQL when signed in, plus local persistence)
   const [user, setUser] = useState<User | null>(null);
   const [idToken, setIdToken] = useState<string | null>(null);
-  const [coins, setCoins] = useState<number>(320);
+  const [coins, setCoins] = useState<number>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = window.localStorage.getItem('neon_coins_v1');
+        if (saved) {
+          const parsed = Number(saved);
+          if (!Number.isNaN(parsed) && parsed >= 0) return parsed;
+        }
+      } catch {}
+    }
+    return 320;
+  });
   const [bestScore, setBestScore] = useState<number>(0);
   const [bestCombo, setBestCombo] = useState<number>(1);
   const [selectedCarId, setSelectedCarId] = useState<string>('blue_jdm');
@@ -93,9 +114,10 @@ export default function App() {
     const qMode = params.get('mode');
     if (qMode === 'traffic' || qMode === 'highway_traffic') return 'highway_traffic';
     if (qMode === 'drift') return 'drift';
+    if (qMode === 'zen') return 'zen';
     try {
       const saved = window.localStorage.getItem('apex_slash_mode_v1');
-      if (saved === 'highway_traffic' || saved === 'drift') return saved;
+      if (saved === 'highway_traffic' || saved === 'drift' || saved === 'zen') return saved;
     } catch {}
     return 'drift';
   });
@@ -217,6 +239,20 @@ export default function App() {
   const [isGarageOpen, setIsGarageOpen] = useState<boolean>(false);
   const [isLeaderboardOpen, setIsLeaderboardOpen] = useState<boolean>(false);
   const [isArtGalleryOpen, setIsArtGalleryOpen] = useState<boolean>(false);
+  const [isDailySpinOpen, setIsDailySpinOpen] = useState<boolean>(false);
+  const [isMissionsOpen, setIsMissionsOpen] = useState<boolean>(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+  const [isShareCardOpen, setIsShareCardOpen] = useState<boolean>(false);
+  const [gameSettings, setGameSettings] = useState<GameSettings>(() => loadGameSettings());
+  const swipeAnchorRef = useRef<number | null>(null);
+  const [missionToast, setMissionToast] = useState<{ title: string; reward: number } | null>(null);
+  const missionToastTimerRef = useRef<number | null>(null);
+  const prevTelemetryRef = useRef({
+    distance: 0,
+    coinsRun: 0,
+    overtakes: 0,
+    nearMisses: 0,
+  });
   const [dockCollapsed, setDockCollapsed] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(false);
 
@@ -283,6 +319,16 @@ export default function App() {
     setCustomBgmTitle('Neon Redline — Tokyo Highway Eurobeat');
     return unsub;
   }, []);
+
+  // Sync gameSettings volumes to audio engine
+  useEffect(() => {
+    soundFX.setMixerVolumes({
+      master: gameSettings.masterVolume,
+      music: gameSettings.musicVolume,
+      sfx: gameSettings.sfxVolume,
+      engine: gameSettings.engineVolume,
+    });
+  }, [gameSettings]);
 
   // Firebase Auth listener + Cloud SQL Profile Load
   useEffect(() => {
@@ -371,9 +417,19 @@ export default function App() {
     if (document.activeElement instanceof HTMLElement) {
       document.activeElement.blur();
     }
+    prevTelemetryRef.current = {
+      distance: 0,
+      coinsRun: 0,
+      overtakes: 0,
+      nearMisses: 0,
+    };
     setIsGarageOpen(false);
     setIsLeaderboardOpen(false);
     setIsArtGalleryOpen(false);
+    setIsDailySpinOpen(false);
+    setIsMissionsOpen(false);
+    setIsSettingsOpen(false);
+    setIsShareCardOpen(false);
     document.body.dataset.state = 'playing';
     setRestartTriggerCount((c) => c + 1);
     setGamePhase('playing');
@@ -396,7 +452,33 @@ export default function App() {
       const nextBestScore = Math.max(bestScore, finalStats.score);
       const nextBestCombo = Math.max(bestCombo, finalStats.maxCombo);
 
+      // Record final mission progress including Touge runs
+      const deltaDistance = Math.max(0, finalStats.distance - prevTelemetryRef.current.distance);
+      const deltaCoins = Math.max(0, finalStats.coinsCollected - prevTelemetryRef.current.coinsRun);
+      const deltaOvertakes = Math.max(0, (finalStats.overtakes || 0) - prevTelemetryRef.current.overtakes);
+      const deltaNearMisses = Math.max(0, (finalStats.nearMisses || 0) - prevTelemetryRef.current.nearMisses);
+
+      const finalMissionEvent: Parameters<typeof recordMissionProgress>[0] = {
+        drift_score: finalStats.score,
+        combo: finalStats.maxCombo,
+        touge_runs: 1,
+      };
+      if (deltaDistance > 0) finalMissionEvent.distance = deltaDistance;
+      if (deltaCoins > 0) finalMissionEvent.coins = deltaCoins;
+      if (deltaOvertakes > 0) finalMissionEvent.overtakes = deltaOvertakes;
+      if (deltaNearMisses > 0) finalMissionEvent.near_misses = deltaNearMisses;
+
+      const { newlyCompleted } = recordMissionProgress(finalMissionEvent);
+      if (newlyCompleted.length > 0) {
+        const latest = newlyCompleted[newlyCompleted.length - 1];
+        setMissionToast({ title: latest.title, reward: latest.reward });
+        soundFX.playFeverBurst();
+      }
+
       setCoins(nextCoins);
+      try {
+        window.localStorage.setItem('neon_coins_v1', String(nextCoins));
+      } catch {}
       setBestScore(nextBestScore);
       setBestCombo(nextBestCombo);
       document.body.dataset.state = 'gameover';
@@ -423,6 +505,71 @@ export default function App() {
       }
     },
     [coins, bestScore, bestCombo, idToken, selectedCarId, fetchLeaderboard]
+  );
+
+  const handleTelemetryUpdate = useCallback(
+    (t: LiveTelemetry) => {
+      setTelemetry(t);
+
+      if (gamePhase === 'playing') {
+        const overtakes = t.overtakes || 0;
+        const nearMisses = t.nearMisses || 0;
+        const deltaDistance = Math.max(0, t.distance - prevTelemetryRef.current.distance);
+        const deltaCoins = Math.max(0, t.coinsRun - prevTelemetryRef.current.coinsRun);
+        const deltaOvertakes = Math.max(0, overtakes - prevTelemetryRef.current.overtakes);
+        const deltaNearMisses = Math.max(0, nearMisses - prevTelemetryRef.current.nearMisses);
+
+        prevTelemetryRef.current.distance = t.distance;
+        prevTelemetryRef.current.coinsRun = t.coinsRun;
+        prevTelemetryRef.current.overtakes = overtakes;
+        prevTelemetryRef.current.nearMisses = nearMisses;
+
+        const progressEvent: Parameters<typeof recordMissionProgress>[0] = {
+          drift_score: t.score,
+          combo: t.maxCombo,
+          top_speed: t.speedKmh,
+        };
+        if (deltaDistance > 0) progressEvent.distance = deltaDistance;
+        if (deltaCoins > 0) progressEvent.coins = deltaCoins;
+        if (deltaOvertakes > 0) progressEvent.overtakes = deltaOvertakes;
+        if (deltaNearMisses > 0) progressEvent.near_misses = deltaNearMisses;
+
+        const { newlyCompleted } = recordMissionProgress(progressEvent);
+        if (newlyCompleted.length > 0) {
+          const latest = newlyCompleted[newlyCompleted.length - 1];
+          setMissionToast({ title: latest.title, reward: latest.reward });
+          soundFX.playFeverBurst();
+          if (missionToastTimerRef.current) window.clearTimeout(missionToastTimerRef.current);
+          missionToastTimerRef.current = window.setTimeout(() => {
+            setMissionToast(null);
+          }, 3600);
+        }
+      }
+    },
+    [gamePhase]
+  );
+
+  const handleClaimReward = useCallback(
+    (rewardAmount: number, label: string) => {
+      setCoins((prev) => {
+        const next = prev + rewardAmount;
+        try {
+          window.localStorage.setItem('neon_coins_v1', String(next));
+        } catch {}
+        syncGarageToCloudSql({
+          coins: next,
+          bestScore,
+          bestCombo,
+          selectedCarId,
+          unlockedCarIds,
+          carUpgrades,
+          customSpriteUrl,
+        });
+        return next;
+      });
+      soundFX.playFeverBurst();
+    },
+    [bestScore, bestCombo, selectedCarId, unlockedCarIds, carUpgrades, customSpriteUrl, syncGarageToCloudSql]
   );
 
   // Unified Keyboard Input Hub (Edge-Triggered One-Shots & Blur Hygiene)
@@ -467,11 +614,23 @@ export default function App() {
         return;
       }
 
-      if (isGarageOpen || isLeaderboardOpen || isArtGalleryOpen) {
+      if (
+        isGarageOpen ||
+        isLeaderboardOpen ||
+        isArtGalleryOpen ||
+        isDailySpinOpen ||
+        isMissionsOpen ||
+        isSettingsOpen ||
+        isShareCardOpen
+      ) {
         if (code === 'Escape') {
           setIsGarageOpen(false);
           setIsLeaderboardOpen(false);
           setIsArtGalleryOpen(false);
+          setIsDailySpinOpen(false);
+          setIsMissionsOpen(false);
+          setIsSettingsOpen(false);
+          setIsShareCardOpen(false);
         }
         return;
       }
@@ -569,6 +728,9 @@ export default function App() {
       [car.id]: carUpgrades[car.id] || { speed: 1, handling: 1, magnet: 1 },
     };
     setCoins(nextCoins);
+    try {
+      window.localStorage.setItem('neon_coins_v1', String(nextCoins));
+    } catch {}
     setUnlockedCarIds(nextUnlocked);
     setSelectedCarId(car.id);
     setCarUpgrades(nextUpgrades);
@@ -599,6 +761,9 @@ export default function App() {
       },
     };
     setCoins(nextCoins);
+    try {
+      window.localStorage.setItem('neon_coins_v1', String(nextCoins));
+    } catch {}
     setCarUpgrades(nextUpgrades);
     soundFX.playCoinPickup(lv + 2);
     syncGarageToCloudSql({
@@ -651,7 +816,10 @@ export default function App() {
         restartTriggerCount={restartTriggerCount}
         flashTriggerCount={flashTriggerCount}
         hornTriggerCount={hornTriggerCount}
-        onTelemetryUpdate={setTelemetry}
+        screenShakeIntensity={gameSettings.screenShake}
+        screenShakeMultiplier={gameSettings.screenShake}
+        controlScheme={gameSettings.controlScheme}
+        onTelemetryUpdate={handleTelemetryUpdate}
         onGameOver={handleGameOver}
       />
 
@@ -660,28 +828,52 @@ export default function App() {
 
       {/* 2. Interactive Full-Screen Hold-to-Steer Touch Zones During Active Gameplay */}
       {gamePhase === 'playing' && (
-        <div className="fixed inset-0 z-10 grid grid-cols-2 pointer-events-auto">
-          <button
-            type="button"
-            aria-label="Steer Left"
-            onPointerDown={() => setSteerHold(-1)}
-            onPointerUp={() => setSteerHold(0)}
-            onPointerLeave={() => setSteerHold(0)}
-            onPointerCancel={() => setSteerHold(0)}
-            className="w-full h-full bg-transparent cursor-pointer focus:outline-none active:bg-sky-500/10 transition-colors"
-            tabIndex={-1}
+        gameSettings.controlScheme === 'swipe' ? (
+          <div
+            className="fixed inset-0 z-10 pointer-events-auto touch-none"
+            onPointerDown={(e) => {
+              swipeAnchorRef.current = e.clientX;
+            }}
+            onPointerMove={(e) => {
+              if (swipeAnchorRef.current !== null) {
+                const dx = e.clientX - swipeAnchorRef.current;
+                const norm = Math.max(-1, Math.min(1, dx / 70));
+                setSteerHold(norm);
+              }
+            }}
+            onPointerUp={() => {
+              swipeAnchorRef.current = null;
+              setSteerHold(0);
+            }}
+            onPointerCancel={() => {
+              swipeAnchorRef.current = null;
+              setSteerHold(0);
+            }}
           />
-          <button
-            type="button"
-            aria-label="Steer Right"
-            onPointerDown={() => setSteerHold(1)}
-            onPointerUp={() => setSteerHold(0)}
-            onPointerLeave={() => setSteerHold(0)}
-            onPointerCancel={() => setSteerHold(0)}
-            className="w-full h-full bg-transparent cursor-pointer focus:outline-none active:bg-amber-500/10 transition-colors"
-            tabIndex={-1}
-          />
-        </div>
+        ) : (
+          <div className="fixed inset-0 z-10 grid grid-cols-2 pointer-events-auto">
+            <button
+              type="button"
+              aria-label="Steer Left"
+              onPointerDown={() => setSteerHold(-1)}
+              onPointerUp={() => setSteerHold(0)}
+              onPointerLeave={() => setSteerHold(0)}
+              onPointerCancel={() => setSteerHold(0)}
+              className="w-full h-full bg-transparent cursor-pointer focus:outline-none active:bg-sky-500/10 transition-colors"
+              tabIndex={-1}
+            />
+            <button
+              type="button"
+              aria-label="Steer Right"
+              onPointerDown={() => setSteerHold(1)}
+              onPointerUp={() => setSteerHold(0)}
+              onPointerLeave={() => setSteerHold(0)}
+              onPointerCancel={() => setSteerHold(0)}
+              className="w-full h-full bg-transparent cursor-pointer focus:outline-none active:bg-amber-500/10 transition-colors"
+              tabIndex={-1}
+            />
+          </div>
+        )
       )}
 
       {/* 3. TITLE SCREEN OVERLAY (Motorsport Command Deck + Bespoke SVG Emblem) */}
@@ -709,6 +901,31 @@ export default function App() {
             <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
               <button
                 type="button"
+                onClick={() => setIsDailySpinOpen(true)}
+                className="relative min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-amber-500/50 text-xs font-semibold text-amber-300 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5"
+              >
+                <span>🎡 Daily Spin</span>
+                {isDailySpinReady() && (
+                  <span className="w-2 h-2 rounded-full bg-amber-400 absolute -top-0.5 -right-0.5 animate-ping" />
+                )}
+                {isDailySpinReady() && (
+                  <span className="w-2 h-2 rounded-full bg-amber-400 absolute -top-0.5 -right-0.5" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsMissionsOpen(true)}
+                className="relative min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-purple-500/50 text-xs font-semibold text-purple-300 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5"
+              >
+                <span>📋 Missions</span>
+                {hasClaimableMissions() && (
+                  <span className="px-1.5 py-0.2 rounded-full bg-rose-500 text-white text-[9px] font-mono font-bold animate-pulse absolute -top-1.5 -right-1.5 shadow-sm">
+                    {getClaimableMissionsCount()}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
                 onClick={() => setIsLeaderboardOpen(true)}
                 className="min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-slate-700/90 text-xs font-semibold text-slate-100 transition-colors whitespace-nowrap shrink-0"
               >
@@ -720,6 +937,14 @@ export default function App() {
                 className="min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-slate-700/90 text-xs font-semibold text-cyan-300 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5"
               >
                 <span>🖼️ Gallery</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsSettingsOpen(true)}
+                aria-label="Settings"
+                className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-slate-700/90 text-slate-100 transition-colors text-sm"
+              >
+                ⚙️
               </button>
               <button
                 type="button"
@@ -783,7 +1008,9 @@ export default function App() {
                 fontSize="10"
                 letterSpacing="1.8"
               >
-                {gameMode === 'highway_traffic'
+                {gameMode === 'zen'
+                  ? 'ZEN CRUISE · ENDLESS RELAXATION'
+                  : gameMode === 'highway_traffic'
                   ? 'HIGHWAY TRAFFIC · OVERTAKE CLASH'
                   : 'TOKYO TOUGE · 3D PIXEL DRIFT'}
               </text>
@@ -821,31 +1048,43 @@ export default function App() {
               </div>
             </div>
 
-            {/* 2-Mode Switcher + 5-Road Selector */}
-            <div className="grid grid-cols-2 gap-1.5" role="group" aria-label="Select Game Mode">
+            {/* 3-Mode Switcher + 5-Road Selector */}
+            <div className="grid grid-cols-3 gap-1.5" role="group" aria-label="Select Game Mode">
               <button
                 type="button"
                 data-mode-id="drift"
                 onClick={() => handleSelectGameMode('drift')}
-                className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-display font-bold tracking-wide transition-colors whitespace-nowrap ${
+                className={`min-h-[40px] px-2 py-1.5 rounded-lg text-xs font-display font-bold tracking-wide transition-colors whitespace-nowrap ${
                   gameMode === 'drift'
                     ? 'bg-amber-500 text-slate-950'
                     : 'bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-800'
                 }`}
               >
-                S-Curve Drift
+                S-Curve
               </button>
               <button
                 type="button"
                 data-mode-id="highway_traffic"
                 onClick={() => handleSelectGameMode('highway_traffic')}
-                className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-display font-bold tracking-wide transition-colors whitespace-nowrap ${
+                className={`min-h-[40px] px-2 py-1.5 rounded-lg text-xs font-display font-bold tracking-wide transition-colors whitespace-nowrap ${
                   gameMode === 'highway_traffic'
                     ? 'bg-cyan-400 text-slate-950'
                     : 'bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-800'
                 }`}
               >
-                2-Lane Traffic
+                Traffic
+              </button>
+              <button
+                type="button"
+                data-mode-id="zen"
+                onClick={() => handleSelectGameMode('zen')}
+                className={`min-h-[40px] px-2 py-1.5 rounded-lg text-xs font-display font-bold tracking-wide transition-colors whitespace-nowrap ${
+                  gameMode === 'zen'
+                    ? 'bg-emerald-400 text-slate-950'
+                    : 'bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-800'
+                }`}
+              >
+                Zen Cruise
               </button>
             </div>
 
@@ -1071,6 +1310,15 @@ export default function App() {
             </div>
           </div>
 
+          {/* Mission Completion Dopamine Juice Callout Banner */}
+          {missionToast && (
+            <div className="mx-auto mt-2 px-4 py-1.5 rounded-xl bg-gradient-to-r from-amber-400 via-rose-500 to-purple-500 text-slate-950 font-display font-black text-sm tracking-wide shadow-[0_0_20px_rgba(251,191,36,0.6)] animate-bounce border border-amber-300 flex items-center gap-1.5">
+              <span>🎯 MISSION COMPLETED:</span>
+              <span className="text-white">{missionToast.title.toUpperCase()}</span>
+              <span className="text-amber-200 font-mono">(+{missionToast.reward.toLocaleString()} CR)</span>
+            </div>
+          )}
+
           {/* Ephemeral Near-Miss / Fever / Flash / Milestone Callout Banner */}
           {telemetry.nearMissText && (
             <div
@@ -1291,6 +1539,14 @@ export default function App() {
               </button>
               <button
                 type="button"
+                onClick={() => setIsSettingsOpen(true)}
+                className="w-full min-h-[44px] py-2.5 px-5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-slate-200 font-semibold text-sm whitespace-nowrap flex items-center justify-center gap-2"
+              >
+                <span>⚙️</span>
+                <span>Settings &amp; Accessibility</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => setGamePhase('title')}
                 className="w-full min-h-[44px] py-2.5 px-5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 font-semibold text-sm whitespace-nowrap"
               >
@@ -1409,6 +1665,43 @@ export default function App() {
               </div>
             )}
 
+            {/* Compact Daily Missions Progress Card */}
+            {(() => {
+              const dailyMissions = getDailyMissions();
+              const completedCount = dailyMissions.filter((m) => m.completed).length;
+              const claimableCount = dailyMissions.filter((m) => m.completed && !m.claimed).length;
+
+              return (
+                <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-lg bg-purple-950/80 border border-purple-500/40 flex items-center justify-center text-purple-300 shrink-0 text-sm">
+                      📋
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-bold text-slate-200">Daily Missions</span>
+                        {claimableCount > 0 && (
+                          <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-400 text-slate-950 font-bold uppercase tracking-wider animate-pulse">
+                            {claimableCount} Claimable
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[10px] text-slate-400 font-mono">
+                        {completedCount}/{dailyMissions.length} Complete
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsMissionsOpen(true)}
+                    className="min-h-[36px] px-3 py-1.5 rounded-lg bg-purple-600/30 hover:bg-purple-600/50 border border-purple-500/60 text-purple-200 text-xs font-semibold whitespace-nowrap transition-colors"
+                  >
+                    View Missions
+                  </button>
+                </div>
+              );
+            })()}
+
             {/* Primary Retry CTA & Garage / AI Voice Hype Actions */}
             <div className="space-y-2.5 pt-1">
               <button
@@ -1418,6 +1711,15 @@ export default function App() {
                 className="w-full min-h-[50px] py-3 px-6 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-display font-bold text-lg tracking-wide transition-colors whitespace-nowrap"
               >
                 Try Again (Space / Tap)
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsShareCardOpen(true)}
+                className="w-full min-h-[46px] py-2.5 px-4 rounded-xl bg-gradient-to-r from-cyan-500/20 via-blue-500/20 to-amber-500/20 hover:from-cyan-500/30 hover:to-amber-500/30 border border-cyan-400/60 text-cyan-300 font-semibold text-sm flex items-center justify-center gap-2 transition-all whitespace-nowrap shadow-[0_0_15px_rgba(6,182,212,0.2)]"
+              >
+                <span>📸</span>
+                <span>Share Polaroid Record Card</span>
               </button>
 
               <div className="grid grid-cols-2 gap-2.5">
@@ -1504,6 +1806,49 @@ export default function App() {
         <ArtGalleryModal
           isOpen={isArtGalleryOpen}
           onClose={() => setIsArtGalleryOpen(false)}
+        />
+      )}
+
+      {isDailySpinOpen && (
+        <DailyRewardModal
+          isOpen={isDailySpinOpen}
+          onClose={() => setIsDailySpinOpen(false)}
+          onClaimReward={handleClaimReward}
+          currentCoins={coins}
+        />
+      )}
+
+      {isMissionsOpen && (
+        <MissionModal
+          isOpen={isMissionsOpen}
+          onClose={() => setIsMissionsOpen(false)}
+          onClaimReward={handleClaimReward}
+        />
+      )}
+
+      {isSettingsOpen && (
+        <SettingsModal
+          isOpen={isSettingsOpen}
+          onClose={() => setIsSettingsOpen(false)}
+          settings={gameSettings}
+          onUpdateSettings={(next) => setGameSettings(next)}
+        />
+      )}
+
+      {isShareCardOpen && (
+        <ShareCardModal
+          isOpen={isShareCardOpen}
+          onClose={() => setIsShareCardOpen(false)}
+          score={lastRunStats.score || telemetry.score}
+          distance={lastRunStats.distance || telemetry.distance}
+          maxCombo={lastRunStats.maxCombo || telemetry.maxCombo}
+          overtakes={lastRunStats.overtakes || telemetry.overtakes}
+          nearMisses={lastRunStats.nearMisses || telemetry.nearMisses}
+          carName={selectedCar.name}
+          carTier={selectedCar.tier}
+          carColor={activeAppearance.primaryColor}
+          gameMode={gameMode}
+          coinsEarned={lastRunStats.coinsCollected}
         />
       )}
     </main>
