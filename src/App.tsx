@@ -31,6 +31,7 @@ import { GarageModal } from './components/GarageModal';
 import { LeaderboardEntry, LeaderboardModal } from './components/LeaderboardModal';
 import { AiPitStudioModal } from './components/AiPitStudioModal';
 import { AiAudioModal } from './components/AiAudioModal';
+import { ArtGalleryModal } from './components/ArtGalleryModal';
 import { SteeringWheel } from './components/SteeringWheel';
 import { RealisticPedals } from './components/RealisticPedals';
 
@@ -243,6 +244,7 @@ export default function App() {
   const [isAiStudioOpen, setIsAiStudioOpen] = useState<boolean>(false);
   const [isAudioModalOpen, setIsAudioModalOpen] = useState<boolean>(false);
   const [isLeaderboardOpen, setIsLeaderboardOpen] = useState<boolean>(false);
+  const [isArtGalleryOpen, setIsArtGalleryOpen] = useState<boolean>(false);
   const [dockCollapsed, setDockCollapsed] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(false);
 
@@ -465,6 +467,7 @@ export default function App() {
     setIsAiStudioOpen(false);
     setIsAudioModalOpen(false);
     setIsLeaderboardOpen(false);
+    setIsArtGalleryOpen(false);
     document.body.dataset.state = 'playing';
     setRestartTriggerCount((c) => c + 1);
     setGamePhase('playing');
@@ -559,12 +562,13 @@ export default function App() {
         return;
       }
 
-      if (isGarageOpen || isAiStudioOpen || isAudioModalOpen || isLeaderboardOpen) {
+      if (isGarageOpen || isAiStudioOpen || isAudioModalOpen || isLeaderboardOpen || isArtGalleryOpen) {
         if (code === 'Escape') {
           setIsGarageOpen(false);
           setIsAiStudioOpen(false);
           setIsAudioModalOpen(false);
           setIsLeaderboardOpen(false);
+          setIsArtGalleryOpen(false);
         }
         return;
       }
@@ -876,6 +880,13 @@ export default function App() {
                 className="min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-slate-700/90 text-xs font-semibold text-slate-100 transition-colors whitespace-nowrap shrink-0"
               >
                 Leaderboard
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsArtGalleryOpen(true)}
+                className="min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-slate-700/90 text-xs font-semibold text-cyan-300 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5"
+              >
+                <span>🖼️ Gallery</span>
               </button>
               <button
                 type="button"
@@ -1859,6 +1870,13 @@ export default function App() {
           onTrackActivated={(_trackId, title) => {
             setCustomBgmTitle(title);
           }}
+        />
+      )}
+
+      {isArtGalleryOpen && (
+        <ArtGalleryModal
+          isOpen={isArtGalleryOpen}
+          onClose={() => setIsArtGalleryOpen(false)}
         />
       )}
     </main>

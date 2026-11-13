@@ -317,3 +317,4 @@ export const RealisticPedals: React.FC<RealisticPedalsProps> = React.memo(({
     </div>
   );
 });
+
