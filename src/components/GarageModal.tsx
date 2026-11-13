@@ -28,6 +28,7 @@ import {
 } from '../game/rules';
 import { getPixelCarCanvas } from '../game/pixelSprites';
 import { soundFX } from '../game/audio';
+import { Car3DViewer } from './Car3DViewer';
 
 interface GarageModalProps {
   isOpen: boolean;
@@ -63,6 +64,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
   onClearCustomSprite,
 }) => {
   const [previewCarId, setPreviewCarId] = useState<string>(selectedCarId);
+  const [viewMode, setViewMode] = useState<'3d' | '2d'>('3d');
   const [previewDir, setPreviewDir] = useState<DiagonalDirection>('right');
   const [activeTab, setActiveTab] = useState<GarageTabId>('body');
   const [previewFlashing, setPreviewFlashing] = useState<boolean>(false);
@@ -162,167 +164,200 @@ export const GarageModal: React.FC<GarageModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-5 pointer-events-auto"
-      style={{ backgroundColor: 'rgba(5, 8, 17, 0.92)' }}
+      className="fixed inset-0 z-50 flex flex-col bg-[#090e1a] sm:inset-3 sm:max-w-6xl sm:mx-auto sm:rounded-2xl border sm:border-slate-700/80 overflow-hidden pointer-events-auto"
       role="dialog"
       aria-modal="true"
-      aria-label="Progressive Drift Garage and Mod Shop"
+      aria-label="Neon Redline 3D Garage and Mod Shop"
     >
-      <div
-        className="w-full max-w-6xl max-h-[94vh] overflow-y-auto rounded-xl border border-slate-700/80 p-3 sm:p-5 text-slate-100 shadow-2xl"
-        style={{ backgroundColor: '#090e1a' }}
-      >
-        {/* Hangar Header */}
-        <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-800">
-          <div className="min-w-0">
-            <p className="text-[10px] sm:text-[11px] font-mono tracking-wider text-amber-400 truncate">
-              {CAR_ROSTER.length} CHASSIS · MOD SHOP
-            </p>
-            <h2 className="text-base sm:text-2xl font-bold tracking-tight font-display text-white truncate">
-              Apex Mod Garage
-            </h2>
-          </div>
+      {/* 1. PINNED MOBILE HEADER */}
+      <div className="flex items-center justify-between gap-2 px-3 sm:px-5 py-2.5 border-b border-slate-800 bg-[#090e1a] shrink-0 pt-safe">
+        <div className="min-w-0">
+          <p className="text-[10px] sm:text-[11px] font-mono tracking-wider text-amber-400 truncate">
+            {CAR_ROSTER.length} CHASSIS · 3D SHOWROOM
+          </p>
+          <h2 className="text-base sm:text-xl font-bold tracking-tight font-display text-white truncate">
+            Neon Redline Garage
+          </h2>
+        </div>
 
-          <div className="flex items-center gap-3 shrink-0">
-            <div className="text-right px-3 py-1 rounded-lg bg-slate-950 border border-slate-800">
-              <span className="block text-[10px] font-mono text-slate-400">CREDITS</span>
-              <span className="text-sm sm:text-lg font-bold font-mono tabular-nums text-amber-400">
-                {Math.round(coins).toLocaleString()} CR
-              </span>
-            </div>
+        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+          <div className="text-right px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800">
+            <span className="block text-[9px] font-mono text-slate-400">CREDITS</span>
+            <span className="text-xs sm:text-base font-bold font-mono tabular-nums text-amber-400">
+              {Math.round(coins).toLocaleString()} CR
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close Garage"
+            className="min-h-[42px] px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-1"
+          >
+            <span>✕</span>
+            <span className="hidden sm:inline">Close</span>
+          </button>
+        </div>
+      </div>
+
+      {/* 2. 14-CAR ROSTER STRIP (Touch-Scrollable Horizontal Carousel on Mobile) */}
+      <div className="flex overflow-x-auto scrollbar-none snap-x gap-1.5 px-3 sm:px-5 py-2 bg-slate-950/60 border-b border-slate-800/80 shrink-0">
+        {CAR_ROSTER.map((car) => {
+          const unlocked = unlockedCarIds.includes(car.id);
+          const active = previewCar.id === car.id;
+          const equipped = selectedCarId === car.id;
+          const swatch =
+            PAINT_OPTIONS.find((p) => p.id === (carCustomizations[car.id]?.paint || 'stock'))?.hex ||
+            car.primaryColor;
+          return (
             <button
+              key={car.id}
               type="button"
-              onClick={onClose}
-              aria-label="Close Garage"
-              className="min-h-[42px] px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap shrink-0"
+              onClick={() => setPreviewCarId(car.id)}
+              className={`min-w-[118px] sm:min-w-[134px] p-2 rounded-xl border text-left transition-colors snap-start shrink-0 ${
+                active
+                  ? 'border-amber-400 bg-slate-900 shadow-[0_0_12px_rgba(251,191,36,0.2)]'
+                  : 'border-slate-800 bg-slate-950 hover:border-slate-700'
+              }`}
             >
-              Close
-            </button>
-          </div>
-        </div>
-
-        {/* 14-Car Roster Strip (Horizontal Scroll on Mobile, 7-Column Grid on Desktop) */}
-        <div className="flex overflow-x-auto sm:grid sm:grid-cols-7 gap-1.5 my-3 pb-1">
-          {CAR_ROSTER.map((car) => {
-            const unlocked = unlockedCarIds.includes(car.id);
-            const active = previewCar.id === car.id;
-            const equipped = selectedCarId === car.id;
-            const swatch =
-              PAINT_OPTIONS.find((p) => p.id === (carCustomizations[car.id]?.paint || 'stock'))?.hex ||
-              car.primaryColor;
-            return (
-              <button
-                key={car.id}
-                type="button"
-                onClick={() => setPreviewCarId(car.id)}
-                className={`min-w-[122px] sm:min-w-0 p-2 rounded-lg border text-left transition-colors shrink-0 ${
-                  active
-                    ? 'border-amber-400 bg-slate-900 shadow-inner'
-                    : 'border-slate-800 bg-slate-950 hover:border-slate-700'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-1 text-[10px] font-mono mb-0.5">
-                  <span className="flex items-center gap-1 font-bold text-slate-300">
-                    <span
-                      className="w-2 h-2 rounded-sm border border-white/30 inline-block"
-                      style={{ backgroundColor: swatch }}
-                    />
-                    T{car.tier}
-                  </span>
+              <div className="flex items-center justify-between gap-1 text-[10px] font-mono mb-0.5">
+                <span className="flex items-center gap-1 font-bold text-slate-300">
                   <span
-                    className={
-                      equipped
-                        ? 'text-emerald-400 font-bold'
-                        : unlocked
-                        ? 'text-cyan-400'
-                        : 'text-amber-400'
-                    }
-                  >
-                    {equipped ? 'ACTIVE' : unlocked ? 'OWNED' : `${car.unlockCost}`}
-                  </span>
-                </div>
-                <div className="text-[11px] font-bold font-display leading-tight truncate text-slate-100">
-                  {car.name}
-                </div>
-              </button>
-            );
-          })}
-        </div>
+                    className="w-2.5 h-2.5 rounded-full border border-white/30 inline-block shrink-0"
+                    style={{ backgroundColor: swatch }}
+                  />
+                  T{car.tier}
+                </span>
+                <span
+                  className={
+                    equipped
+                      ? 'text-emerald-400 font-bold'
+                      : unlocked
+                      ? 'text-cyan-400'
+                      : 'text-amber-400'
+                  }
+                >
+                  {equipped ? 'ACTIVE' : unlocked ? 'OWNED' : `${car.unlockCost}`}
+                </span>
+              </div>
+              <div className="text-[11px] font-bold font-display leading-tight truncate text-slate-100">
+                {car.name}
+              </div>
+            </button>
+          );
+        })}
+      </div>
 
-        {/* Main Split Layout: Live 3D Pixel Car Bay + Tabbed Mod Shop */}
+      {/* 3. SCROLLABLE MIDDLE BODY */}
+      <div className="flex-1 overflow-y-auto px-3 sm:px-5 py-3 min-h-0 space-y-4">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-          {/* Left Column: Live Car Showcase & Interactive Rig Tests */}
-          <div className="lg:col-span-5 lg:sticky lg:top-0 flex flex-col justify-between rounded-xl border border-slate-800 bg-slate-950 p-3 sm:p-4">
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <span className="text-[11px] font-mono text-slate-400 truncate">
+          {/* Left Column: 3D/2D Showroom & Testing Bay */}
+          <div className="lg:col-span-5 flex flex-col rounded-2xl border border-slate-800 bg-slate-950 p-3 sm:p-4">
+            <div className="flex items-center justify-between gap-2 mb-2.5">
+              <span className="text-[11px] font-mono text-slate-300 truncate font-semibold">
                 {previewCar.codename}
               </span>
               <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded-lg border border-slate-800 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setPreviewDir('left')}
-                  className={`px-2 py-1 text-[11px] font-mono rounded transition-colors whitespace-nowrap ${
-                    previewDir === 'left'
-                      ? 'bg-amber-500 text-slate-950 font-bold'
+                  onClick={() => setViewMode('3d')}
+                  className={`min-h-[34px] px-2.5 py-1 text-[11px] font-mono rounded-md transition-colors whitespace-nowrap flex items-center gap-1 ${
+                    viewMode === '3d'
+                      ? 'bg-cyan-500 text-slate-950 font-bold shadow'
                       : 'text-slate-300 hover:text-white'
                   }`}
                 >
-                  \ Left
+                  <span>🏎️ 3D Model</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => setPreviewDir('right')}
-                  className={`px-2 py-1 text-[11px] font-mono rounded transition-colors whitespace-nowrap ${
-                    previewDir === 'right'
-                      ? 'bg-amber-500 text-slate-950 font-bold'
+                  onClick={() => setViewMode('2d')}
+                  className={`min-h-[34px] px-2.5 py-1 text-[11px] font-mono rounded-md transition-colors whitespace-nowrap flex items-center gap-1 ${
+                    viewMode === '2d'
+                      ? 'bg-amber-500 text-slate-950 font-bold shadow'
                       : 'text-slate-300 hover:text-white'
                   }`}
                 >
-                  / Right
+                  <span>👾 2D Pixel</span>
                 </button>
+                {viewMode === '2d' && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setPreviewDir('left')}
+                      className={`min-h-[34px] px-2 py-1 text-[11px] font-mono rounded-md transition-colors whitespace-nowrap ${
+                        previewDir === 'left'
+                          ? 'bg-amber-400 text-slate-950 font-bold'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      \ L
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPreviewDir('right')}
+                      className={`min-h-[34px] px-2 py-1 text-[11px] font-mono rounded-md transition-colors whitespace-nowrap ${
+                        previewDir === 'right'
+                          ? 'bg-amber-400 text-slate-950 font-bold'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      / R
+                    </button>
+                  </>
+                )}
               </div>
             </div>
 
-            {/* Pixel Turntable Bay */}
-            <div
-              className="relative flex items-center justify-center h-40 sm:h-52 rounded-lg overflow-hidden bg-slate-900 border border-slate-800"
-              style={{
-                backgroundImage: previewFlashing
-                  ? `radial-gradient(circle at ${previewDir === 'right' ? '72% 38%' : '28% 38%'}, ${resolved.headlightBeamHex}77, rgba(15, 23, 42, 0.96) 70%)`
-                  : resolved.underglowHex
-                  ? `radial-gradient(circle at 50% 66%, ${resolved.underglowHex}38, rgba(15, 23, 42, 0.96) 72%)`
-                  : 'radial-gradient(circle at 50% 62%, rgba(251, 191, 36, 0.14), rgba(15, 23, 42, 0.96) 72%)',
-              }}
-            >
-              {previewFlashing && (
-                <div
-                  aria-hidden="true"
-                  className="absolute inset-0 pointer-events-none"
-                  style={{
-                    background:
-                      previewDir === 'right'
-                        ? `linear-gradient(28deg, transparent 42%, ${resolved.headlightBeamHex}55 78%, ${resolved.headlightBeamHex}99 100%)`
-                        : `linear-gradient(152deg, transparent 42%, ${resolved.headlightBeamHex}55 78%, ${resolved.headlightBeamHex}99 100%)`,
-                  }}
-                />
-              )}
-              <canvas
-                ref={spriteCanvasRef}
-                width={300}
-                height={220}
-                style={{ imageRendering: 'pixelated' }}
-                className="relative z-10 w-64 h-44 sm:w-72 sm:h-52 object-contain"
+            {/* Turntable Bay: 3D Model or 2D Pixel Canvas */}
+            {viewMode === '3d' ? (
+              <Car3DViewer
+                car={previewCar}
+                appearance={resolved}
+                customization={currentCustom}
+                isFlashing={previewFlashing}
+                isRevving={previewRevving}
               />
-            </div>
+            ) : (
+              <div
+                className="relative flex items-center justify-center h-48 sm:h-60 rounded-xl overflow-hidden bg-slate-900 border border-slate-800"
+                style={{
+                  backgroundImage: previewFlashing
+                    ? `radial-gradient(circle at ${previewDir === 'right' ? '72% 38%' : '28% 38%'}, ${resolved.headlightBeamHex}77, rgba(15, 23, 42, 0.96) 70%)`
+                    : resolved.underglowHex
+                    ? `radial-gradient(circle at 50% 66%, ${resolved.underglowHex}38, rgba(15, 23, 42, 0.96) 72%)`
+                    : 'radial-gradient(circle at 50% 62%, rgba(251, 191, 36, 0.14), rgba(15, 23, 42, 0.96) 72%)',
+                }}
+              >
+                {previewFlashing && (
+                  <div
+                    aria-hidden="true"
+                    className="absolute inset-0 pointer-events-none"
+                    style={{
+                      background:
+                        previewDir === 'right'
+                          ? `linear-gradient(28deg, transparent 42%, ${resolved.headlightBeamHex}55 78%, ${resolved.headlightBeamHex}99 100%)`
+                          : `linear-gradient(152deg, transparent 42%, ${resolved.headlightBeamHex}55 78%, ${resolved.headlightBeamHex}99 100%)`,
+                    }}
+                  />
+                )}
+                <canvas
+                  ref={spriteCanvasRef}
+                  width={300}
+                  height={220}
+                  style={{ imageRendering: 'pixelated' }}
+                  className="relative z-10 w-64 h-44 sm:w-72 sm:h-52 object-contain"
+                />
+              </div>
+            )}
 
             {/* Interactive Rig Tester Buttons: Flash / Horn / Rev Flames + Reset */}
             <div className="grid grid-cols-4 gap-1.5 mt-2.5">
               <button
                 type="button"
                 onClick={triggerTestFlash}
-                className={`min-h-[38px] px-1 sm:px-2 py-1.5 rounded-lg border text-[9.5px] sm:text-[11px] font-mono font-semibold whitespace-nowrap transition-colors ${
+                className={`min-h-[40px] px-1 sm:px-2 py-1.5 rounded-lg border text-[10px] sm:text-[11px] font-mono font-semibold whitespace-nowrap transition-colors ${
                   previewFlashing
-                    ? 'bg-cyan-400 border-white text-slate-950'
+                    ? 'bg-cyan-400 border-white text-slate-950 font-bold'
                     : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-cyan-300'
                 }`}
               >
@@ -331,16 +366,16 @@ export const GarageModal: React.FC<GarageModalProps> = ({
               <button
                 type="button"
                 onClick={triggerTestHorn}
-                className="min-h-[38px] px-1 sm:px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[9.5px] sm:text-[11px] font-mono font-semibold text-amber-300 whitespace-nowrap"
+                className="min-h-[40px] px-1 sm:px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[10px] sm:text-[11px] font-mono font-semibold text-amber-300 whitespace-nowrap"
               >
                 Test Horn
               </button>
               <button
                 type="button"
                 onClick={triggerTestRev}
-                className={`min-h-[38px] px-1 sm:px-2 py-1.5 rounded-lg border text-[9.5px] sm:text-[11px] font-mono font-semibold whitespace-nowrap transition-colors ${
+                className={`min-h-[40px] px-1 sm:px-2 py-1.5 rounded-lg border text-[10px] sm:text-[11px] font-mono font-semibold whitespace-nowrap transition-colors ${
                   previewRevving
-                    ? 'bg-rose-500 border-white text-slate-950'
+                    ? 'bg-rose-500 border-white text-slate-950 font-bold'
                     : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-rose-300'
                 }`}
               >
@@ -354,7 +389,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                     number: previewCar.decalText || '73',
                   })
                 }
-                className="min-h-[38px] px-1 sm:px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[9.5px] sm:text-[11px] font-mono font-semibold text-slate-300 whitespace-nowrap"
+                className="min-h-[40px] px-1 sm:px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[10px] sm:text-[11px] font-mono font-semibold text-slate-300 whitespace-nowrap"
               >
                 Reset
               </button>
@@ -366,7 +401,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                 <h3 className="text-base sm:text-lg font-bold font-display text-white">
                   {previewCar.name}
                 </h3>
-                <span className="text-[11px] font-mono tabular-nums text-amber-400 shrink-0">
+                <span className="text-[11px] font-mono tabular-nums text-amber-400 shrink-0 font-bold">
                   {previewCar.coinMultiplier.toFixed(1)}x CR
                 </span>
               </div>
@@ -376,19 +411,19 @@ export const GarageModal: React.FC<GarageModalProps> = ({
 
               <div className="grid grid-cols-3 gap-1.5 mt-2.5 text-center font-mono tabular-nums">
                 <div className="p-2 rounded-lg bg-slate-900 border border-slate-800">
-                  <span className="block text-[9px] text-slate-400">TOP SPEED</span>
+                  <span className="block text-[9px] text-slate-400 font-semibold">TOP SPEED</span>
                   <span className="text-xs font-bold text-white">
                     {Math.round(effective.topSpeed * 8.5)} KM/H
                   </span>
                 </div>
                 <div className="p-2 rounded-lg bg-slate-900 border border-slate-800">
-                  <span className="block text-[9px] text-slate-400">GRIP</span>
+                  <span className="block text-[9px] text-slate-400 font-semibold">GRIP</span>
                   <span className="text-xs font-bold text-cyan-300">
                     {Math.round(effective.driftGrip * 100)}
                   </span>
                 </div>
                 <div className="p-2 rounded-lg bg-slate-900 border border-slate-800">
-                  <span className="block text-[9px] text-slate-400">FEVER RATE</span>
+                  <span className="block text-[9px] text-slate-400 font-semibold">FEVER RATE</span>
                   <span className="text-xs font-bold text-amber-300">
                     {effective.feverGainRate.toFixed(2)}x
                   </span>
@@ -929,48 +964,55 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                 </div>
               )}
             </div>
-
-            {/* Bottom Unlock / Equip Action */}
-            <div className="mt-4 pt-3.5 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
-              <div className="text-xs text-slate-400">
-                {isUnlocked
-                  ? isEquipped
-                    ? 'Active machine ready on the starting grid.'
-                    : 'Unlocked — equip to take this build onto the highway.'
-                  : `Requires ${previewCar.unlockCost.toLocaleString()} CR to unlock Tier ${previewCar.tier}.`}
-              </div>
-
-              {isUnlocked ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onSelectCar(previewCar.id);
-                    onClose();
-                  }}
-                  className={`min-h-[44px] px-5 py-2 rounded-lg text-sm font-bold transition-colors whitespace-nowrap shrink-0 ${
-                    isEquipped
-                      ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
-                      : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
-                  }`}
-                >
-                  {isEquipped ? 'Equipped — Drive Now' : 'Equip Car'}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  disabled={coins < previewCar.unlockCost}
-                  onClick={() => onUnlockCar(previewCar)}
-                  className={`min-h-[44px] px-5 py-2 rounded-lg text-sm font-bold transition-colors whitespace-nowrap shrink-0 ${
-                    coins >= previewCar.unlockCost
-                      ? 'bg-amber-500 hover:bg-amber-400 text-slate-950'
-                      : 'bg-slate-800 text-slate-500 cursor-not-allowed'
-                  }`}
-                >
-                  Unlock Car ({previewCar.unlockCost.toLocaleString()} CR)
-                </button>
-              )}
-            </div>
           </div>
+        </div>
+      </div>
+
+      {/* 4. PINNED STICKY BOTTOM ACTION BAR (Always visible for instant thumb access on mobile) */}
+      <div className="flex-shrink-0 border-t border-slate-800 bg-[#090e1a]/95 backdrop-blur-md px-3 sm:px-5 py-2.5 pb-safe flex items-center justify-between gap-3 z-10 shadow-2xl">
+        <div className="min-w-0 flex flex-col justify-center">
+          <span className="text-xs sm:text-sm font-display font-bold text-white truncate">
+            {previewCar.name}
+          </span>
+          <span className="text-[11px] font-mono text-slate-400 truncate">
+            {isUnlocked
+              ? isEquipped
+                ? 'Ready on grid'
+                : 'Unlocked · Tap to drive'
+              : `Tier ${previewCar.tier} · ${previewCar.unlockCost.toLocaleString()} CR`}
+          </span>
+        </div>
+
+        <div className="shrink-0 flex items-center gap-2">
+          {isUnlocked ? (
+            <button
+              type="button"
+              onClick={() => {
+                onSelectCar(previewCar.id);
+                onClose();
+              }}
+              className={`min-h-[46px] px-5 py-2 rounded-xl text-xs sm:text-sm font-bold font-display tracking-wider transition-all shadow-lg active:scale-95 whitespace-nowrap ${
+                isEquipped
+                  ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 ring-2 ring-emerald-400/50'
+                  : 'bg-amber-500 hover:bg-amber-400 text-slate-950 ring-2 ring-amber-400/50'
+              }`}
+            >
+              {isEquipped ? '✓ Equipped · Race' : 'Equip Car'}
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={coins < previewCar.unlockCost}
+              onClick={() => onUnlockCar(previewCar)}
+              className={`min-h-[46px] px-5 py-2 rounded-xl text-xs sm:text-sm font-bold font-display tracking-wider transition-all shadow-lg active:scale-95 whitespace-nowrap ${
+                coins >= previewCar.unlockCost
+                  ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 ring-2 ring-amber-400/50'
+                  : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
+              }`}
+            >
+              Unlock ({previewCar.unlockCost.toLocaleString()} CR)
+            </button>
+          )}
         </div>
       </div>
     </div>

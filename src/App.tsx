@@ -635,7 +635,7 @@ export default function App() {
   const nextLockedCar = CAR_ROSTER.find((c) => !unlockedCarIds.includes(c.id));
 
   return (
-    <main className="relative w-screen h-screen overflow-hidden select-none">
+    <main className="relative w-full h-[100dvh] max-h-[100dvh] overflow-hidden select-none touch-none">
       {/* 1. Full-Bleed 2D Pixel-Art Drift Viewport */}
       <SceneCanvas
         gamePhase={gamePhase}
@@ -744,17 +744,17 @@ export default function App() {
               viewBox="0 0 440 112"
               className="w-full max-w-[390px] mx-auto drop-shadow-[0_8px_24px_rgba(0,0,0,0.9)]"
               role="img"
-              aria-label="Apex Slash: Diagonal 3D Drift"
+              aria-label="Neon Redline: 3D Touge & Highway Drift"
             >
               <polygon
                 points="26,12 418,6 396,84 10,90"
                 fill="#090e1a"
-                stroke="#f59e0b"
+                stroke="#06b6d4"
                 strokeWidth="2.6"
               />
-              <polygon points="376,7 418,6 396,84 354,85" fill="#f97316" />
-              <polygon points="348,8 368,8 346,85 326,85" fill="#06b6d4" />
-              <polygon points="30,18 44,18 30,78 16,78" fill="#fbbf24" />
+              <polygon points="376,7 418,6 396,84 354,85" fill="#f43f5e" />
+              <polygon points="348,8 368,8 346,85 326,85" fill="#f59e0b" />
+              <polygon points="30,18 44,18 30,78 16,78" fill="#06b6d4" />
               <text
                 x="182"
                 y="54"
@@ -763,24 +763,24 @@ export default function App() {
                 fontFamily="'Chakra Petch', sans-serif"
                 fontWeight="700"
                 fontStyle="italic"
-                fontSize="41"
-                letterSpacing="2.5"
+                fontSize="38"
+                letterSpacing="2.0"
               >
-                APEX SLASH
+                NEON REDLINE
               </text>
               <text
                 x="182"
                 y="75"
                 textAnchor="middle"
-                fill="#fbbf24"
+                fill="#06b6d4"
                 fontFamily="'JetBrains Mono', monospace"
                 fontWeight="700"
                 fontSize="10"
-                letterSpacing="1.6"
+                letterSpacing="1.8"
               >
                 {gameMode === 'highway_traffic'
-                  ? 'HIGHWAY TRAFFIC · 2-LANE OVERTAKE'
-                  : 'MOUNTAIN TOUGE · 3D PIXEL DRIFT'}
+                  ? 'HIGHWAY TRAFFIC · OVERTAKE CLASH'
+                  : 'TOKYO TOUGE · 3D PIXEL DRIFT'}
               </text>
             </svg>
           </div>
@@ -904,8 +904,9 @@ export default function App() {
               </button>
             </div>
 
-            <p className="text-center text-[10.5px] sm:text-xs text-slate-300 pt-0.5 leading-tight">
-              Wheel Steer · Gas/Brake Pedals · F Flash · E Horn · Space Nitro
+            <p className="text-center text-[10px] sm:text-xs text-slate-300 pt-0.5 leading-tight flex items-center justify-center gap-1.5 font-mono">
+              <span className="text-cyan-400">📱 Mobile Ready:</span>
+              <span>Tap to Drift · Pedals &amp; Wheel for Traffic · 3D Garage</span>
             </p>
           </div>
         </div>
