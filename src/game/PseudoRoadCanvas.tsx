@@ -53,6 +53,8 @@ import {
   speedToKmh,
   stepLateral,
   stepTimers,
+  sweptOverlapZ,
+  pruneTrackBehind,
 } from './pseudoRoad';
 import {
   getBackdropLayer,
@@ -153,6 +155,14 @@ const SPRITE_FILL = 0.62; // fraction of pixel-sprite canvas width the car body 
 const PLAYER_HALF_W = (CAR_WORLD_W / ROAD_WIDTH) * 0.5; // in road half-width units
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+
+/** In-place filter: keeps array identity and avoids a per-frame allocation. */
+function compact<T>(arr: T[], keep: (v: T) => boolean) {
+  let w = 0;
+  for (let i = 0; i < arr.length; i++) if (keep(arr[i])) arr[w++] = arr[i];
+  arr.length = w;
+}
+
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
 function hexToRgb(hex: string): [number, number, number] {
@@ -272,6 +282,18 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo((props) => {
       keys.left = keys.right = false;
     };
 
+    let statsKey: unknown[] = [];
+    let statsCache: ReturnType<typeof computeEffectiveCarStats> | null = null;
+    const getStats = () => {
+      const p = propsRef.current;
+      if (!statsCache || statsKey[0] !== p.selectedCar || statsKey[1] !== p.carUpgrades || statsKey[2] !== p.carCustom) {
+        statsKey = [p.selectedCar, p.carUpgrades, p.carCustom];
+        statsCache = computeEffectiveCarStats(p.selectedCar, p.carUpgrades, p.carCustom);
+      }
+      return statsCache;
+    };
+
+    const coinFrames = getCoinFrames();
     const baseDepth = cameraDepthFor(FIELD_OF_VIEW);
     const playerZ = CAMERA_HEIGHT * baseDepth;
 
@@ -376,7 +398,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo((props) => {
       const mode = track.mode;
       const want = mode === 'highway_traffic' ? 14 : 4;
       const ahead = position + playerZ;
-      traffic = traffic.filter((c) => c.z > position - SEGMENT_LENGTH * 4);
+      compact(traffic, (c) => c.z > position - SEGMENT_LENGTH * 4);
       if (nextTrafficZ < ahead + SEGMENT_LENGTH * 20) nextTrafficZ = ahead + SEGMENT_LENGTH * 20;
       while (traffic.length < want) {
         const lane = Math.floor(Math.random() * track.lanes);
@@ -399,7 +421,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo((props) => {
     // ------------------------------------------------------------------ update
     const update = (dtRaw: number, phase: GamePhase) => {
       const p = propsRef.current;
-      const stats = computeEffectiveCarStats(p.selectedCar, p.carUpgrades, p.carCustom);
+      const stats = getStats();
       const playing = phase === 'playing' && !crashed;
       const attract = phase === 'title' || phase === 'gameover';
 
@@ -530,17 +552,27 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo((props) => {
         if (Math.random() < 0.6) smoke(W / 2 + (Math.random() - 0.5) * W * 0.2, H * 0.92, 'rgba(160,130,90,0.5)');
       }
       ensureTrackAhead(track, Math.floor((position + playerZ) / SEGMENT_LENGTH) + DRAW_DISTANCE + 2);
+      pruneTrackBehind(track, Math.floor(position / SEGMENT_LENGTH) - 8);
+      if (attract && position > SEGMENT_LENGTH * 6000) {
+        // keep the idle title-screen demo from growing the road forever
+        track = createTrack(track.mode, (Math.random() * 1e9) | 0);
+        position = 0;
+        traffic = [];
+        nextTrafficZ = SEGMENT_LENGTH * 30;
+      }
 
       // ---- traffic
       spawnTraffic();
       const playerWorldZ = position + playerZ;
+      const prevPlayerWorldZ = playerWorldZ - speed * dt;
       let slipCandidate = false;
       for (const c of traffic) {
+        const prevDz = c.z - prevPlayerWorldZ;
         c.z += c.speed * dt;
         c.x = lerp(c.x, c.targetX, Math.min(1, dt * 2.2));
         const dz = c.z - playerWorldZ;
-        // collision
-        if (!crashed && !attract && Math.abs(dz) < SEGMENT_LENGTH * 0.9 && carsOverlap(playerX, PLAYER_HALF_W * 2, c.x, PLAYER_HALF_W * 2, 0.78)) {
+        // collision (swept along z so a big frame step can't skip through a car)
+        if (!crashed && !attract && sweptOverlapZ(prevDz, dz, SEGMENT_LENGTH * 0.9) && carsOverlap(playerX, PLAYER_HALF_W * 2, c.x, PLAYER_HALF_W * 2, 0.78)) {
           if (track.mode === 'highway_traffic' && run.feverTimer <= 0) {
             crashed = true;
             crashReason = 'Traffic Collision';
@@ -743,13 +775,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo((props) => {
         pt.vy += pt.gravity * dtRaw;
         pt.size += pt.grow * dtRaw;
       }
-      particles = particles.filter((pt) => pt.life > 0);
+      compact(particles, (pt) => pt.life > 0);
       if (particles.length > 260) particles.splice(0, particles.length - 260);
       for (const pu of popups) {
         pu.life -= dtRaw;
         pu.y -= 34 * dtRaw;
       }
-      popups = popups.filter((pu) => pu.life > 0);
+      compact(popups, (pu) => pu.life > 0);
 
       // ---- audio
       if (playing) {
@@ -821,6 +853,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo((props) => {
     };
 
     const fogColor = () => sky.skyStops[2];
+    let fogCacheKey = '';
+    const fogStyles: string[] = new Array(DRAW_DISTANCE);
 
     const drawSprite = (
       img: CanvasImageSource & { width: number; height: number },
@@ -851,7 +885,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo((props) => {
       const horizon = H * horizonRatio();
       const isFever = run.feverTimer > 0;
       const boosting = run.boostTimer > 0;
-      const maxSpeed = maxSpeedFor(computeEffectiveCarStats(p.selectedCar, p.carUpgrades, p.carCustom).topSpeed);
+      const maxSpeed = maxSpeedFor(getStats().topSpeed);
       const speedRatio = speed / maxSpeed;
 
       ctx.save();
@@ -883,7 +917,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo((props) => {
         ctx.globalAlpha = 1;
       });
       // backdrop layers
-      const bgW = Math.max(512, Math.ceil(W * 2));
+      const bgW = 1024;
       const far = getBackdropLayer(biome, 0, sky.mtnFar, bgW);
       const near = getBackdropLayer(biome, 1, sky.mtnNear, bgW);
       const playerSeg = findSegment(track, position + playerZ);
@@ -914,7 +948,15 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo((props) => {
       let x = 0;
       let dx = -(baseSeg.curve * basePercent);
       const projs: { x1: number; y1: number; w1: number; x2: number; y2: number; w2: number; s2: number; clip: number; camX: number }[] = [];
-      const fog = hexToRgb(fogColor().startsWith('#') ? fogColor() : '#9ca3af');
+      const fogKey = fogColor();
+      if (fogKey !== fogCacheKey) {
+        fogCacheKey = fogKey;
+        const fog = hexToRgb(fogKey.startsWith('#') ? fogKey : '#9ca3af');
+        for (let n = 0; n < DRAW_DISTANCE; n++) {
+          const fogT = clamp(n / DRAW_DISTANCE, 0, 1) ** 1.6;
+          fogStyles[n] = `rgba(${fog[0]},${fog[1]},${fog[2]},${fogT * 0.85})`;
+        }
+      }
       const valley = biome.valleyStops;
       const feverHue = (time * 0.25) % 360;
 
@@ -963,14 +1005,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo((props) => {
         }
         // fog
         if (fogT > 0.02) {
-          ctx.fillStyle = `rgba(${fog[0]},${fog[1]},${fog[2]},${fogT * 0.85})`;
+          ctx.fillStyle = fogStyles[n];
           ctx.fillRect(0, p2.y, W, y1 - p2.y + 1);
         }
         maxY = p2.y;
       }
 
       // ---- sprites, back to front
-      const coinFrames = getCoinFrames();
       const coinFrame = coinFrames[Math.floor(time / 70) % coinFrames.length];
       const isNight = sky.isNight || biome.isNight;
       for (let n = DRAW_DISTANCE - 1; n > 0; n--) {

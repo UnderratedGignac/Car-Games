@@ -341,3 +341,33 @@ export function stepTimers(run: RunState, dt: number) {
 
 /** World units per real metre, consistent with speedToKmh. */
 export const UNITS_PER_METER = 560 * 3.6 / 8;
+
+/**
+ * Swept collision along z: true when the car's position relative to the player
+ * was inside, or crossed, the +/-halfWindow band during this frame.
+ */
+export function sweptOverlapZ(prevDz: number, curDz: number, halfWindow: number): boolean {
+  const lo = Math.min(prevDz, curDz);
+  const hi = Math.max(prevDz, curDz);
+  return lo <= halfWindow && hi >= -halfWindow;
+}
+
+const PRUNED_SEGMENT: RoadSegment = Object.freeze({
+  index: -1,
+  z: 0,
+  curve: 0,
+  y1: 0,
+  y2: 0,
+  props: Object.freeze([]) as unknown as RoadProp[],
+  coin: null,
+  checkpoint: false,
+}) as RoadSegment;
+
+const prunedUpTo = new WeakMap<Track, number>();
+
+/** Replaces every segment before `beforeIndex` with one shared empty placeholder (frees props/coins). */
+export function pruneTrackBehind(track: Track, beforeIndex: number) {
+  const end = Math.min(beforeIndex, track.segments.length);
+  for (let i = prunedUpTo.get(track) ?? 0; i < end; i++) track.segments[i] = PRUNED_SEGMENT;
+  prunedUpTo.set(track, Math.max(prunedUpTo.get(track) ?? 0, end));
+}

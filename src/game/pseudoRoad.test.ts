@@ -16,6 +16,8 @@ import {
   stepTimers,
   checkpointEvery,
   UNITS_PER_METER,
+  sweptOverlapZ,
+  pruneTrackBehind,
 } from './pseudoRoad';
 
 test('createTrack builds a continuous road with segment z positions', () => {
@@ -133,4 +135,24 @@ test('stepLateral: steering assist softens centrifugal drift when hands are off'
   const steering = stepLateral({ x: 0, speedRatio: 1, steer: -1, curve: 5, dt: 0.1, handling: 2.8, drifting: false, assist: 0.5 });
   const steeringRaw = stepLateral({ x: 0, speedRatio: 1, steer: -1, curve: 5, dt: 0.1, handling: 2.8, drifting: false });
   assert.equal(steering.x, steeringRaw.x, 'assist only applies with no input');
+});
+
+test('sweptOverlapZ catches a car skipped over in one big frame step', () => {
+  // car was 250 units ahead, next frame 260 behind: a point test misses it
+  assert.equal(sweptOverlapZ(250, -260, 180), true);
+  assert.equal(sweptOverlapZ(900, 700, 180), false);
+  assert.equal(sweptOverlapZ(100, 50, 180), true);
+  assert.equal(sweptOverlapZ(-400, -500, 180), false);
+});
+
+test('pruneTrackBehind frees old segments but keeps indexing and the road ahead intact', () => {
+  const t = createTrack('drift', 9);
+  ensureTrackAhead(t, 3000);
+  const ahead = t.segments[2600];
+  pruneTrackBehind(t, 2500);
+  assert.equal(t.segments.length >= 3000, true);
+  assert.equal(t.segments[2600], ahead);
+  assert.equal(findSegment(t, 2600 * SEGMENT_LENGTH).index, 2600);
+  assert.equal(t.segments[100].props.length, 0);
+  assert.equal(t.segments[100].coin, null);
 });
