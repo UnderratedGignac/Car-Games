@@ -846,3 +846,173 @@ export function renderBridgeTrussArch3D(params: {
   ctx.lineTo(tRx, tRy);
   ctx.stroke();
 }
+
+/**
+ * Renders weird roadside 3D landmarks (Ancient Dragon Skull rock, Glowing Torii Gate,
+ * Floating Alien Monolith, and Giant Desert Arcade Cabinet) along the highway!
+ */
+export function renderWeirdRoadsideLandmarks3D(params: {
+  ctx: CanvasRenderingContext2D;
+  far: RoadSlice3D;
+  biome: RoadBiomeConfig;
+  projectInto: Project3DIntoFn;
+  nowMs: number;
+}) {
+  const { ctx, far, biome, projectInto, nowMs } = params;
+  if (far.rawZ <= 4 || far.rawZ >= 115) return;
+  const pt = far.pt;
+  const idx = pt.index;
+
+  // 1. Glowing Cyber Torii Gate Spanning Roadway (every ~54 slices)
+  if (idx > 15 && idx % 54 === 12) {
+    const hw = pt.width * 0.58;
+    const gateH = 6.2;
+    const ok1 = projectInto(pt.x - pt.nx * hw, pt.y, pt.z - pt.nz * hw, wp0, 0.55);
+    const ok2 = projectInto(pt.x + pt.nx * hw, pt.y, pt.z + pt.nz * hw, wp1, 0.55);
+    const ok3 = projectInto(pt.x - pt.nx * (hw + 0.6), pt.y + gateH, pt.z - pt.nz * (hw + 0.6), wp2, 0.55);
+    const ok4 = projectInto(pt.x + pt.nx * (hw + 0.6), pt.y + gateH, pt.z + pt.nz * (hw + 0.6), wp3, 0.55);
+    if (ok1 && ok2 && ok3 && ok4) {
+      const col = biome.isNight ? '#f43f5e' : '#dc2626';
+      const beamW = Math.max(2, Math.round(0.32 * far.cM.scale));
+      // Base pillars
+      ctx.strokeStyle = '#090d16';
+      ctx.lineWidth = beamW + 3;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(wp0.x), Math.round(wp0.y));
+      ctx.lineTo(Math.round(wp2.x), Math.round(wp2.y));
+      ctx.moveTo(Math.round(wp1.x), Math.round(wp1.y));
+      ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y));
+      ctx.moveTo(Math.round(wp2.x), Math.round(wp2.y));
+      ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y));
+      ctx.stroke();
+
+      ctx.strokeStyle = col;
+      ctx.lineWidth = beamW;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(wp0.x), Math.round(wp0.y));
+      ctx.lineTo(Math.round(wp2.x), Math.round(wp2.y));
+      ctx.moveTo(Math.round(wp1.x), Math.round(wp1.y));
+      ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y));
+      ctx.moveTo(Math.round(wp2.x), Math.round(wp2.y));
+      ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y));
+      ctx.stroke();
+
+      // Glowing upper lintel Kasagi
+      ctx.strokeStyle = '#fecdd3';
+      ctx.lineWidth = Math.max(1, Math.round(beamW * 0.4));
+      ctx.beginPath();
+      ctx.moveTo(Math.round(wp2.x - 4), Math.round(wp2.y - 2));
+      ctx.lineTo(Math.round(wp3.x + 4), Math.round(wp3.y - 2));
+      ctx.stroke();
+    }
+  }
+
+  // 2. Colossal Ancient Dragon Skull Rock Carving on Roadside Cliff (every ~64 slices)
+  if (idx > 20 && idx % 64 === 32) {
+    const side = (idx % 128 === 32) ? 1 : -1;
+    const skullDist = side * (pt.width * 0.5 + 9.5);
+    const sx = pt.x + pt.nx * skullDist;
+    const sz = pt.z + pt.nz * skullDist;
+    const sy = pt.y + 2.2;
+    if (projectInto(sx, sy, sz, wp0, 0.55)) {
+      const sc = far.cM.scale;
+      const r = Math.max(4, Math.round(2.6 * sc));
+      const cx = Math.round(wp0.x);
+      const cy = Math.round(wp0.y);
+
+      // Skull Cranium
+      ctx.fillStyle = '#090d16';
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, r * 1.35 + 2, r + 2, side * -0.15, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = biome.isNight ? '#cbd5e1' : '#e2e8f0';
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, r * 1.35, r, side * -0.15, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Curved Horns curving backward
+      ctx.strokeStyle = '#090d16';
+      ctx.lineWidth = Math.max(2, Math.round(r * 0.28) + 2);
+      ctx.beginPath();
+      ctx.moveTo(cx - side * r * 0.4, cy - r * 0.6);
+      ctx.quadraticCurveTo(cx - side * r * 1.4, cy - r * 1.8, cx - side * r * 2.2, cy - r * 1.2);
+      ctx.stroke();
+
+      ctx.strokeStyle = '#64748b';
+      ctx.lineWidth = Math.max(1, Math.round(r * 0.28));
+      ctx.stroke();
+
+      // Glowing Hollow Ruby Eyes
+      const eyeCol = '#ef4444';
+      ctx.fillStyle = eyeCol;
+      const eyeX = cx + side * Math.round(r * 0.45);
+      const eyeY = cy - Math.round(r * 0.2);
+      ctx.fillRect(eyeX - 2, eyeY - 2, 4, 4);
+      ctx.fillStyle = '#fecaca';
+      ctx.fillRect(eyeX - 1, eyeY - 1, 2, 2);
+
+      // Snout and Fangs
+      ctx.fillStyle = '#090d16';
+      ctx.fillRect(cx + side * Math.round(r * 0.8), cy + Math.round(r * 0.2), Math.max(2, Math.round(r * 0.6)), Math.max(2, Math.round(r * 0.4)));
+    }
+  }
+
+  // 3. Floating Alien Monolith with Pulsing Runes (every ~72 slices)
+  if (idx > 10 && idx % 72 === 24) {
+    const side = (idx % 144 === 24) ? -1 : 1;
+    const monoDist = side * (pt.width * 0.5 + 7.5);
+    const mx = pt.x + pt.nx * monoDist;
+    const mz = pt.z + pt.nz * monoDist;
+    const floatY = pt.y + 1.8 + Math.sin(nowMs * 0.003 + idx) * 0.6;
+    if (projectInto(mx, floatY, mz, wp0, 0.55)) {
+      const sc = far.cM.scale;
+      const mW = Math.max(3, Math.round(0.85 * sc));
+      const mH = Math.max(6, Math.round(2.6 * sc));
+      const cx = Math.round(wp0.x);
+      const cy = Math.round(wp0.y);
+
+      // Obsidian Monolith Body
+      ctx.fillStyle = '#090d16';
+      ctx.fillRect(cx - Math.floor(mW * 0.5) - 1, cy - mH - 1, mW + 2, mH + 2);
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(cx - Math.floor(mW * 0.5), cy - mH, mW, mH);
+
+      // Pulsing Runes
+      const runeAlpha = (Math.sin(nowMs * 0.007 + idx) + 1) * 0.5;
+      ctx.fillStyle = runeAlpha > 0.4 ? '#c084fc' : '#a855f7';
+      const runeW = Math.max(1, Math.floor(mW * 0.6));
+      ctx.fillRect(cx - Math.floor(runeW * 0.5), cy - Math.round(mH * 0.75), runeW, 2);
+      ctx.fillRect(cx - Math.floor(runeW * 0.5), cy - Math.round(mH * 0.45), runeW, 2);
+      ctx.fillRect(cx - Math.floor(runeW * 0.5), cy - Math.round(mH * 0.20), runeW, 2);
+    }
+  }
+
+  // 4. Giant Desert Arcade Cabinet (every ~48 slices)
+  if (idx > 12 && idx % 48 === 6) {
+    const side = 1;
+    const arcDist = side * (pt.width * 0.5 + 5.8);
+    const ax = pt.x + pt.nx * arcDist;
+    const az = pt.z + pt.nz * arcDist;
+    if (projectInto(ax, pt.y + 1.2, az, wp0, 0.55)) {
+      const sc = far.cM.scale;
+      const aW = Math.max(4, Math.round(1.1 * sc));
+      const aH = Math.max(6, Math.round(2.2 * sc));
+      const cx = Math.round(wp0.x);
+      const cy = Math.round(wp0.y);
+
+      // Cabinet outline & side panels
+      ctx.fillStyle = '#090d16';
+      ctx.fillRect(cx - Math.floor(aW * 0.5) - 1, cy - aH - 1, aW + 2, aH + 2);
+      ctx.fillStyle = '#f43f5e';
+      ctx.fillRect(cx - Math.floor(aW * 0.5), cy - aH, aW, aH);
+
+      // Glowing Neon Marquee
+      ctx.fillStyle = '#fbbf24';
+      ctx.fillRect(cx - Math.floor(aW * 0.4), cy - aH + 1, Math.max(2, Math.floor(aW * 0.8)), Math.max(1, Math.floor(aH * 0.18)));
+
+      // Glowing CRT Screen
+      ctx.fillStyle = '#06b6d4';
+      ctx.fillRect(cx - Math.floor(aW * 0.35), cy - Math.floor(aH * 0.72), Math.max(2, Math.floor(aW * 0.7)), Math.max(2, Math.floor(aH * 0.36)));
+    }
+  }
+}

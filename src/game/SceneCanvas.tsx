@@ -50,6 +50,7 @@ import {
   renderBridgeTrussArch3D,
   renderReflectorBollard3D,
   renderTerrainMesh3D,
+  renderWeirdRoadsideLandmarks3D,
   renderWorldObject3D,
 } from './world3d';
 import { soundFX } from './audio';
@@ -60,6 +61,7 @@ import {
   renderAnimeCloudSprite,
   renderCelestialSprite,
   renderDynamicSkyAtmosphere,
+  renderMythicalDragonsAndSkyAnomalies,
   resolveSkyAtmosphere,
 } from './skyArt';
 
@@ -1211,14 +1213,15 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               existingCars: trafficCars,
               difficultyProgress: 0.25,
             });
-            trafficCars.push(...batch.cars);
+            for (let b = 0; b < batch.cars.length; b++) trafficCars.push(batch.cars[b]);
             nextTrafficId = batch.nextId;
             trafficSpawnCursor = playerSNow + 270;
           }
 
           const lastPt = track[track.length - 1];
           if (lastPt && driftState.z - lastPt.z < 155) {
-            track.push(...extendHighwayTrack(track, 20, STEP_DIST, seed));
+            const ext = extendHighwayTrack(track, 20, STEP_DIST, seed);
+            for (let e = 0; e < ext.length; e++) track.push(ext[e]);
             while (track.length > 90 && track[0].z > driftState.z + 32) {
               track.shift();
             }
@@ -1261,7 +1264,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           // Extend endless road for continuous title flyover
           const lastPt = track[track.length - 1];
           if (lastPt && driftState.z - lastPt.z < 145) {
-            track.push(...extendSCurveTrack(track, 20, STEP_DIST, seed));
+            const ext = extendSCurveTrack(track, 20, STEP_DIST, seed);
+            for (let e = 0; e < ext.length; e++) track.push(ext[e]);
             while (track.length > 85 && track[0].z > driftState.z + 30) {
               track.shift();
             }
@@ -1487,10 +1491,17 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
           // Compute car silhouette angle (-1 '\' .. +1 '/'); keep highway driving crisp & planted!
           const angleRelCam = normalizeAngle(driftState.heading - camHeading);
-          const targetVisualAngle = isHighwayMode
+          let targetVisualAngle = isHighwayMode
             ? Math.max(-0.40, Math.min(0.40, angleRelCam * 1.35 + steerInput * 0.16))
             : Math.max(-1, Math.min(1, angleRelCam * 2.1 + steerInput * 0.35));
+          // Snap clean deadzone to exact 0.0 (| straight rear angle) when driving forward without drift
+          if (Math.abs(targetVisualAngle) < 0.045 && Math.abs(steerInput) < 0.045 && !driftState.isDrifting) {
+            targetVisualAngle = 0;
+          }
           visualDriftAngle += (targetVisualAngle - visualDriftAngle) * Math.min(1, 12 * simDt);
+          if (Math.abs(visualDriftAngle) < 0.015 && targetVisualAngle === 0) {
+            visualDriftAngle = 0;
+          }
           activeDir = visualDriftAngle >= 0 ? 'right' : 'left';
 
           // Check Road / Guardrail Bounds
@@ -1855,11 +1866,10 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             // Extend endless track ahead & cull far behind
             const lastPt = track[track.length - 1];
             if (lastPt && driftState.z - lastPt.z < 155) {
-              track.push(
-                ...(isHighwayMode
-                  ? extendHighwayTrack(track, 20, STEP_DIST, seed)
-                  : extendSCurveTrack(track, 20, STEP_DIST, seed))
-              );
+              const extSlices = isHighwayMode
+                ? extendHighwayTrack(track, 20, STEP_DIST, seed)
+                : extendSCurveTrack(track, 20, STEP_DIST, seed);
+              for (let s = 0; s < extSlices.length; s++) track.push(extSlices[s]);
               while (track.length > 90 && track[0].z > driftState.z + 32) {
                 track.shift();
               }
@@ -2157,7 +2167,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                     existingCars: trafficCars,
                     difficultyProgress: Math.min(1, distance / 1800),
                   });
-                  trafficCars.push(...batch.cars);
+                  for (let b = 0; b < batch.cars.length; b++) trafficCars.push(batch.cars[b]);
                   nextTrafficId = batch.nextId;
                   trafficSpawnCursor = playerS + 290;
                 }
@@ -2693,6 +2703,16 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         Math.round(sunY - celestialCanvas.height * 0.5)
       );
 
+      // Render Soaring Mythical Dragons & Weird Celestial Anomalies (UFO, Sky Whale, Blimp)
+      renderMythicalDragonsAndSkyAnomalies({
+        ctx,
+        pxW,
+        horizonY,
+        nowMs: now,
+        camHeading,
+        sky,
+      });
+
       // B. Pre-Rendered 4-Layer Cel-Shaded Shinkai Anime Clouds
       const cloudDrift = (camHeading + Math.PI / 2) * 32;
       const drawAnimeCloud = (
@@ -3121,9 +3141,10 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           }
         }
 
-        // 5e. 3D Roadside Reflector Bollards & Overhead Steel Truss Bridge Arches
+        // 5e. 3D Roadside Reflector Bollards, Truss Bridges & Weird Landmarks (Dragon Skull, Torii, Monolith, Arcade)
         renderReflectorBollard3D({ ctx, far, biome });
         renderBridgeTrussArch3D({ ctx, far, biome, projectInto });
+        renderWeirdRoadsideLandmarks3D({ ctx, far, biome, projectInto, nowMs: now });
       }
 
       // G. Persistent Dual Tire Skid Marks & Brake Lockup Streaks anchored to Car Tires (Ring Buffers!)

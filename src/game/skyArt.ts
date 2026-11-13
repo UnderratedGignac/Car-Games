@@ -797,3 +797,297 @@ export function renderDynamicSkyAtmosphere(params: {
   ctx.fillStyle = sky.horizonGlowColor;
   ctx.fillRect(0, Math.max(0, horizonY - 12), pxW, 18);
 }
+
+/**
+ * Renders animated mythical soaring dragons, celestial serpents,
+ * cosmic sky leviathans, UFOs, and cyber blimps across the sky!
+ */
+export function renderMythicalDragonsAndSkyAnomalies(params: {
+  ctx: CanvasRenderingContext2D;
+  pxW: number;
+  horizonY: number;
+  nowMs: number;
+  camHeading: number;
+  sky: SkyAtmosphereConfig;
+}) {
+  const { ctx, pxW, horizonY, nowMs, camHeading, sky } = params;
+  if (horizonY <= 15) return;
+
+  ctx.save();
+
+  // -------------------------------------------------------------
+  // 1. SOARING MYTHICAL & CYBER DRAGONS (Serpentine Undulation + Flapping Wings)
+  // -------------------------------------------------------------
+  const dragons = [
+    {
+      id: 'azure_wyrm',
+      periodMs: 24000,
+      baseYRatio: 0.28,
+      speedPxPerSec: 32,
+      bodyColor: '#0ea5e9',
+      bellyColor: '#38bdf8',
+      crestColor: '#0284c7',
+      eyeColor: '#fef08a',
+      wingColor: 'rgba(56, 189, 248, 0.45)',
+      emberColor: '#38bdf8',
+      scale: 1.15,
+      dir: 1,
+    },
+    {
+      id: 'crimson_drake',
+      periodMs: 31000,
+      baseYRatio: 0.42,
+      speedPxPerSec: 26,
+      bodyColor: '#dc2626',
+      bellyColor: '#f97316',
+      crestColor: '#991b1b',
+      eyeColor: '#67e8f9',
+      wingColor: 'rgba(239, 68, 68, 0.45)',
+      emberColor: '#f59e0b',
+      scale: 0.95,
+      dir: -1,
+    },
+    {
+      id: 'golden_celestial',
+      periodMs: 38000,
+      baseYRatio: 0.18,
+      speedPxPerSec: 22,
+      bodyColor: '#eab308',
+      bellyColor: '#fef08a',
+      crestColor: '#ca8a04',
+      eyeColor: '#ef4444',
+      wingColor: 'rgba(250, 204, 21, 0.50)',
+      emberColor: '#fbbf24',
+      scale: 1.25,
+      dir: 1,
+    },
+  ];
+
+  for (let d = 0; d < dragons.length; d++) {
+    const dragon = dragons[d];
+    const loopT = (nowMs * 0.001 * dragon.speedPxPerSec + d * 380) % (pxW + 300);
+    const headX = dragon.dir === 1 ? -150 + loopT : pxW + 150 - loopT;
+    const baseY = horizonY * dragon.baseYRatio;
+    const waveY = Math.sin(nowMs * 0.0022 + d * 2.1) * 12;
+    const headY = baseY + waveY;
+
+    // Draw undulating serpentine body segments (12 segments from tail to head)
+    const segCount = 12;
+    const segSpacing = 7.5 * dragon.scale;
+    const flapAngle = Math.sin(nowMs * 0.0065 + d * 1.5); // Wing flap cycle (~1.1 Hz)
+
+    for (let s = segCount; s >= 0; s--) {
+      const segLag = s * 0.45;
+      const segX = headX - dragon.dir * s * segSpacing;
+      const segY = headY + Math.sin(nowMs * 0.003 - segLag) * (9 * dragon.scale);
+      const segRad = Math.max(2, Math.round((s === 0 ? 5.5 : s < 4 ? 4.8 : s < 8 ? 3.6 : 2.2) * dragon.scale));
+
+      // Trailing fire/plasma spirit embers from the tail
+      if (s >= 9 && Math.random() < 0.6) {
+        ctx.fillStyle = dragon.emberColor;
+        ctx.globalAlpha = 0.65;
+        const emberX = segX - dragon.dir * (Math.random() * 14);
+        const emberY = segY + (Math.random() - 0.5) * 8;
+        ctx.fillRect(Math.round(emberX), Math.round(emberY), 2, 2);
+      }
+
+      // Outer dragon ink border
+      ctx.globalAlpha = 0.95;
+      ctx.fillStyle = '#090d16';
+      ctx.beginPath();
+      ctx.arc(segX, segY, segRad + 1, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Dragon body core color
+      ctx.fillStyle = s % 2 === 0 ? dragon.bodyColor : dragon.crestColor;
+      ctx.beginPath();
+      ctx.arc(segX, segY, segRad, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Belly highlight on lower segment
+      ctx.fillStyle = dragon.bellyColor;
+      ctx.fillRect(
+        Math.round(segX - segRad * 0.5),
+        Math.round(segY + 1),
+        Math.max(1, segRad),
+        Math.max(1, Math.round(segRad * 0.5))
+      );
+
+      // Horned Dragon Head with Glowing Eyes & Whisker Barbels
+      if (s === 0) {
+        // Dragon Horns
+        ctx.strokeStyle = '#090d16';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(segX, segY - segRad);
+        ctx.lineTo(segX - dragon.dir * 8 * dragon.scale, segY - segRad - 9 * dragon.scale);
+        ctx.stroke();
+        ctx.strokeStyle = dragon.bellyColor;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Piercing Dragon Eye
+        const eyeX = segX + dragon.dir * 2.2;
+        const eyeY = segY - 1.5;
+        ctx.fillStyle = dragon.eyeColor;
+        ctx.fillRect(Math.round(eyeX), Math.round(eyeY), 2, 2);
+
+        // Glowing snort / spirit flame breath flare
+        ctx.fillStyle = dragon.emberColor;
+        ctx.globalAlpha = 0.75;
+        ctx.fillRect(Math.round(segX + dragon.dir * (segRad + 3)), Math.round(segY), 3, 2);
+      }
+
+      // Pair of Flapping Wyvern Wings on Segments 3 & 4
+      if (s === 3) {
+        const wingSpan = 22 * dragon.scale;
+        const wingLift = flapAngle * 14 * dragon.scale;
+        const wingTipX = segX - dragon.dir * 4 * dragon.scale;
+        const wingTipY = segY - wingSpan * 0.7 + wingLift;
+
+        // Wing membrane polygon
+        ctx.globalAlpha = 0.55;
+        ctx.fillStyle = dragon.wingColor;
+        ctx.beginPath();
+        ctx.moveTo(segX, segY - 2);
+        ctx.lineTo(wingTipX, wingTipY);
+        ctx.lineTo(wingTipX - dragon.dir * 12 * dragon.scale, wingTipY + 9 * dragon.scale);
+        ctx.lineTo(segX - dragon.dir * 10 * dragon.scale, segY + 2);
+        ctx.closePath();
+        ctx.fill();
+
+        // Crisp wing spars
+        ctx.globalAlpha = 0.95;
+        ctx.strokeStyle = '#090d16';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(segX, segY - 2);
+        ctx.lineTo(wingTipX, wingTipY);
+        ctx.lineTo(wingTipX - dragon.dir * 12 * dragon.scale, wingTipY + 9 * dragon.scale);
+        ctx.stroke();
+
+        ctx.strokeStyle = dragon.crestColor;
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+      }
+    }
+  }
+
+  // -------------------------------------------------------------
+  // 2. WEIRD CELESTIAL SKY VISITORS (Cosmic Whale, UFO, Cyber-Blimp)
+  // -------------------------------------------------------------
+  // A. Flying Cosmic Sky Whale / Leviathan (Majestic, slow, serene)
+  const whaleCycle = 54000;
+  const whaleT = (nowMs % whaleCycle) / whaleCycle;
+  const whaleX = -120 + whaleT * (pxW + 240);
+  const whaleY = horizonY * 0.35 + Math.sin(nowMs * 0.0012) * 8;
+  if (whaleX > -100 && whaleX < pxW + 100) {
+    ctx.globalAlpha = 0.72;
+    // Whale body silhouette
+    ctx.fillStyle = '#090d16';
+    ctx.beginPath();
+    ctx.ellipse(whaleX, whaleY, 32, 11, -0.04, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = sky.isNight ? '#1e293b' : '#334155';
+    ctx.beginPath();
+    ctx.ellipse(whaleX, whaleY, 30, 9.5, -0.04, 0, Math.PI * 2);
+    ctx.fill();
+    // Bioluminescent ventral grooves & flukes
+    ctx.fillStyle = '#38bdf8';
+    ctx.fillRect(Math.round(whaleX - 16), Math.round(whaleY + 3), 22, 1.5);
+    ctx.fillRect(Math.round(whaleX - 12), Math.round(whaleY + 5), 18, 1.5);
+    // Fluke fin
+    const flukeTailX = whaleX - 32;
+    const flukeTailY = whaleY + Math.sin(nowMs * 0.0025) * 5;
+    ctx.beginPath();
+    ctx.moveTo(whaleX - 26, whaleY);
+    ctx.lineTo(flukeTailX - 6, flukeTailY - 8);
+    ctx.lineTo(flukeTailX, flukeTailY);
+    ctx.lineTo(flukeTailX - 6, flukeTailY + 8);
+    ctx.closePath();
+    ctx.fillStyle = '#0284c7';
+    ctx.fill();
+  }
+
+  // B. Retro-Futuristic Alien Flying Saucer / UFO (Scanning with tractor beam!)
+  const ufoCycle = 29000;
+  const ufoT = ((nowMs + 12000) % ufoCycle) / ufoCycle;
+  const ufoX = pxW + 80 - ufoT * (pxW + 160);
+  const ufoY = horizonY * 0.22 + Math.sin(nowMs * 0.0035) * 5;
+  if (ufoX > -60 && ufoX < pxW + 60) {
+    // Pulsing Conical Tractor Beam scanning down towards horizon
+    const beamPulse = (Math.sin(nowMs * 0.008) + 1) * 0.5;
+    ctx.globalAlpha = 0.12 + beamPulse * 0.14;
+    ctx.fillStyle = '#a855f7';
+    ctx.beginPath();
+    ctx.moveTo(ufoX - 5, ufoY + 4);
+    ctx.lineTo(ufoX + 5, ufoY + 4);
+    ctx.lineTo(ufoX + 28, horizonY);
+    ctx.lineTo(ufoX - 28, horizonY);
+    ctx.closePath();
+    ctx.fill();
+
+    // UFO Cockpit Dome
+    ctx.globalAlpha = 0.95;
+    ctx.fillStyle = '#090d16';
+    ctx.beginPath();
+    ctx.arc(ufoX, ufoY - 2, 7, Math.PI, 0);
+    ctx.fill();
+    ctx.fillStyle = '#c084fc';
+    ctx.beginPath();
+    ctx.arc(ufoX, ufoY - 2, 5.5, Math.PI, 0);
+    ctx.fill();
+
+    // UFO Saucer Disc
+    ctx.fillStyle = '#090d16';
+    ctx.beginPath();
+    ctx.ellipse(ufoX, ufoY + 1, 16, 4.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#e2e8f0';
+    ctx.beginPath();
+    ctx.ellipse(ufoX, ufoY + 1, 14, 3.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Rotating Neon Ring Lights
+    const ufoLights = 5;
+    for (let l = 0; l < ufoLights; l++) {
+      const la = (nowMs * 0.006 + (l / ufoLights) * Math.PI * 2) % (Math.PI * 2);
+      const lx = ufoX + Math.cos(la) * 11;
+      const ly = ufoY + 1 + Math.sin(la) * 2;
+      ctx.fillStyle = l % 2 === 0 ? '#38bdf8' : '#f43f5e';
+      ctx.fillRect(Math.round(lx) - 1, Math.round(ly) - 1, 2, 2);
+    }
+  }
+
+  // C. Neon Cyber Blimp with Scrolling LED Ticker
+  const blimpCycle = 42000;
+  const blimpT = (nowMs % blimpCycle) / blimpCycle;
+  const blimpX = -100 + blimpT * (pxW + 200);
+  const blimpY = horizonY * 0.16 + Math.sin(nowMs * 0.0009) * 4;
+  if (blimpX > -90 && blimpX < pxW + 90) {
+    ctx.globalAlpha = 0.88;
+    // Hull
+    ctx.fillStyle = '#090d16';
+    ctx.beginPath();
+    ctx.ellipse(blimpX, blimpY, 26, 9, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#334155';
+    ctx.beginPath();
+    ctx.ellipse(blimpX, blimpY, 24, 7.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Gondola
+    ctx.fillStyle = '#090d16';
+    ctx.fillRect(Math.round(blimpX - 9), Math.round(blimpY + 7), 18, 5);
+    ctx.fillStyle = '#f59e0b';
+    ctx.fillRect(Math.round(blimpX - 8), Math.round(blimpY + 8), 16, 3);
+    // Banner with pixel LED dots on blimp
+    ctx.fillStyle = '#22d3ee';
+    ctx.fillRect(Math.round(blimpX - 16), Math.round(blimpY - 2), 32, 4);
+    ctx.fillStyle = '#ffffff';
+    for (let dot = 0; dot < 7; dot++) {
+      ctx.fillRect(Math.round(blimpX - 14 + dot * 4), Math.round(blimpY - 1), 2, 2);
+    }
+  }
+
+  ctx.restore();
+}

@@ -78,12 +78,16 @@ export const GarageModal: React.FC<GarageModalProps> = ({
 }) => {
   const [previewCarId, setPreviewCarId] = useState<string>(selectedCarId);
   const [categoryFilter, setCategoryFilter] = useState<VehicleCategory | 'all'>('all');
-  const [previewDir, setPreviewDir] = useState<DiagonalDirection>('right');
+  const [previewYawRad, setPreviewYawRad] = useState<number>(0.0); // Exact normal straight rear angle |
+  const [isAutoSpin, setIsAutoSpin] = useState<boolean>(true);
+  const [isDragging, setIsDragging] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<GarageTabId>('body');
   const [previewFlashing, setPreviewFlashing] = useState<boolean>(false);
   const [previewRevving, setPreviewRevving] = useState<boolean>(false);
   const [previewSpin, setPreviewSpin] = useState<number>(0);
   const spriteCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const dragStartXRef = useRef<number>(0);
+  const dragStartYawRef = useRef<number>(0);
 
   const filteredCars = React.useMemo(() => {
     if (categoryFilter === 'all') return CAR_ROSTER;
@@ -125,7 +129,26 @@ export const GarageModal: React.FC<GarageModalProps> = ({
     return () => window.clearInterval(id);
   }, [isOpen, previewRevving]);
 
-  // Render crisp 1:1 3D pixel-art sprite from getPixelCarCanvas
+  // Smooth 360-degree Turntable Auto-Spin Loop
+  useEffect(() => {
+    if (!isOpen || !isAutoSpin || isDragging) return;
+    let animId: number;
+    let lastTime = performance.now();
+    const spinLoop = (now: number) => {
+      const dt = Math.min(0.05, (now - lastTime) * 0.001);
+      lastTime = now;
+      setPreviewYawRad((prev) => {
+        let next = prev + dt * 0.72; // ~0.72 rad/sec smooth continuous turntable rotation
+        if (next > Math.PI) next -= Math.PI * 2;
+        return next;
+      });
+      animId = requestAnimationFrame(spinLoop);
+    };
+    animId = requestAnimationFrame(spinLoop);
+    return () => cancelAnimationFrame(animId);
+  }, [isOpen, isAutoSpin, isDragging]);
+
+  // Render crisp 1:1 3D pixel-art sprite from getPixelCarCanvas with continuous 360-degree rotation
   useEffect(() => {
     if (!isOpen || !spriteCanvasRef.current) return;
     const canvas = spriteCanvasRef.current;
@@ -134,13 +157,15 @@ export const GarageModal: React.FC<GarageModalProps> = ({
 
     const pixelSource = getPixelCarCanvas(
       previewCar,
-      previewDir === 'right' ? 0.72 : -0.72,
+      0, // driftAngleNorm
       false,
       false,
       previewSpin,
       currentCustom,
       previewRevving ? 'gas' : 'coast',
-      previewFlashing
+      previewFlashing,
+      previewYawRad, // customYawRad for 360° turntable!
+      0.37
     );
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -155,7 +180,34 @@ export const GarageModal: React.FC<GarageModalProps> = ({
       drawW,
       drawH
     );
-  }, [isOpen, previewCar, previewDir, currentCustom, previewSpin, previewRevving, previewFlashing]);
+  }, [isOpen, previewCar, previewYawRad, currentCustom, previewSpin, previewRevving, previewFlashing]);
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    setIsDragging(true);
+    setIsAutoSpin(false);
+    dragStartXRef.current = e.clientX;
+    dragStartYawRef.current = previewYawRad;
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {}
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDragging) return;
+    const dx = e.clientX - dragStartXRef.current;
+    // 140px drag = 180 degrees (Math.PI) rotation
+    let nextYaw = dragStartYawRef.current + (dx / 140) * Math.PI;
+    while (nextYaw > Math.PI) nextYaw -= Math.PI * 2;
+    while (nextYaw < -Math.PI) nextYaw += Math.PI * 2;
+    setPreviewYawRad(nextYaw);
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    setIsDragging(false);
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {}
+  };
 
   if (!isOpen) return null;
 
@@ -307,58 +359,68 @@ export const GarageModal: React.FC<GarageModalProps> = ({
       {/* 3. SCROLLABLE MIDDLE BODY */}
       <div className="flex-1 overflow-y-auto px-3 sm:px-5 py-3 min-h-0 space-y-4">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-          {/* Left Column: 2D Pixel Showcase & Testing Bay */}
-          <div className="lg:col-span-5 flex flex-col rounded-2xl border border-slate-800 bg-slate-950 p-3 sm:p-4">
+          {/* Left Column: 3D Pixel Turntable Showcase & Testing Bay (Side-by-Side with Customization) */}
+          <div className="lg:col-span-5 flex flex-col rounded-2xl border border-slate-800 bg-slate-950 p-3 sm:p-4 lg:sticky lg:top-3">
             <div className="flex items-center justify-between gap-2 mb-2.5">
               <span className="text-[11px] font-mono text-slate-300 truncate font-semibold">
                 {previewCar.codename} · T{previewCar.tier}
               </span>
-              <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded-lg border border-slate-800 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setPreviewDir('left')}
-                  className={`min-h-[34px] px-2.5 py-1 text-[11px] font-mono rounded-md transition-colors whitespace-nowrap ${
-                    previewDir === 'left'
-                      ? 'bg-amber-400 text-slate-950 font-bold'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  \ Left Drift
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPreviewDir('right')}
-                  className={`min-h-[34px] px-2.5 py-1 text-[11px] font-mono rounded-md transition-colors whitespace-nowrap ${
-                    previewDir === 'right'
-                      ? 'bg-amber-400 text-slate-950 font-bold'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  / Right Drift
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => setIsAutoSpin((s) => !s)}
+                className={`min-h-[32px] px-2.5 py-1 text-[11px] font-mono rounded-lg border transition-all flex items-center gap-1.5 whitespace-nowrap ${
+                  isAutoSpin
+                    ? 'bg-amber-400/20 text-amber-300 border-amber-400/50 shadow-[0_0_10px_rgba(251,191,36,0.2)]'
+                    : 'bg-slate-900 text-slate-400 hover:text-white border-slate-800'
+                }`}
+              >
+                <span className={`w-2 h-2 rounded-full ${isAutoSpin ? 'bg-amber-400 animate-pulse' : 'bg-slate-600'}`} />
+                <span>Auto-Spin {isAutoSpin ? 'ON' : 'OFF'}</span>
+              </button>
             </div>
 
-            {/* Turntable Bay: 2D Pixel Canvas */}
+            {/* Turntable Bay: 360-Degree Touch / Drag Interactive Canvas */}
             <div
-              className="relative flex items-center justify-center h-48 sm:h-60 rounded-xl overflow-hidden bg-slate-900 border border-slate-800"
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+              className={`relative flex items-center justify-center h-48 sm:h-60 rounded-xl overflow-hidden bg-slate-900 border border-slate-800 select-none ${
+                isDragging ? 'cursor-grabbing' : 'cursor-grab'
+              }`}
               style={{
                 backgroundImage: previewFlashing
-                  ? `radial-gradient(circle at ${previewDir === 'right' ? '72% 38%' : '28% 38%'}, ${resolved.headlightBeamHex}77, rgba(15, 23, 42, 0.96) 70%)`
+                  ? `radial-gradient(circle at 50% 38%, ${resolved.headlightBeamHex}77, rgba(15, 23, 42, 0.96) 70%)`
                   : resolved.underglowHex
                   ? `radial-gradient(circle at 50% 66%, ${resolved.underglowHex}38, rgba(15, 23, 42, 0.96) 72%)`
                   : 'radial-gradient(circle at 50% 62%, rgba(251, 191, 36, 0.14), rgba(15, 23, 42, 0.96) 72%)',
               }}
             >
+              {/* Floating Angle Readout Badge */}
+              <div className="absolute top-2 left-2 z-20 px-2 py-0.5 rounded-md bg-slate-950/80 border border-slate-800 text-[10px] font-mono text-amber-300 pointer-events-none flex items-center gap-1">
+                <span>YAW: {Math.round(((previewYawRad * 180) / Math.PI + 360) % 360)}°</span>
+                <span className="text-slate-400">
+                  {Math.abs(previewYawRad) < 0.15
+                    ? '| Rear'
+                    : Math.abs(previewYawRad - Math.PI) < 0.2 || Math.abs(previewYawRad + Math.PI) < 0.2
+                    ? 'Front'
+                    : Math.abs(Math.abs(previewYawRad) - Math.PI * 0.5) < 0.2
+                    ? 'Side'
+                    : '3/4 View'}
+                </span>
+              </div>
+
+              {/* Drag Hint */}
+              <div className="absolute bottom-2 right-2 z-20 px-2 py-0.5 rounded-md bg-slate-950/70 text-[9px] font-mono text-slate-400 pointer-events-none">
+                ↔ Drag to Spin 360°
+              </div>
+
               {previewFlashing && (
                 <div
                   aria-hidden="true"
                   className="absolute inset-0 pointer-events-none"
                   style={{
-                    background:
-                      previewDir === 'right'
-                        ? `linear-gradient(28deg, transparent 42%, ${resolved.headlightBeamHex}55 78%, ${resolved.headlightBeamHex}99 100%)`
-                        : `linear-gradient(152deg, transparent 42%, ${resolved.headlightBeamHex}55 78%, ${resolved.headlightBeamHex}99 100%)`,
+                    background: `radial-gradient(circle at 50% 50%, ${resolved.headlightBeamHex}66 0%, transparent 75%)`,
                   }}
                 />
               )}
@@ -367,8 +429,58 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                 width={300}
                 height={220}
                 style={{ imageRendering: 'pixelated' }}
-                className="relative z-10 w-64 h-44 sm:w-72 sm:h-52 object-contain"
+                className="relative z-10 w-64 h-44 sm:w-72 sm:h-52 object-contain pointer-events-none"
               />
+            </div>
+
+            {/* Quick Angle Preset Pills */}
+            <div className="grid grid-cols-5 gap-1 mt-2">
+              {[
+                { label: 'Front 180°', rad: Math.PI },
+                { label: '135° 3/4', rad: Math.PI * 0.75 },
+                { label: '90° Side', rad: Math.PI * 0.5 },
+                { label: '45° 3/4', rad: Math.PI * 0.25 },
+                { label: 'Rear 0° |', rad: 0 },
+              ].map((preset) => {
+                const isSelected =
+                  Math.abs(previewYawRad - preset.rad) < 0.15 ||
+                  (preset.rad === Math.PI && Math.abs(previewYawRad + Math.PI) < 0.15);
+                return (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => {
+                      setPreviewYawRad(preset.rad);
+                      setIsAutoSpin(false);
+                    }}
+                    className={`min-h-[30px] px-1 py-1 rounded-md text-[10px] font-mono font-semibold transition-colors whitespace-nowrap ${
+                      isSelected
+                        ? 'bg-amber-400 text-slate-950 font-bold'
+                        : 'bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-800'
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Continuous 360° Angle Slider */}
+            <div className="flex items-center gap-2 mt-2 px-1">
+              <span className="text-[10px] font-mono text-slate-400 shrink-0">-180°</span>
+              <input
+                type="range"
+                min={-180}
+                max={180}
+                value={Math.round((previewYawRad * 180) / Math.PI)}
+                onChange={(e) => {
+                  setPreviewYawRad((Number(e.target.value) * Math.PI) / 180);
+                  setIsAutoSpin(false);
+                }}
+                className="w-full accent-amber-400 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
+                aria-label="Car 360 turntable angle"
+              />
+              <span className="text-[10px] font-mono text-slate-400 shrink-0">+180°</span>
             </div>
 
             {/* Interactive Rig Tester Buttons: Flash / Horn / Rev Flames + Reset */}
