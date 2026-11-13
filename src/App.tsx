@@ -32,6 +32,7 @@ import { LeaderboardEntry, LeaderboardModal } from './components/LeaderboardModa
 import { AiPitStudioModal } from './components/AiPitStudioModal';
 import { AiAudioModal } from './components/AiAudioModal';
 import { SteeringWheel } from './components/SteeringWheel';
+import { RealisticPedals } from './components/RealisticPedals';
 
 const INITIAL_UPGRADES: Record<string, CarUpgradeLevels> = {
   blue_jdm: { speed: 1, handling: 1, magnet: 1 },
@@ -1372,10 +1373,11 @@ export default function App() {
 
                 {/* Tactile Cockpit Row: Steering Wheel | Flash + Horn + Nitro | Brake + Gas Pedals */}
                 <div className="flex items-center justify-between gap-1 sm:gap-2">
-                  {/* Left: Interactive Rotatable Steering Wheel */}
+                  {/* Left: Interactive Rotatable Steering Wheel with Center Horn */}
                   <SteeringWheel
                     value={steerHold !== 0 ? steerHold : keySteerVisual}
                     onChange={setSteerHold}
+                    onHorn={triggerHornAction}
                   />
 
                   {/* Center: High-Beam Flash [F], Horn [E] & Nitro [Space] */}
@@ -1444,55 +1446,13 @@ export default function App() {
                     </button>
                   </div>
 
-                  {/* Right: Brushed Metal Brake & Gas Pedals */}
-                  <div className="flex items-end gap-1 sm:gap-1.5 shrink-0">
-                    <button
-                      type="button"
-                      data-hud-btn="true"
-                      data-testid="pedal-brake"
-                      tabIndex={-1}
-                      aria-label="Hold Brake Pedal"
-                      onPointerDown={() => {
-                        setAccelHold(false);
-                        setBrakeHold(true);
-                      }}
-                      onPointerUp={() => setBrakeHold(false)}
-                      onPointerLeave={() => setBrakeHold(false)}
-                      onPointerCancel={() => setBrakeHold(false)}
-                      className={`min-h-[48px] min-w-[50px] sm:min-w-[64px] px-1.5 sm:px-2 py-1.5 rounded-xl border font-mono font-bold text-[10px] flex flex-col items-center justify-center transition-transform select-none ${
-                        brakeHold
-                          ? 'bg-rose-600 border-rose-200 text-white translate-y-0.5'
-                          : 'bg-slate-900 border-rose-500/75 border-b-4 text-rose-300 hover:bg-rose-950/60'
-                      }`}
-                    >
-                      <span className="w-6 sm:w-7 h-1 rounded-sm bg-current opacity-55 mb-1" aria-hidden="true" />
-                      <span>BRAKE</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      data-hud-btn="true"
-                      data-testid="pedal-gas"
-                      tabIndex={-1}
-                      aria-label="Hold Gas Pedal"
-                      onPointerDown={() => {
-                        setBrakeHold(false);
-                        setAccelHold(true);
-                      }}
-                      onPointerUp={() => setAccelHold(false)}
-                      onPointerLeave={() => setAccelHold(false)}
-                      onPointerCancel={() => setAccelHold(false)}
-                      className={`min-h-[58px] min-w-[54px] sm:min-w-[70px] px-2 sm:px-2.5 py-1.5 rounded-xl border font-mono font-bold text-[11px] flex flex-col items-center justify-center transition-transform select-none ${
-                        accelHold
-                          ? 'bg-emerald-400 border-emerald-100 text-slate-950 translate-y-0.5'
-                          : 'bg-slate-900 border-emerald-400/80 border-b-4 text-emerald-300 hover:bg-emerald-950/50'
-                      }`}
-                    >
-                      <span className="w-7 sm:w-8 h-1 rounded-sm bg-current opacity-55 mb-0.5" aria-hidden="true" />
-                      <span className="w-7 sm:w-8 h-1 rounded-sm bg-current opacity-55 mb-1" aria-hidden="true" />
-                      <span>GAS</span>
-                    </button>
-                  </div>
+                  {/* Right: Realistic Brushed Billet Aluminum Racing Pedals */}
+                  <RealisticPedals
+                    accelHold={accelHold}
+                    brakeHold={brakeHold}
+                    onAccelChange={setAccelHold}
+                    onBrakeChange={setBrakeHold}
+                  />
                 </div>
               </div>
             )}
