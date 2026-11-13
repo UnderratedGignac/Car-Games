@@ -25,12 +25,8 @@ import {
 import { GamePhase, LiveTelemetry, SceneCanvas } from './game/SceneCanvas';
 import { SKY_THEME_OPTIONS, SkyThemeId } from './game/skyArt';
 import { AudioDeckSnapshot, soundFX } from './game/audio';
-import { AI_SFX_SLOT_MAP, AiSfxSlotId, BIOME_MUSIC_PRESETS } from './game/musicConfig';
-import { listAiAudioClips } from './lib/audioCache';
 import { GarageModal } from './components/GarageModal';
 import { LeaderboardEntry, LeaderboardModal } from './components/LeaderboardModal';
-import { AiPitStudioModal } from './components/AiPitStudioModal';
-import { AiAudioModal } from './components/AiAudioModal';
 import { ArtGalleryModal } from './components/ArtGalleryModal';
 import { SteeringWheel } from './components/SteeringWheel';
 import { RealisticPedals } from './components/RealisticPedals';
@@ -241,23 +237,17 @@ export default function App() {
 
   // Modals & Collapsible Bottom Dock
   const [isGarageOpen, setIsGarageOpen] = useState<boolean>(false);
-  const [isAiStudioOpen, setIsAiStudioOpen] = useState<boolean>(false);
-  const [isAudioModalOpen, setIsAudioModalOpen] = useState<boolean>(false);
   const [isLeaderboardOpen, setIsLeaderboardOpen] = useState<boolean>(false);
   const [isArtGalleryOpen, setIsArtGalleryOpen] = useState<boolean>(false);
   const [dockCollapsed, setDockCollapsed] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(false);
 
-  // Leaderboard & Custom Lyria BGM / AI SFX Deck
+  // Leaderboard & Official Soundtrack Deck
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [loadingLeaderboard, setLoadingLeaderboard] = useState<boolean>(false);
-  const [customBgmTitle, setCustomBgmTitle] = useState<string>('');
-  const [autoBiomeDj, setAutoBiomeDj] = useState<boolean>(true);
+  const [customBgmTitle, setCustomBgmTitle] = useState<string>('Neon Redline — Tokyo Highway Eurobeat');
   const [audioDeck, setAudioDeck] = useState<AudioDeckSnapshot>(() => soundFX.getDeckSnapshot());
   const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
-
-  // Post-run AI Announcer TTS clip on Game Over
-  const [gameOverTtsBusy, setGameOverTtsBusy] = useState<boolean>(false);
 
   const selectedCar: CarSpec =
     CAR_ROSTER.find((c) => c.id === selectedCarId) || CAR_ROSTER[0];
@@ -309,72 +299,14 @@ export default function App() {
     fetchLeaderboard();
   }, [fetchLeaderboard]);
 
-  // Subscribe to AI Audio Deck state & hydrate cached Lyria tracks + AI SFX clips on startup
+  // Subscribe to Audio Deck state on startup
   useEffect(() => {
     const unsub = soundFX.subscribe(() => {
       setAudioDeck(soundFX.getDeckSnapshot());
     });
-
-    (async () => {
-      try {
-        const localClips = await listAiAudioClips();
-        for (const clip of localClips) {
-          if (clip.kind === 'track' && clip.audioDataUrl) {
-            soundFX.registerCachedTrack(clip.slotId, clip.title, clip.audioDataUrl);
-          } else if (clip.kind === 'sfx' && clip.audioDataUrl && clip.slotId in AI_SFX_SLOT_MAP) {
-            soundFX.registerCachedSfx(clip.slotId as AiSfxSlotId, clip.audioDataUrl);
-          }
-        }
-      } catch {}
-
-      try {
-        const res = await fetch('/api/ai/audio-manifest');
-        if (res.ok) {
-          const manifest = await res.json();
-          if (Array.isArray(manifest.tracks)) {
-            for (const tr of manifest.tracks) {
-              soundFX.registerCachedTrack(tr.presetId, tr.title, tr.audioUrl);
-            }
-          }
-          if (Array.isArray(manifest.sfx)) {
-            for (const fx of manifest.sfx) {
-              if (fx.slotId in AI_SFX_SLOT_MAP) {
-                soundFX.registerCachedSfx(fx.slotId as AiSfxSlotId, fx.audioUrl);
-              }
-            }
-          }
-        }
-      } catch {}
-
-      const snap = soundFX.getDeckSnapshot();
-      if (snap.activeTrackTitle) {
-        setCustomBgmTitle(snap.activeTrackTitle);
-      }
-    })();
-
+    setCustomBgmTitle('Neon Redline — Tokyo Highway Eurobeat');
     return unsub;
   }, []);
-
-  // Auto-Biome DJ: seamlessly switches to the active biome's cached Lyria track during World Tour or road changes
-  const activeRoadBiome = resolveRoadBiome(roadMode, telemetry.distance);
-  useEffect(() => {
-    if (!autoBiomeDj || !audioDeck.musicEnabled || isMuted) return;
-    if (audioDeck.loadedTrackIds.includes(activeRoadBiome.id) && audioDeck.activeTrackId !== activeRoadBiome.id) {
-      const presetTitle = BIOME_MUSIC_PRESETS[activeRoadBiome.id].title;
-      setCustomBgmTitle(presetTitle);
-      if (gamePhase === 'playing') {
-        soundFX.unlockAndEnsureMusic(activeRoadBiome.id).catch(() => {});
-      }
-    }
-  }, [
-    autoBiomeDj,
-    activeRoadBiome.id,
-    audioDeck.musicEnabled,
-    audioDeck.loadedTrackIds,
-    audioDeck.activeTrackId,
-    gamePhase,
-    isMuted,
-  ]);
 
   // Firebase Auth listener + Cloud SQL Profile Load
   useEffect(() => {
@@ -464,16 +396,13 @@ export default function App() {
       document.activeElement.blur();
     }
     setIsGarageOpen(false);
-    setIsAiStudioOpen(false);
-    setIsAudioModalOpen(false);
     setIsLeaderboardOpen(false);
     setIsArtGalleryOpen(false);
     document.body.dataset.state = 'playing';
     setRestartTriggerCount((c) => c + 1);
     setGamePhase('playing');
-    const startBiomeId = resolveRoadBiome(roadMode, 0).id;
-    soundFX.unlockAndEnsureMusic(autoBiomeDj ? startBiomeId : undefined).catch(() => {});
-  }, [roadMode, autoBiomeDj]);
+    soundFX.unlockAndEnsureMusic().catch(() => {});
+  }, []);
 
   // End-of-Run Defeat Callback (after 3D fall-off & destruction animation finishes)
   const handleGameOver = useCallback(
@@ -562,11 +491,9 @@ export default function App() {
         return;
       }
 
-      if (isGarageOpen || isAiStudioOpen || isAudioModalOpen || isLeaderboardOpen || isArtGalleryOpen) {
+      if (isGarageOpen || isLeaderboardOpen || isArtGalleryOpen) {
         if (code === 'Escape') {
           setIsGarageOpen(false);
-          setIsAiStudioOpen(false);
-          setIsAudioModalOpen(false);
           setIsLeaderboardOpen(false);
           setIsArtGalleryOpen(false);
         }
@@ -672,9 +599,8 @@ export default function App() {
   }, [
     gamePhase,
     isGarageOpen,
-    isAiStudioOpen,
-    isAudioModalOpen,
     isLeaderboardOpen,
+    isArtGalleryOpen,
     handleStartRun,
     triggerFlashAction,
     triggerHornAction,
@@ -748,31 +674,6 @@ export default function App() {
       await signOut(auth);
     } catch (err) {
       console.error('Sign out error:', err);
-    }
-  };
-
-  const playGameOverAnnouncerTts = async () => {
-    if (gameOverTtsBusy) return;
-    setGameOverTtsBusy(true);
-    try {
-      const res = await fetch('/api/ai/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          score: lastRunStats.score,
-          combo: lastRunStats.maxCombo,
-          carName: selectedCar.name,
-        }),
-      });
-      const data = await res.json();
-      if (res.ok && data.audioDataUrl) {
-        const audio = new Audio(data.audioDataUrl);
-        audio.play().catch(() => {});
-      }
-    } catch {
-      // Ignore TTS playback error
-    } finally {
-      setGameOverTtsBusy(false);
     }
   };
 
@@ -856,24 +757,6 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-              <button
-                type="button"
-                data-testid="btn-ai-audio"
-                onClick={() => setIsAudioModalOpen(true)}
-                className="min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-cyan-500/60 text-xs font-semibold text-cyan-200 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5"
-              >
-                <span
-                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                    audioDeck.musicPlaying
-                      ? 'bg-emerald-400'
-                      : audioDeck.loadedTrackIds.length > 0
-                      ? 'bg-cyan-400'
-                      : 'bg-amber-400'
-                  }`}
-                  aria-hidden="true"
-                />
-                <span>{audioDeck.musicPlaying ? 'AI DJ Live' : 'AI Music'}</span>
-              </button>
               <button
                 type="button"
                 onClick={() => setIsLeaderboardOpen(true)}
@@ -1121,7 +1004,7 @@ export default function App() {
                 : 'Launch Drift Run'}
             </button>
 
-            {/* Secondary Hangar & Studio Actions */}
+            {/* Secondary Hangar & Gallery Actions */}
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
@@ -1132,10 +1015,10 @@ export default function App() {
               </button>
               <button
                 type="button"
-                onClick={() => setIsAiStudioOpen(true)}
+                onClick={() => setIsArtGalleryOpen(true)}
                 className="min-h-[42px] py-2 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-cyan-700/70 text-cyan-300 text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap"
               >
-                AI Pit Studio
+                🖼️ Art Gallery
               </button>
             </div>
 
@@ -1585,13 +1468,6 @@ export default function App() {
               </button>
               <button
                 type="button"
-                onClick={() => setIsAudioModalOpen(true)}
-                className="w-full min-h-[44px] py-2.5 px-5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-cyan-600/60 text-cyan-300 font-semibold text-sm whitespace-nowrap"
-              >
-                AI Music &amp; FX Deck ({audioDeck.activeTrackTitle || 'Configure'})
-              </button>
-              <button
-                type="button"
                 onClick={handleStartRun}
                 className="w-full min-h-[44px] py-2.5 px-5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 font-semibold text-sm whitespace-nowrap"
               >
@@ -1738,26 +1614,8 @@ export default function App() {
                 </button>
                 <button
                   type="button"
-                  disabled={gameOverTtsBusy}
-                  onClick={playGameOverAnnouncerTts}
-                  className="min-h-[44px] py-2.5 px-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-cyan-700/70 text-cyan-300 text-xs font-semibold whitespace-nowrap"
-                >
-                  {gameOverTtsBusy ? 'Synthesizing...' : 'AI Replay Callout'}
-                </button>
-              </div>
-
-              <div className="flex items-center justify-between pt-1">
-                <button
-                  type="button"
-                  onClick={() => setIsAiStudioOpen(true)}
-                  className="text-xs text-slate-400 hover:text-white underline"
-                >
-                  Open AI Pit Studio ({customBgmTitle || 'Music, Video & 4K Art'})
-                </button>
-                <button
-                  type="button"
                   onClick={() => setGamePhase('title')}
-                  className="text-xs text-slate-400 hover:text-white"
+                  className="min-h-[44px] py-2.5 px-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold whitespace-nowrap"
                 >
                   Title Screen
                 </button>
@@ -1823,53 +1681,6 @@ export default function App() {
           userEmail={user?.email || null}
           onGoogleSignIn={handleGoogleSignIn}
           onSignOut={handleSignOut}
-        />
-      )}
-
-      {isAiStudioOpen && (
-        <AiPitStudioModal
-          isOpen={isAiStudioOpen}
-          onClose={() => setIsAiStudioOpen(false)}
-          selectedCar={selectedCar}
-          bestScore={bestScore}
-          lastScore={lastRunStats.score}
-          maxCombo={Math.max(bestCombo, lastRunStats.maxCombo)}
-          onApplyCustomSprite={(dataUrl) => {
-            setCustomSpriteUrl(dataUrl);
-            syncGarageToCloudSql({
-              coins,
-              bestScore,
-              bestCombo,
-              selectedCarId,
-              unlockedCarIds,
-              carUpgrades,
-              customSpriteUrl: dataUrl,
-            });
-          }}
-          onSetCustomBgm={(audioUrl, title, trackId = 'custom') => {
-            setCustomBgmTitle(title);
-            soundFX.setMusicEnabled(true);
-            soundFX.loadAiMusicTrack(trackId, title, audioUrl, true).catch(() => {
-              if (bgmAudioRef.current) {
-                bgmAudioRef.current.src = audioUrl;
-                bgmAudioRef.current.muted = isMuted;
-                bgmAudioRef.current.play().catch(() => {});
-              }
-            });
-          }}
-        />
-      )}
-
-      {isAudioModalOpen && (
-        <AiAudioModal
-          isOpen={isAudioModalOpen}
-          onClose={() => setIsAudioModalOpen(false)}
-          activeBiomeId={activeRoadBiome.id}
-          autoBiomeDj={autoBiomeDj}
-          onToggleAutoBiomeDj={setAutoBiomeDj}
-          onTrackActivated={(_trackId, title) => {
-            setCustomBgmTitle(title);
-          }}
         />
       )}
 

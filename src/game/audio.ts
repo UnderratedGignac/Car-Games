@@ -74,10 +74,21 @@ class DriftAudioEngine {
   private musicVolume = 0.58;
   private sfxVolume = 0.82;
 
-  private activeTrackId = 'neon_redline_theme';
-  private activeTrackTitle = 'Neon Redline — Tokyo Midnight Drive';
+  // Standardized Official Soundtrack for all players
+  private activeTrackId = 'neon_redline_ost';
+  private activeTrackTitle = 'Neon Redline — Tokyo Highway Eurobeat';
   private builtinTrackBuffer: AudioBuffer | null = null;
-  private trackSources = new Map<string, { title: string; url: string; buffer: AudioBuffer | null; decoding: boolean }>();
+  private trackSources = new Map<string, { title: string; url: string; buffer: AudioBuffer | null; decoding: boolean }>([
+    [
+      'neon_redline_ost',
+      {
+        title: 'Neon Redline — Tokyo Highway Eurobeat',
+        url: './audio/neon_redline_ost.mp3',
+        buffer: null,
+        decoding: false,
+      },
+    ],
+  ]);
   private musicSourceNode: AudioBufferSourceNode | null = null;
   private musicLowpass: BiquadFilterNode | null = null;
   private musicBassShelf: BiquadFilterNode | null = null;
@@ -270,6 +281,13 @@ class DriftAudioEngine {
     if (!ctx) return false;
     if (!buffer) {
       buffer = await this.decodeUrlToBuffer(ctx, url);
+      if (!buffer) {
+        // Fallback: procedural synth loop if network fetch is blocked
+        if (!this.builtinTrackBuffer) {
+          this.builtinTrackBuffer = generateBuiltinArcadeTrack(ctx);
+        }
+        buffer = this.builtinTrackBuffer;
+      }
       const entry = this.trackSources.get(trackId);
       if (entry) {
         entry.buffer = buffer;
@@ -325,13 +343,13 @@ class DriftAudioEngine {
 
   /**
    * Called on user gesture (Launch Drift Run, Audio Toggle, etc.) to resume
-   * or start whichever AI music track is active, plus hydrate pending AI SFX.
+   * or start the standardized official soundtrack.
    */
   public async unlockAndEnsureMusic(preferredTrackId?: string): Promise<void> {
     const ctx = this.ensureContext(true);
     if (!ctx) return;
 
-    // Hydrate any registered AI SFX buffers lazily in background
+    // Hydrate any registered SFX buffers lazily in background
     this.aiSfxEntries.forEach((entry, slotId) => {
       if (!entry.buffer && !entry.decoding && entry.url) {
         this.decodeSfxSlot(ctx, slotId, entry.url).catch(() => {});
@@ -340,24 +358,11 @@ class DriftAudioEngine {
 
     if (!this.musicEnabled || this.muted) return;
 
-    const targetId =
-      preferredTrackId && this.trackSources.has(preferredTrackId)
-        ? preferredTrackId
-        : this.activeTrackId;
-
-    if (!targetId || !this.trackSources.has(targetId) || targetId === 'neon_redline_theme') {
-      if (this.musicPlaying && this.activeTrackId === 'neon_redline_theme') return;
-      if (!this.builtinTrackBuffer) {
-        this.builtinTrackBuffer = generateBuiltinArcadeTrack(ctx);
-      }
-      this.activeTrackId = 'neon_redline_theme';
-      this.activeTrackTitle = 'Neon Redline — Tokyo Midnight Drive';
-      this.startBufferLoop(ctx, this.builtinTrackBuffer);
-      this.notifyListeners();
-      return;
+    const targetId = preferredTrackId || this.activeTrackId || 'neon_redline_ost';
+    let track = this.trackSources.get(targetId);
+    if (!track) {
+      track = this.trackSources.get('neon_redline_ost')!;
     }
-
-    const track = this.trackSources.get(targetId);
     if (!track) return;
 
     if (this.musicPlaying && this.activeTrackId === targetId) return;

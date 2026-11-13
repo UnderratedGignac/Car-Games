@@ -144,3 +144,4 @@ export const ArtGalleryModal: React.FC<ArtGalleryModalProps> = React.memo(({
     </div>
   );
 });
+

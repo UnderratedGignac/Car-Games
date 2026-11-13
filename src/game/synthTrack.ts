@@ -171,3 +171,4 @@ export function generateBuiltinArcadeTrack(ctx: AudioContext): AudioBuffer {
 
   return buffer;
 }
+
