@@ -7,6 +7,7 @@ import {
   computeMusicDspParams,
   findPeakAudioWindow,
 } from './musicConfig';
+import { generateBuiltinArcadeTrack } from './synthTrack';
 
 export interface AiSfxEntry {
   slotId: AiSfxSlotId;
@@ -73,8 +74,9 @@ class DriftAudioEngine {
   private musicVolume = 0.58;
   private sfxVolume = 0.82;
 
-  private activeTrackId = '';
-  private activeTrackTitle = '';
+  private activeTrackId = 'neon_redline_theme';
+  private activeTrackTitle = 'Neon Redline — Tokyo Midnight Drive';
+  private builtinTrackBuffer: AudioBuffer | null = null;
   private trackSources = new Map<string, { title: string; url: string; buffer: AudioBuffer | null; decoding: boolean }>();
   private musicSourceNode: AudioBufferSourceNode | null = null;
   private musicLowpass: BiquadFilterNode | null = null;
@@ -116,8 +118,10 @@ class DriftAudioEngine {
   }
 
   public getDeckSnapshot(): AudioDeckSnapshot {
-    const loadedTrackIds: string[] = [];
-    this.trackSources.forEach((_v, k) => loadedTrackIds.push(k));
+    const loadedTrackIds: string[] = ['neon_redline_theme'];
+    this.trackSources.forEach((_v, k) => {
+      if (k !== 'neon_redline_theme') loadedTrackIds.push(k);
+    });
     const loadedSfxIds: AiSfxSlotId[] = [];
     this.aiSfxEntries.forEach((v, k) => {
       if (v.url || v.buffer) loadedSfxIds.push(k);
@@ -341,7 +345,18 @@ class DriftAudioEngine {
         ? preferredTrackId
         : this.activeTrackId;
 
-    if (!targetId) return;
+    if (!targetId || !this.trackSources.has(targetId) || targetId === 'neon_redline_theme') {
+      if (this.musicPlaying && this.activeTrackId === 'neon_redline_theme') return;
+      if (!this.builtinTrackBuffer) {
+        this.builtinTrackBuffer = generateBuiltinArcadeTrack(ctx);
+      }
+      this.activeTrackId = 'neon_redline_theme';
+      this.activeTrackTitle = 'Neon Redline — Tokyo Midnight Drive';
+      this.startBufferLoop(ctx, this.builtinTrackBuffer);
+      this.notifyListeners();
+      return;
+    }
+
     const track = this.trackSources.get(targetId);
     if (!track) return;
 
