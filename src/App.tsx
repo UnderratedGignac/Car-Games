@@ -22,31 +22,13 @@ import {
   resolveCarAppearance,
   resolveRoadBiome,
 } from './game/rules';
-import { GamePhase, LiveTelemetry, SceneCanvas } from './game/PseudoRoadCanvas';
+import { GamePhase, LiveTelemetry, SceneCanvas } from './game/SceneCanvas';
 import { SKY_THEME_OPTIONS, SkyThemeId } from './game/skyArt';
 import { AudioDeckSnapshot, soundFX } from './game/audio';
 import { GarageModal } from './components/GarageModal';
 import { LeaderboardEntry, LeaderboardModal } from './components/LeaderboardModal';
 import { ArtGalleryModal } from './components/ArtGalleryModal';
-import { MissionState, applyRunToMissions, dailyMissions, pbBonusCoins, todayKey } from './game/missions';
-
-const MISSIONS_KEY = 'neon_redline_missions_v1';
-function loadMissions(): MissionState {
-  const day = todayKey();
-  try {
-    const raw = localStorage.getItem(MISSIONS_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as MissionState;
-      if (parsed && parsed.day === day && Array.isArray(parsed.missions)) return parsed;
-    }
-  } catch {}
-  return dailyMissions(day);
-}
-function saveMissions(state: MissionState) {
-  try {
-    localStorage.setItem(MISSIONS_KEY, JSON.stringify(state));
-  } catch {}
-}
+import { SteeringWheel } from './components/SteeringWheel';
 
 const INITIAL_UPGRADES: Record<string, CarUpgradeLevels> = {
   blue_jdm: { speed: 1, handling: 1, magnet: 1 },
@@ -70,13 +52,6 @@ export default function App() {
   const [coins, setCoins] = useState<number>(320);
   const [bestScore, setBestScore] = useState<number>(0);
   const [bestCombo, setBestCombo] = useState<number>(1);
-  const [showTrackOptions, setShowTrackOptions] = useState(false);
-  const [missionState, setMissionState] = useState<MissionState>(loadMissions);
-  const [runBonus, setRunBonus] = useState<{ pb: number; missions: number; labels: string[] }>({
-    pb: 0,
-    missions: 0,
-    labels: [],
-  });
   const [selectedCarId, setSelectedCarId] = useState<string>('blue_jdm');
   const [unlockedCarIds, setUnlockedCarIds] = useState<string[]>(['blue_jdm']);
   const [carUpgrades, setCarUpgrades] =
@@ -179,12 +154,6 @@ export default function App() {
   // Imperative simulation triggers passed into SceneCanvas
   const [steerHold, setSteerHold] = useState<number>(0);
   const [keySteerVisual, setKeySteerVisual] = useState<number>(0);
-  // Active touch pointers on the steer surface -> -1 / +1. Latest finger wins.
-  const steerPointersRef = useRef<Map<number, number>>(new Map());
-  const syncPointerSteer = useCallback(() => {
-    const vals = Array.from(steerPointersRef.current.values());
-    setSteerHold(vals.length ? vals[vals.length - 1] : 0);
-  }, []);
   const [flipTriggerCount, setFlipTriggerCount] = useState<number>(0);
   const [boostTriggerCount, setBoostTriggerCount] = useState<number>(0);
   const [restartTriggerCount, setRestartTriggerCount] = useState<number>(0);
@@ -248,6 +217,7 @@ export default function App() {
   const [isGarageOpen, setIsGarageOpen] = useState<boolean>(false);
   const [isLeaderboardOpen, setIsLeaderboardOpen] = useState<boolean>(false);
   const [isArtGalleryOpen, setIsArtGalleryOpen] = useState<boolean>(false);
+  const [dockCollapsed, setDockCollapsed] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(false);
 
   // Leaderboard & Official Soundtrack Deck
@@ -410,7 +380,7 @@ export default function App() {
     soundFX.unlockAndEnsureMusic().catch(() => {});
   }, []);
 
-  // End-of-Run Defeat Callback (after the crash slow-mo finishes)
+  // End-of-Run Defeat Callback (after 3D fall-off & destruction animation finishes)
   const handleGameOver = useCallback(
     async (finalStats: {
       score: number;
@@ -422,19 +392,7 @@ export default function App() {
       crashReason?: string;
     }) => {
       setLastRunStats(finalStats);
-      const pb = pbBonusCoins(finalStats.score, bestScore, finalStats.coinsCollected);
-      const baseMissions = missionState.day === todayKey() ? missionState : dailyMissions(todayKey());
-      const missionResult = applyRunToMissions(baseMissions, finalStats);
-      setMissionState(missionResult.state);
-      saveMissions(missionResult.state);
-      setRunBonus({
-        pb,
-        missions: missionResult.earned,
-        labels: missionResult.state.missions
-          .filter((m) => missionResult.completed.includes(m.id))
-          .map((m) => m.label),
-      });
-      const nextCoins = coins + finalStats.coinsCollected + pb + missionResult.earned;
+      const nextCoins = coins + finalStats.coinsCollected;
       const nextBestScore = Math.max(bestScore, finalStats.score);
       const nextBestCombo = Math.max(bestCombo, finalStats.maxCombo);
 
@@ -464,7 +422,7 @@ export default function App() {
         } catch {}
       }
     },
-    [coins, bestScore, bestCombo, idToken, selectedCarId, fetchLeaderboard, missionState]
+    [coins, bestScore, bestCombo, idToken, selectedCarId, fetchLeaderboard]
   );
 
   // Unified Keyboard Input Hub (Edge-Triggered One-Shots & Blur Hygiene)
@@ -501,6 +459,11 @@ export default function App() {
           if (bgmAudioRef.current) bgmAudioRef.current.muted = next;
           return next;
         });
+        return;
+      }
+
+      if (code === 'KeyH') {
+        setDockCollapsed((prev) => !prev);
         return;
       }
 
@@ -695,32 +658,30 @@ export default function App() {
       {/* Hidden Audio Element for Custom Lyria Soundtrack */}
       <audio ref={bgmAudioRef} loop className="hidden" />
 
-      {/* 2. Full-screen steer surface: hold anywhere on the left / right half. Sliding across the middle switches sides. */}
+      {/* 2. Interactive Full-Screen Hold-to-Steer Touch Zones During Active Gameplay */}
       {gamePhase === 'playing' && (
-        <div
-          className="fixed inset-0 z-10 pointer-events-auto touch-none"
-          data-testid="steer-surface"
-          onPointerDown={(e) => {
-            try {
-              e.currentTarget.setPointerCapture(e.pointerId);
-            } catch {}
-            steerPointersRef.current.set(e.pointerId, e.clientX < window.innerWidth / 2 ? -1 : 1);
-            syncPointerSteer();
-          }}
-          onPointerMove={(e) => {
-            if (!steerPointersRef.current.has(e.pointerId)) return;
-            steerPointersRef.current.set(e.pointerId, e.clientX < window.innerWidth / 2 ? -1 : 1);
-            syncPointerSteer();
-          }}
-          onPointerUp={(e) => {
-            steerPointersRef.current.delete(e.pointerId);
-            syncPointerSteer();
-          }}
-          onPointerCancel={(e) => {
-            steerPointersRef.current.delete(e.pointerId);
-            syncPointerSteer();
-          }}
-        />
+        <div className="fixed inset-0 z-10 grid grid-cols-2 pointer-events-auto">
+          <button
+            type="button"
+            aria-label="Steer Left"
+            onPointerDown={() => setSteerHold(-1)}
+            onPointerUp={() => setSteerHold(0)}
+            onPointerLeave={() => setSteerHold(0)}
+            onPointerCancel={() => setSteerHold(0)}
+            className="w-full h-full bg-transparent cursor-pointer focus:outline-none active:bg-sky-500/10 transition-colors"
+            tabIndex={-1}
+          />
+          <button
+            type="button"
+            aria-label="Steer Right"
+            onPointerDown={() => setSteerHold(1)}
+            onPointerUp={() => setSteerHold(0)}
+            onPointerLeave={() => setSteerHold(0)}
+            onPointerCancel={() => setSteerHold(0)}
+            className="w-full h-full bg-transparent cursor-pointer focus:outline-none active:bg-amber-500/10 transition-colors"
+            tabIndex={-1}
+          />
+        </div>
       )}
 
       {/* 3. TITLE SCREEN OVERLAY (Motorsport Command Deck + Bespoke SVG Emblem) */}
@@ -740,7 +701,9 @@ export default function App() {
                 style={{ backgroundColor: activeAppearance.primaryColor }}
                 aria-hidden="true"
               />
-              <span className="text-amber-400 font-bold shrink-0 text-sm">{Math.round(coins)} CR</span>
+              <span className="font-semibold truncate">{selectedCar.name}</span>
+              <span aria-hidden="true" className="text-slate-500">·</span>
+              <span className="text-amber-400 font-bold shrink-0">{Math.round(coins)} CR</span>
             </div>
 
             <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
@@ -751,7 +714,13 @@ export default function App() {
               >
                 Leaderboard
               </button>
-
+              <button
+                type="button"
+                onClick={() => setIsArtGalleryOpen(true)}
+                className="min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-slate-700/90 text-xs font-semibold text-cyan-300 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5"
+              >
+                <span>🖼️ Gallery</span>
+              </button>
               <button
                 type="button"
                 onClick={() => {
@@ -780,7 +749,7 @@ export default function App() {
               viewBox="0 0 440 112"
               className="w-full max-w-[390px] mx-auto drop-shadow-[0_8px_24px_rgba(0,0,0,0.9)]"
               role="img"
-              aria-label="Neon Redline: Retro Arcade Drift & Highway"
+              aria-label="Neon Redline: 3D Touge & Highway Drift"
             >
               <polygon
                 points="26,12 418,6 396,84 10,90"
@@ -816,7 +785,7 @@ export default function App() {
               >
                 {gameMode === 'highway_traffic'
                   ? 'HIGHWAY TRAFFIC · OVERTAKE CLASH'
-                  : 'TOKYO TOUGE · RETRO ARCADE DRIFT'}
+                  : 'TOKYO TOUGE · 3D PIXEL DRIFT'}
               </text>
             </svg>
           </div>
@@ -876,30 +845,10 @@ export default function App() {
                     : 'bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-800'
                 }`}
               >
-                Highway Traffic
+                2-Lane Traffic
               </button>
             </div>
 
-            <button
-              type="button"
-              onClick={() => setShowTrackOptions((v) => !v)}
-              aria-expanded={showTrackOptions}
-              className="w-full min-h-[40px] px-3 rounded-lg bg-slate-900/80 border border-slate-800 text-xs text-slate-200 flex items-center justify-between"
-              data-testid="track-options-toggle"
-            >
-              <span className="font-semibold">Track &amp; Sky</span>
-              <span className="font-mono text-slate-400">
-                {(ROAD_MODE_OPTIONS.find((o) => o.id === roadMode)?.id === 'tour'
-                  ? 'Tour'
-                  : ROAD_MODE_OPTIONS.find((o) => o.id === roadMode)?.label) ?? ''}
-                {' · '}
-                {SKY_THEME_OPTIONS.find((o) => o.id === skyMode)?.shortLabel ?? ''}
-                <span className="ml-2">{showTrackOptions ? '▴' : '▾'}</span>
-              </span>
-            </button>
-
-            {showTrackOptions && (
-            <div className="space-y-1.5">
             <div
               className="grid grid-cols-5 gap-1"
               role="group"
@@ -960,33 +909,6 @@ export default function App() {
                 );
               })}
             </div>
-            </div>
-            )}
-
-
-            {/* Daily Missions */}
-            <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 space-y-1.5" data-testid="daily-missions">
-              <div className="flex items-center justify-between text-[10px] font-mono tracking-wider">
-                <span className="text-amber-400 font-bold">DAILY MISSIONS</span>
-                <span className="text-slate-500">resets at midnight</span>
-              </div>
-              {missionState.missions.map((m) => (
-                <div key={m.id} className="text-xs">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className={m.claimed ? 'text-emerald-400 line-through' : 'text-slate-200'}>{m.label}</span>
-                    <span className="font-mono tabular-nums text-amber-300 shrink-0">
-                      {m.claimed ? '✓' : `+${m.reward} CR`}
-                    </span>
-                  </div>
-                  <div className="w-full h-1 mt-1 rounded-full bg-slate-800 overflow-hidden">
-                    <div
-                      className={`h-full ${m.claimed ? 'bg-emerald-400' : 'bg-amber-400'}`}
-                      style={{ width: `${Math.min(100, (m.progress / m.target) * 100)}%` }}
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
 
             {/* Primary Launch CTA */}
             <button
@@ -1018,8 +940,9 @@ export default function App() {
               </button>
             </div>
 
-            <p className="text-center text-[11px] sm:text-xs text-slate-300 pt-0.5 leading-tight font-mono">
-              Hold left / right side to steer · Tap NITRO to boost
+            <p className="text-center text-[10px] sm:text-xs text-slate-300 pt-0.5 leading-tight flex items-center justify-center gap-1.5 font-mono">
+              <span className="text-cyan-400">📱 Mobile Ready:</span>
+              <span>Tap to Drift · Pedals &amp; Wheel for Traffic · 3D Garage</span>
             </p>
           </div>
         </div>
@@ -1073,38 +996,18 @@ export default function App() {
 
                 <div className="pl-2 sm:pl-3 border-l border-slate-800">
                   <span className="block text-[9px] sm:text-[10px] font-semibold tracking-wider text-slate-400">
-                    {gameMode === 'highway_traffic' ? 'PASSES' : 'TIME'}
+                    {gameMode === 'highway_traffic' ? 'PASSES' : 'DIR'}
                   </span>
                   <span
                     className="text-lg sm:text-2xl font-bold font-mono tabular-nums text-cyan-400"
-                    data-testid={gameMode === 'highway_traffic' ? 'hud-passes' : 'hud-time'}
+                    data-testid={gameMode === 'highway_traffic' ? 'hud-passes' : 'hud-dir'}
                   >
                     {gameMode === 'highway_traffic'
                       ? Math.round(telemetry.overtakes || 0)
-                      : Math.ceil(telemetry.timeLeft ?? 0)}
+                      : telemetry.direction === 'right'
+                      ? '/'
+                      : '\\'}
                   </span>
-                </div>
-              </div>
-              <div className="mt-1.5 flex items-center gap-1.5" data-testid="hud-nitro">
-                <span className="text-[8px] sm:text-[9px] font-bold tracking-wider text-sky-300">NOS</span>
-                <div className="flex-1 h-1.5 rounded-full bg-slate-800 overflow-hidden">
-                  <div
-                    className={`h-full transition-[width] duration-100 ${
-                      (telemetry.nitro ?? 0) >= 30 ? 'bg-sky-400' : 'bg-slate-500'
-                    }`}
-                    style={{ width: `${Math.round(telemetry.nitro ?? 0)}%` }}
-                  />
-                </div>
-              </div>
-              <div className="mt-1 flex items-center gap-1.5">
-                <span className={`text-[8px] sm:text-[9px] font-bold tracking-wider ${telemetry.isFever ? 'text-cyan-300' : 'text-fuchsia-300'}`}>
-                  {telemetry.isFever ? 'x2!' : 'FVR'}
-                </span>
-                <div className="flex-1 h-1.5 rounded-full bg-slate-800 overflow-hidden">
-                  <div
-                    className={`h-full ${telemetry.isFever ? 'bg-cyan-300 animate-pulse' : 'bg-fuchsia-400'}`}
-                    style={{ width: `${Math.round(telemetry.fever)}%` }}
-                  />
                 </div>
               </div>
             </div>
@@ -1192,70 +1095,113 @@ export default function App() {
 
           <div className="my-auto" />
 
-          {/* Simple touch controls: big LEFT / RIGHT pads (visual, the steer surface underneath handles touch) + NITRO */}
-          <div className="w-full max-w-lg mx-auto pb-[max(env(safe-area-inset-bottom),0.25rem)]" data-testid="touch-controls">
-            <div className="flex items-center justify-center gap-3 mb-2 text-[11px] font-mono tabular-nums">
-              <span className="px-2 py-0.5 rounded-md bg-slate-950/70 text-white">
-                <strong
-                  className={telemetry.isFever ? 'text-cyan-300' : telemetry.speedKmh >= 180 ? 'text-amber-300' : 'text-white'}
-                  data-testid="hud-speed"
-                >
-                  {Math.round(telemetry.speedKmh)}
-                </strong>{' '}
-                KM/H
-              </span>
-              <span className="px-2 py-0.5 rounded-md bg-slate-950/70 text-amber-400 font-bold">
-                +{Math.round(telemetry.coinsRun)} CR
-              </span>
-              <span className="px-2 py-0.5 rounded-md bg-slate-950/70 text-slate-300">
-                {Math.round(telemetry.distance)}m
-              </span>
-            </div>
-            <div className="flex items-end justify-between gap-3">
+          {/* Unified Cockpit Controls: Steering Wheel + Flash/Horn/Nitro + Metal Gas & Brake Pedals */}
+          <div className="w-full max-w-lg mx-auto pointer-events-auto flex flex-col items-center">
+            <button
+              type="button"
+              tabIndex={-1}
+              onClick={(e) => {
+                e.currentTarget.blur();
+                setDockCollapsed((prev) => !prev);
+              }}
+              className="px-3 py-1 rounded-t-xl border border-b-0 border-slate-700/80 text-[11px] font-mono text-slate-300 hover:text-white"
+              style={{ backgroundColor: 'rgba(9, 14, 26, 0.92)' }}
+            >
+              {dockCollapsed ? '▴ Cockpit Controls [H]' : '▾ Hide Cockpit [H]'}
+            </button>
+
+            {!dockCollapsed && (
               <div
-                aria-hidden="true"
-                className={`flex-1 h-24 rounded-2xl border-2 flex items-center justify-center text-4xl font-bold transition-colors ${
-                  (steerHold !== 0 ? steerHold : keySteerVisual) < 0
-                    ? 'bg-sky-400/35 border-sky-300 text-white'
-                    : 'bg-slate-950/25 border-white/20 text-white/70'
-                }`}
+                className="w-full rounded-2xl border border-slate-700/80 p-2 sm:p-2.5 shadow-2xl"
+                style={{ backgroundColor: 'rgba(9, 14, 26, 0.94)' }}
               >
-                ◀
+                {/* Telemetry & Fever Strip */}
+                <div className="flex items-center justify-between gap-2 mb-2 text-[11px]">
+                  <div className="flex items-center gap-2 font-mono tabular-nums">
+                    <span className="text-slate-300">
+                      <strong
+                        className={
+                          telemetry.isFever || telemetry.speedKmh >= 235
+                            ? 'text-cyan-300'
+                            : telemetry.speedKmh >= 180
+                            ? 'text-amber-300'
+                            : 'text-white'
+                        }
+                        data-testid="hud-speed"
+                      >
+                        {Math.round(telemetry.speedKmh)}
+                      </strong>{' '}
+                      KM/H
+                    </span>
+                    <span aria-hidden="true" className="text-slate-600">·</span>
+                    <span className="text-amber-400 font-bold">
+                      +{Math.round(telemetry.coinsRun)} CR
+                    </span>
+                    <span aria-hidden="true" className="text-slate-600">·</span>
+                    <span className="text-slate-300">
+                      {Math.round(telemetry.distance)}m
+                    </span>
+                  </div>
+                </div>
+
+                {/* Tactile Cockpit Row: Steering Wheel & Flash + Horn */}
+                <div className="flex items-center justify-between gap-2">
+                  {/* Left: Interactive Rotatable Steering Wheel with Center Horn */}
+                  <SteeringWheel
+                    value={steerHold !== 0 ? steerHold : keySteerVisual}
+                    onChange={setSteerHold}
+                    onHorn={triggerHornAction}
+                  />
+
+                  {/* Right: High-Beam Flash [F] & Horn [E] */}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      data-hud-btn="true"
+                      data-testid="btn-flash"
+                      tabIndex={-1}
+                      aria-label="Flash High-Beams [F]"
+                      onClick={(e) => {
+                        e.currentTarget.blur();
+                        triggerFlashAction();
+                      }}
+                      className={`min-h-[52px] min-w-[58px] sm:min-w-[64px] px-2 py-1.5 rounded-xl border flex flex-col items-center justify-center gap-0.5 transition-colors whitespace-nowrap ${
+                        flashPulse
+                          ? 'bg-cyan-400 border-white text-slate-950'
+                          : 'bg-slate-900 border-cyan-500/60 hover:bg-slate-800 text-cyan-300'
+                      }`}
+                    >
+                      <svg viewBox="0 0 24 24" className="w-5 h-5 fill-current" aria-hidden="true">
+                        <path d="M5 7c-1.7 0-3 2.2-3 5s1.3 5 3 5h5V7H5zm8 0v2h8V7h-8zm0 4v2h9v-2h-9zm0 4v2h8v-2h-8z" />
+                      </svg>
+                      <span className="text-[10px] font-mono font-bold">FLASH</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      data-hud-btn="true"
+                      data-testid="btn-horn"
+                      tabIndex={-1}
+                      aria-label="Sound Horn [E]"
+                      onClick={(e) => {
+                        e.currentTarget.blur();
+                        triggerHornAction();
+                      }}
+                      className={`min-h-[52px] min-w-[58px] sm:min-w-[64px] px-2 py-1.5 rounded-xl border flex flex-col items-center justify-center gap-0.5 transition-colors whitespace-nowrap ${
+                        hornPulse
+                          ? 'bg-amber-400 border-white text-slate-950'
+                          : 'bg-slate-900 border-amber-500/60 hover:bg-slate-800 text-amber-300'
+                      }`}
+                    >
+                      <svg viewBox="0 0 24 24" className="w-5 h-5 fill-current" aria-hidden="true">
+                        <path d="M3 10v4h4l5 5V5L7 10H3zm13.5 2c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
+                      </svg>
+                      <span className="text-[10px] font-mono font-bold">HORN</span>
+                    </button>
+                  </div>
+                </div>
               </div>
-              <button
-                type="button"
-                tabIndex={-1}
-                aria-label="Nitro boost [Space]"
-                data-testid="btn-nitro"
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  setBoostTriggerCount((c) => c + 1);
-                }}
-                className={`pointer-events-auto relative w-24 h-24 shrink-0 rounded-full border-4 font-display font-black text-sm tracking-wider shadow-xl active:scale-95 transition-transform ${
-                  (telemetry.nitro ?? 0) >= 30
-                    ? 'bg-gradient-to-b from-sky-400 to-blue-600 border-white text-white'
-                    : 'bg-slate-800 border-slate-600 text-slate-400'
-                }`}
-                style={{
-                  boxShadow: (telemetry.nitro ?? 0) >= 30 ? '0 0 24px rgba(56,189,248,0.7)' : undefined,
-                }}
-              >
-                NITRO
-                <span className="block text-[10px] font-mono font-bold opacity-90">
-                  {Math.round(telemetry.nitro ?? 0)}%
-                </span>
-              </button>
-              <div
-                aria-hidden="true"
-                className={`flex-1 h-24 rounded-2xl border-2 flex items-center justify-center text-4xl font-bold transition-colors ${
-                  (steerHold !== 0 ? steerHold : keySteerVisual) > 0
-                    ? 'bg-amber-400/35 border-amber-300 text-white'
-                    : 'bg-slate-950/25 border-white/20 text-white/70'
-                }`}
-              >
-                ▶
-              </div>
-            </div>
+            )}
           </div>
         </div>
       )}
@@ -1374,11 +1320,9 @@ export default function App() {
                 {(lastRunStats.crashReason || 'GUARDRAIL BREACHED').toUpperCase()}
               </p>
               <h2 className="text-2xl sm:text-3xl font-bold font-display text-white mt-0.5">
-                {lastRunStats.crashReason === 'Time Up'
-                  ? 'Out of Time!'
-                  : gameMode === 'highway_traffic'
+                {gameMode === 'highway_traffic' && lastRunStats.crashReason !== 'Guardrail Breached'
                   ? 'Highway Pileup!'
-                  : 'Wrecked!'}
+                  : 'Wrecked in the Abyss'}
               </h2>
               {(() => {
                 const rankInfo = getDriftRank(lastRunStats.score);
@@ -1432,29 +1376,6 @@ export default function App() {
                 </span>
               </div>
             </div>
-
-
-            {(runBonus.pb > 0 || runBonus.missions > 0) && (
-              <div className="p-3 rounded-xl bg-emerald-950/60 border border-emerald-700/70 text-xs font-mono space-y-0.5" data-testid="run-bonus">
-                {runBonus.pb > 0 && (
-                  <div className="flex justify-between text-emerald-300">
-                    <span>NEW PERSONAL BEST BONUS</span>
-                    <span>+{runBonus.pb} CR</span>
-                  </div>
-                )}
-                {runBonus.labels.map((l) => (
-                  <div key={l} className="flex justify-between text-amber-300">
-                    <span>MISSION ✓ {l}</span>
-                  </div>
-                ))}
-                {runBonus.missions > 0 && (
-                  <div className="flex justify-between text-amber-300 font-bold">
-                    <span>MISSION REWARDS</span>
-                    <span>+{runBonus.missions} CR</span>
-                  </div>
-                )}
-              </div>
-            )}
 
             {/* Progressive Car Unlock Progress Bar */}
             {nextLockedCar && (

@@ -171,7 +171,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
       <div className="flex items-center justify-between gap-2 px-3 sm:px-5 py-2.5 border-b border-slate-800 bg-[#090e1a] shrink-0 pt-safe">
         <div className="min-w-0">
           <p className="text-[10px] sm:text-[11px] font-mono tracking-wider text-amber-400 truncate">
-            {CAR_ROSTER.length} CHASSIS · SHOWROOM
+            {CAR_ROSTER.length} CHASSIS · 3D SHOWROOM
           </p>
           <h2 className="text-base sm:text-xl font-bold tracking-tight font-display text-white truncate">
             Neon Redline Garage
