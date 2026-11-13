@@ -104,6 +104,8 @@ export type UnderglowId =
   | 'gold'
   | 'ice_blue';
 
+export type HornTypeId = 'dual' | 'laser' | 'fanfare' | 'melody' | 'train';
+
 export type FlameColorId =
   | 'stock'
   | 'amber'
@@ -200,6 +202,7 @@ export interface CarCustomization {
   wing: WingKitId;
   rims: RimFinishId;
   underglow: UnderglowId;
+  underglowColor?: string;
   flame: FlameColorId;
   number: string; // '73', '86', '01', '24', '77', '99', '13', '42', '90'
   engine?: EngineModId;
@@ -209,6 +212,7 @@ export interface CarCustomization {
   hood?: HoodStyleId;
   windows?: WindowTintId;
   horn?: HornStyleId;
+  hornType?: 'dual' | 'laser' | 'fanfare' | 'melody' | 'train';
   sound?: SoundProfileId;
   lights?: HeadlightKitId;
 }
@@ -219,6 +223,7 @@ export const DEFAULT_CUSTOMIZATION: CarCustomization = {
   wing: 'stock',
   rims: 'stock',
   underglow: 'none',
+  underglowColor: 'none',
   flame: 'stock',
   number: '73',
   engine: 'stock',
@@ -228,6 +233,7 @@ export const DEFAULT_CUSTOMIZATION: CarCustomization = {
   hood: 'stock',
   windows: 'stock',
   horn: 'stock',
+  hornType: 'dual',
   sound: 'stock',
   lights: 'stock',
 };
@@ -292,18 +298,93 @@ export const RIM_OPTIONS: { id: RimFinishId; label: string; hex: string | null }
   { id: 'turbo_fan', label: 'Aerodynamic Turbofan', hex: '#94a3b8' },
 ];
 
-export const UNDERGLOW_OPTIONS: { id: UnderglowId; label: string; hex: string | null }[] = [
-  { id: 'none', label: 'Off', hex: null },
-  { id: 'cyan', label: 'Cyber Cyan', hex: '#22d3ee' },
-  { id: 'amber', label: 'Sunset Amber', hex: '#fbbf24' },
-  { id: 'pink', label: 'Sakura Neon', hex: '#f472b6' },
-  { id: 'emerald', label: 'Nitro Green', hex: '#34d399' },
-  { id: 'crimson', label: 'Crimson Glow', hex: '#fb7185' },
-  { id: 'purple', label: 'Ultra Violet', hex: '#a855f7' },
-  { id: 'white', label: 'Pure Xenon White', hex: '#f8fafc' },
-  { id: 'gold', label: 'Imperial Gold', hex: '#facc15' },
-  { id: 'ice_blue', label: 'Arctic Frost', hex: '#38bdf8' },
+export interface UnderglowOption {
+  id: string;
+  label: string;
+  color: string;
+  cost: number;
+  hex?: string | null;
+}
+
+export const UNDERGLOW_OPTIONS: UnderglowOption[] = [
+  { id: 'none', label: 'None', color: 'transparent', hex: null, cost: 0 },
+  { id: '#06b6d4', label: 'Neon Cyan', color: '#06b6d4', hex: '#06b6d4', cost: 500 },
+  { id: '#f43f5e', label: 'Crimson Glow', color: '#f43f5e', hex: '#f43f5e', cost: 500 },
+  { id: '#10b981', label: 'Acid Emerald', color: '#10b981', hex: '#10b981', cost: 500 },
+  { id: '#8b5cf6', label: 'Cyber Violet', color: '#8b5cf6', hex: '#8b5cf6', cost: 750 },
+  { id: '#f59e0b', label: 'Solar Amber', color: '#f59e0b', hex: '#f59e0b', cost: 750 },
+  { id: '#ec4899', label: 'Tokyo Pink', color: '#ec4899', hex: '#ec4899', cost: 750 },
+  { id: 'rainbow', label: 'RGB Rainbow Cycle', color: 'linear-gradient(to right, #06b6d4, #f43f5e, #10b981)', hex: '#06b6d4', cost: 1500 },
 ];
+
+export const LEGACY_UNDERGLOW_MAP: Record<string, string> = {
+  cyan: '#22d3ee',
+  amber: '#fbbf24',
+  pink: '#f472b6',
+  emerald: '#34d399',
+  crimson: '#fb7185',
+  purple: '#a855f7',
+  white: '#f8fafc',
+  gold: '#facc15',
+  ice_blue: '#38bdf8',
+};
+
+/**
+ * Calculates smooth cycling RGB hex color across the full 360-degree color wheel.
+ * Loops cleanly every 3 seconds (120 degrees/sec).
+ */
+export function getRainbowCycleColor(timeMs: number = Date.now()): string {
+  const hue = ((timeMs % 3000) / 3000) * 360;
+  const s = 1.0;
+  const l = 0.55;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1));
+  const m = l - c / 2;
+
+  let r = 0, g = 0, b = 0;
+  if (hue < 60) { r = c; g = x; b = 0; }
+  else if (hue < 120) { r = x; g = c; b = 0; }
+  else if (hue < 180) { r = 0; g = c; b = x; }
+  else if (hue < 240) { r = 0; g = x; b = c; }
+  else if (hue < 300) { r = x; g = 0; b = c; }
+  else { r = c; g = 0; b = x; }
+
+  const toHex = (n: number) => {
+    const hex = Math.round((n + m) * 255).toString(16);
+    return hex.length === 1 ? '0' + hex : hex;
+  };
+
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+/**
+ * Resolves any underglow identifier (ID, hex string, legacy ID, or 'rainbow')
+ * into a valid color string or null if disabled.
+ */
+export function resolveUnderglowColor(
+  underglow?: string,
+  timeMs: number = Date.now()
+): string | null {
+  if (!underglow || underglow === 'none' || underglow === 'transparent') {
+    return null;
+  }
+  if (underglow === 'rainbow') {
+    return getRainbowCycleColor(timeMs);
+  }
+  if (underglow.startsWith('#')) {
+    return underglow;
+  }
+  const match = UNDERGLOW_OPTIONS.find((u) => u.id === underglow);
+  if (match) {
+    if (match.id === 'none') return null;
+    if (match.id === 'rainbow') return getRainbowCycleColor(timeMs);
+    return match.color.startsWith('#') ? match.color : null;
+  }
+  const legacy = LEGACY_UNDERGLOW_MAP[underglow];
+  if (legacy) return legacy;
+
+  return null;
+}
 
 export const FLAME_OPTIONS: { id: FlameColorId; label: string; outer: string | null; core: string | null }[] = [
   { id: 'stock', label: 'Factory', outer: null, core: null },
@@ -395,15 +476,30 @@ export const WINDOW_OPTIONS: {
   { id: 'clear_cage', label: 'Clear + Roll Cage', darkHex: '#1e293b', midHex: '#3b82f6', specHex: '#e0f2fe' },
 ];
 
-export const HORN_OPTIONS: { id: HornStyleId; label: string }[] = [
-  { id: 'stock', label: 'Dual Street' },
-  { id: 'jdm_sport', label: 'JDM Twin-Tone' },
-  { id: 'air_horn', label: 'GT Air Horn' },
-  { id: 'train_bass', label: 'Sub-Bass Blast' },
-  { id: 'cyber_chirp', label: 'Cyber Pulse' },
-  { id: 'truck_air_blast', label: 'Locomotive Blast' },
-  { id: 'bike_beep', label: 'High-Pitch Road Beep' },
+export interface HornOption {
+  id: HornTypeId;
+  label: string;
+  icon: string;
+  cost: number;
+}
+
+export const HORN_OPTIONS: HornOption[] = [
+  { id: 'dual', label: 'Classic Euro Dual-Tone', icon: '📢', cost: 0 },
+  { id: 'laser', label: 'Arcade Sci-Fi Laser', icon: '⚡', cost: 500 },
+  { id: 'fanfare', label: 'Trophy Fanfare', icon: '🎺', cost: 800 },
+  { id: 'melody', label: 'Chiptune Drift Melody', icon: '🎶', cost: 1000 },
+  { id: 'train', label: 'Hyperion Super Airhorn', icon: '🚂', cost: 1200 },
 ];
+
+export const LEGACY_HORN_MAP: Record<string, HornTypeId> = {
+  stock: 'dual',
+  jdm_sport: 'melody',
+  air_horn: 'train',
+  train_bass: 'train',
+  cyber_chirp: 'laser',
+  truck_air_blast: 'train',
+  bike_beep: 'laser',
+};
 
 export const SOUND_OPTIONS: { id: SoundProfileId; label: string }[] = [
   { id: 'stock', label: 'Balanced Coupe' },
@@ -2319,6 +2415,7 @@ export function resolveCarAppearance(
   windowMidHex: string;
   windowSpecHex: string;
   horn: HornStyleId;
+  hornType: HornTypeId;
   sound: SoundProfileId;
   lights: HeadlightKitId;
   headlightLensHex: string;
@@ -2326,7 +2423,8 @@ export function resolveCarAppearance(
 } {
   const paintOpt = PAINT_OPTIONS.find((p) => p.id === (custom?.paint || 'stock'));
   const rimOpt = RIM_OPTIONS.find((r) => r.id === (custom?.rims || 'stock'));
-  const glowOpt = UNDERGLOW_OPTIONS.find((u) => u.id === (custom?.underglow || 'none'));
+  const rawUnderglow = custom?.underglowColor || custom?.underglow || 'none';
+  const resolvedUnderglowHex = resolveUnderglowColor(rawUnderglow);
   const flameOpt = FLAME_OPTIONS.find((f) => f.id === (custom?.flame || 'stock'));
   const tireOpt = TIRE_OPTIONS.find((t) => t.id === (custom?.tires || 'stock')) || TIRE_OPTIONS[0];
   const windowOpt = WINDOW_OPTIONS.find((w) => w.id === (custom?.windows || 'stock')) || WINDOW_OPTIONS[0];
@@ -2380,7 +2478,7 @@ export function resolveCarAppearance(
     rimHex: rimOpt?.hex || defaultRimHex,
     spoilerStyle: wingChoice,
     livery: custom?.livery || 'stock',
-    underglowHex: glowOpt?.hex || null,
+    underglowHex: resolvedUnderglowHex,
     flameOuter: flameOpt?.outer || defaultFlameOuter,
     flameCore: flameOpt?.core || '#fef08a',
     number: (custom?.number || car.decalText || '73').slice(0, 2),
@@ -2395,6 +2493,9 @@ export function resolveCarAppearance(
     windowMidHex: windowOpt.midHex,
     windowSpecHex: windowOpt.specHex,
     horn: custom?.horn || 'stock',
+    hornType:
+      custom?.hornType ||
+      (custom?.horn && custom.horn in LEGACY_HORN_MAP ? LEGACY_HORN_MAP[custom.horn] : 'dual'),
     sound: custom?.sound || 'stock',
     lights: lightOpt.id,
     headlightLensHex: lightOpt.lensHex,
@@ -2952,6 +3053,10 @@ export interface SCurvePoint {
   boostX: number;
   boostZ: number;
   boostTriggered?: boolean;
+  hasNitroCanister?: boolean;
+  canisterCollected?: boolean;
+  canisterX?: number;
+  canisterZ?: number;
 }
 
 function buildTrackPointsFrom(
@@ -3009,11 +3114,15 @@ function buildTrackPointsFrom(
     const bankAngle = Number((-curvature * 2.0).toFixed(3));
 
     const hasBoostPad = idx >= 18 && idx % 22 === 0;
-    const hasNitroGem = idx >= 15 && idx % 17 === 0 && !hasBoostPad;
-    const hasCoin = idx >= 6 && idx % 3 === 0 && !hasNitroGem;
+    const hasNitroCanister = idx >= 30 && idx % 80 === 0 && !hasBoostPad;
+    const hasNitroGem = idx >= 15 && idx % 17 === 0 && !hasBoostPad && !hasNitroCanister;
+    const hasCoin = idx >= 6 && idx % 3 === 0 && !hasNitroGem && !hasNitroCanister;
     const coinOffset = Math.sin(idx * 0.7) * (width * 0.22);
     const coinX = curX + nx * coinOffset;
     const coinZ = curZ + nz * coinOffset;
+    const canisterOffset = Math.sin(idx * 0.45) * (width * 0.24);
+    const canisterX = curX + nx * canisterOffset;
+    const canisterZ = curZ + nz * canisterOffset;
 
     points.push({
       index: idx,
@@ -3034,6 +3143,10 @@ function buildTrackPointsFrom(
       coinCollected: false,
       hasNitroGem,
       gemCollected: false,
+      hasNitroCanister,
+      canisterX,
+      canisterZ,
+      canisterCollected: false,
       hasBoostPad,
       boostX: curX,
       boostZ: curZ,
@@ -3590,11 +3703,15 @@ function buildHighwayPointsFrom(
     const bankAngle = Number((-curvature * 1.1).toFixed(3));
 
     const hasBoostPad = idx >= 24 && idx % 28 === 0;
-    const hasNitroGem = idx >= 18 && idx % 21 === 0 && !hasBoostPad;
-    const hasCoin = idx >= 8 && idx % 4 === 0 && !hasNitroGem;
+    const hasNitroCanister = idx >= 25 && idx % 75 === 0 && !hasBoostPad;
+    const hasNitroGem = idx >= 18 && idx % 21 === 0 && !hasBoostPad && !hasNitroCanister;
+    const hasCoin = idx >= 8 && idx % 4 === 0 && !hasNitroGem && !hasNitroCanister;
     const lanePick = idx % 8 < 4 ? HIGHWAY_LANE_OFFSET : -HIGHWAY_LANE_OFFSET;
     const coinX = curX + nx * lanePick;
     const coinZ = curZ + nz * lanePick;
+    const canisterLane = idx % 150 < 75 ? HIGHWAY_LANE_OFFSET * 0.85 : -HIGHWAY_LANE_OFFSET * 0.85;
+    const canisterX = curX + nx * canisterLane;
+    const canisterZ = curZ + nz * canisterLane;
 
     points.push({
       index: idx,
@@ -3615,6 +3732,10 @@ function buildHighwayPointsFrom(
       coinCollected: false,
       hasNitroGem,
       gemCollected: false,
+      hasNitroCanister,
+      canisterX,
+      canisterZ,
+      canisterCollected: false,
       hasBoostPad,
       boostX: curX + nx * HIGHWAY_LANE_OFFSET,
       boostZ: curZ + nz * HIGHWAY_LANE_OFFSET,

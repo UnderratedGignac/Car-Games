@@ -24,7 +24,7 @@ import {
 } from './game/rules';
 import { GamePhase, LiveTelemetry, SceneCanvas } from './game/SceneCanvas';
 import { SKY_THEME_OPTIONS, SkyThemeId } from './game/skyArt';
-import { AudioDeckSnapshot, soundFX } from './game/audio';
+import { AudioDeckSnapshot, JukeboxTrack, soundFX } from './game/audio';
 import { GarageModal } from './components/GarageModal';
 import { LeaderboardEntry, LeaderboardModal } from './components/LeaderboardModal';
 import { ArtGalleryModal } from './components/ArtGalleryModal';
@@ -152,12 +152,43 @@ export default function App() {
     return 'auto';
   });
 
+  const [jukeboxToast, setJukeboxToast] = useState<{
+    track: JukeboxTrack;
+    id: number;
+  } | null>(null);
+  const jukeboxToastTimerRef = useRef<number | null>(null);
+
+  const showJukeboxTrackToast = useCallback((track: JukeboxTrack) => {
+    if (jukeboxToastTimerRef.current) {
+      window.clearTimeout(jukeboxToastTimerRef.current);
+    }
+    setJukeboxToast({ track, id: Date.now() });
+    jukeboxToastTimerRef.current = window.setTimeout(() => {
+      setJukeboxToast(null);
+    }, 2800);
+  }, []);
+
+  const handleSkipTrack = useCallback((e?: React.MouseEvent) => {
+    if (e) {
+      try {
+        (e.currentTarget as HTMLElement).blur();
+      } catch {}
+      e.stopPropagation();
+    }
+    const nextTrack = soundFX.nextJukeboxTrack();
+    showJukeboxTrackToast(nextTrack);
+  }, [showJukeboxTrackToast]);
+
   const handleSelectGameMode = useCallback((mode: GameModeId) => {
     setGameMode(mode);
     try {
       window.localStorage.setItem('apex_slash_mode_v1', mode);
     } catch {}
-  }, []);
+    if (mode === 'zen') {
+      const lofiTrack = soundFX.switchJukeboxTrack('lofi');
+      showJukeboxTrackToast(lofiTrack);
+    }
+  }, [showJukeboxTrackToast]);
 
   const handleSelectRoadMode = useCallback((mode: RoadSelectionMode) => {
     setRoadMode(mode);
@@ -826,6 +857,26 @@ export default function App() {
       {/* Hidden Audio Element for Custom Lyria Soundtrack */}
       <audio ref={bgmAudioRef} loop className="hidden" />
 
+      {/* Smooth Animated Soundtrack Title Popup */}
+      {jukeboxToast && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 pointer-events-none transition-all duration-300">
+          <div className="px-4 py-2 rounded-2xl bg-slate-950/95 border border-cyan-400/80 shadow-[0_0_24px_rgba(6,182,212,0.45)] backdrop-blur-md flex items-center gap-2.5">
+            <span className="text-lg">🎵</span>
+            <div>
+              <div className="text-[9px] font-mono tracking-widest text-cyan-400 uppercase font-bold">
+                NOW PLAYING · {jukeboxToast.track.genre}
+              </div>
+              <div className="text-xs sm:text-sm font-bold font-display text-white">
+                {jukeboxToast.track.title}
+              </div>
+            </div>
+            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-amber-400/20 text-amber-300 border border-amber-400/40">
+              {jukeboxToast.track.bpm} BPM
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* 2. Interactive Full-Screen Hold-to-Steer Touch Zones During Active Gameplay */}
       {gamePhase === 'playing' && (
         gameSettings.controlScheme === 'swipe' ? (
@@ -937,6 +988,18 @@ export default function App() {
                 className="min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-slate-700/90 text-xs font-semibold text-cyan-300 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5"
               >
                 <span>🖼️ Gallery</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleSkipTrack}
+                className="min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-slate-700/90 text-xs font-mono text-cyan-300 hover:text-cyan-200 transition-colors flex items-center gap-1.5 shrink-0"
+                title="Tap to skip soundtrack"
+              >
+                <span className="text-amber-400">🎵</span>
+                <span className="font-semibold text-white truncate max-w-[120px] sm:max-w-[170px]">
+                  {audioDeck.currentTrack?.title || audioDeck.activeTrackTitle}
+                </span>
+                <span className="text-[10px] text-slate-400 hidden lg:inline">(Tap to skip)</span>
               </button>
               <button
                 type="button"
@@ -1251,6 +1314,22 @@ export default function App() {
               </div>
             </div>
 
+            {/* Jukebox Pill Button in Playing HUD */}
+            <button
+              type="button"
+              tabIndex={-1}
+              onClick={handleSkipTrack}
+              className="pointer-events-auto min-h-[38px] px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-full border border-slate-700/80 hover:border-cyan-400/90 text-[10px] sm:text-[11px] font-mono flex items-center gap-1.5 shadow-lg backdrop-blur-md transition-all active:scale-95 group shrink-0"
+              style={{ backgroundColor: 'rgba(9, 13, 22, 0.88)' }}
+              title="Tap to skip soundtrack"
+            >
+              <span className="text-amber-400 group-hover:scale-110 transition-transform">🎵</span>
+              <span className="font-semibold text-slate-100 max-w-[90px] sm:max-w-[140px] truncate">
+                {audioDeck.currentTrack?.title || audioDeck.activeTrackTitle}
+              </span>
+              <span className="text-[9px] text-slate-400 hidden xs:inline">(Tap to skip)</span>
+            </button>
+
             {/* Top-Right Compact Square SVG Utility Buttons (Mute [M], Restart [R], Pause [P]) */}
             <div className="flex items-center gap-1.5 sm:gap-2 pointer-events-auto shrink-0">
               <button
@@ -1520,6 +1599,34 @@ export default function App() {
                   );
                 })}
               </div>
+            </div>
+
+            {/* Soundtrack Jukebox Section */}
+            <div className="pt-2 border-t border-slate-800 text-left">
+              <p className="text-[10px] font-semibold tracking-wider text-slate-400 uppercase mb-1.5 flex items-center justify-between">
+                <span>Soundtrack Jukebox</span>
+                <span className="text-amber-400 font-mono">{audioDeck.currentTrack?.bpm || 138} BPM</span>
+              </p>
+              <button
+                type="button"
+                onClick={handleSkipTrack}
+                className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-850 border border-cyan-500/40 hover:border-cyan-400 text-xs font-mono flex items-center justify-between gap-2 shadow-lg transition-all active:scale-[0.98]"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-base text-amber-400 animate-pulse">🎵</span>
+                  <div className="text-left min-w-0">
+                    <div className="text-white font-bold truncate text-[11px] sm:text-xs">
+                      {audioDeck.currentTrack?.title || audioDeck.activeTrackTitle}
+                    </div>
+                    <div className="text-[9px] text-cyan-300">
+                      {audioDeck.currentTrack?.genre} · {audioDeck.currentTrack?.bpm} BPM
+                    </div>
+                  </div>
+                </div>
+                <span className="text-[10px] font-bold text-amber-400 px-2 py-0.5 rounded bg-slate-800 shrink-0">
+                  Skip ⏭
+                </span>
+              </button>
             </div>
 
             <div className="space-y-2.5 pt-2">

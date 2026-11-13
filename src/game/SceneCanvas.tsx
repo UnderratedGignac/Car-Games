@@ -5,6 +5,7 @@
 
 import React, { useEffect, useRef } from 'react';
 import {
+  CAR_ROSTER,
   CarCustomization,
   CarSpec,
   CarUpgradeLevels,
@@ -41,6 +42,14 @@ import {
   triggerTrafficFlashYield,
   compactInPlace,
 } from './rules';
+import {
+  GhostFrame,
+  GhostRun,
+  generateDevRivalGhost,
+  loadBestGhostRun,
+  sampleGhostPosition,
+  saveBestGhostRun,
+} from './ghost';
 import { getPixelCarCanvas, getPixelCarTireAnchors, getTrafficVehicleCanvas } from './pixelSprites';
 import {
   Project3DIntoFn,
@@ -791,12 +800,41 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       isHero: boolean;
       proj: Projected3D;
       traffic?: TrafficCarState;
+      isGhost?: boolean;
+      ghostFrame?: GhostFrame;
+      ghostColor?: string;
+      ghostCarId?: string;
     }[] = Array.from({ length: 48 }, () => ({
       rawZ: 0,
       isHero: false,
       proj: makeEmptyProj(),
       traffic: undefined,
+      isGhost: false,
+      ghostFrame: undefined,
+      ghostColor: undefined,
+      ghostCarId: undefined,
     }));
+    const MAX_GHOST_RECORD_FRAMES = 6000;
+    const recordedGhostFrames: GhostFrame[] = Array.from({ length: MAX_GHOST_RECORD_FRAMES }, () => ({
+      timeSec: 0,
+      distance: 0,
+      lateralOffset: 0,
+      angle: 0,
+      speedKmh: 0,
+    }));
+    let recordedGhostFrameCount = 0;
+    let ghostRecordTimer = 0;
+    let runElapsedSec = 0;
+    let activeGhost: GhostRun | null = null;
+    let ghostOvertakenTriggered = false;
+    let wasGhostAhead = false;
+    const ghostSampleScratch: GhostFrame = {
+      timeSec: 0,
+      distance: 0,
+      lateralOffset: 0,
+      angle: 0,
+      speedKmh: 0,
+    };
     const pScratch0 = makeEmptyProj();
     const pScratch1 = makeEmptyProj();
     const pScratch2 = makeEmptyProj();
@@ -880,6 +918,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
       score = 0;
       distance = 0;
+      recordedGhostFrameCount = 0;
+      ghostRecordTimer = 0;
+      runElapsedSec = 0;
+      ghostOvertakenTriggered = false;
+      wasGhostAhead = false;
+      const savedGhost = loadBestGhostRun(gameModeRef.current);
+      activeGhost = savedGhost || generateDevRivalGhost(gameModeRef.current);
       combo = 1;
       maxCombo = 1;
       wasDrifting = false;
@@ -1214,6 +1259,30 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       const currentAppearance = cachedAppearance;
       const stats = cachedStats;
 
+      const finalizeGameOver = (reason: string) => {
+        if (recordedGhostFrameCount > 10) {
+          const runToSave: GhostRun = {
+            mode: gameModeRef.current,
+            carId: carRef.current.id,
+            carColor: cachedAppearance.primaryColor || carRef.current.primaryColor,
+            score: Math.round(score),
+            distance: Math.round(distance),
+            createdAt: Date.now(),
+            frames: recordedGhostFrames.slice(0, recordedGhostFrameCount).map((f) => ({ ...f })),
+          };
+          saveBestGhostRun(runToSave);
+        }
+        onGameOverRef.current({
+          score: Math.round(score),
+          distance: Math.round(distance),
+          maxCombo,
+          coinsCollected: coinsRun,
+          overtakes,
+          nearMisses,
+          crashReason: reason,
+        });
+      };
+
       if (customSpriteRef.current && customSpriteRef.current !== loadedCustomUrl) {
         loadedCustomUrl = customSpriteRef.current;
         const img = new Image();
@@ -1529,6 +1598,62 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             isBraking: brakeInput > 0,
             isNearEdge: Boolean(wasDrifting && combo >= 3),
           });
+
+          // Holographic Ghost Recording (~10 Hz) & Live Overtake Detection
+          runElapsedSec += simDt;
+          ghostRecordTimer += simDt;
+          if (ghostRecordTimer >= 0.1) {
+            ghostRecordTimer -= 0.1;
+            if (recordedGhostFrameCount < MAX_GHOST_RECORD_FRAMES) {
+              const rec = recordedGhostFrames[recordedGhostFrameCount];
+              rec.timeSec = Number(runElapsedSec.toFixed(2));
+              rec.distance = Number(distance.toFixed(1));
+              rec.lateralOffset = Number(preRoadEval.signedPerpOffset.toFixed(2));
+              rec.angle = Number(driftState.heading.toFixed(3));
+              rec.speedKmh = Math.round(curSpeed * 7.2);
+              recordedGhostFrameCount++;
+            }
+          }
+
+          if (activeGhost) {
+            const curGhost = sampleGhostPosition(activeGhost, runElapsedSec, ghostSampleScratch);
+            if (curGhost) {
+              if (curGhost.distance > distance + 1.2) {
+                wasGhostAhead = true;
+              }
+              if (wasGhostAhead && distance >= curGhost.distance && !ghostOvertakenTriggered && runElapsedSec >= 1.0) {
+                ghostOvertakenTriggered = true;
+                soundFX.playFeverBurst();
+                triggerHaptic('double');
+                pushCallout(
+                  driftState.x,
+                  driftState.y + 1.8,
+                  driftState.z,
+                  'GHOST OVERTAKEN! ⏱️',
+                  '#06b6d4',
+                  1.4
+                );
+                spawnFloatingText(
+                  driftState.x,
+                  driftState.y + 1.2,
+                  driftState.z,
+                  'RIVAL OVERTAKEN!',
+                  '#22d3ee',
+                  1.1
+                );
+                pushShockwave({
+                  x: driftState.x,
+                  y: driftState.y + 0.6,
+                  z: driftState.z,
+                  radius: 0.5,
+                  maxRadius: 4.8,
+                  color: '#06b6d4',
+                  life: 0.42,
+                  maxLife: 0.42,
+                });
+              }
+            }
+          }
 
           // Distance Milestone & Live Mid-Run Rank-Up Dopamine Bursts!
           if (distance >= nextMilestoneDist) {
@@ -2076,6 +2201,56 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 }
               }
 
+              if (pt.hasNitroCanister && !pt.canisterCollected) {
+                const canX = pt.canisterX ?? pt.x;
+                const canZ = pt.canisterZ ?? pt.z;
+                const d = Math.hypot(driftState.x - canX, driftState.z - canZ);
+                if (d <= 2.8 || (d <= stats.magnetRadius * 1.15 && d <= 3.6)) {
+                  pt.canisterCollected = true;
+                  fever = Math.min(100, fever + 35);
+                  if (!isFever && fever >= 100) {
+                    isFever = true;
+                    feverTimer = 5.0;
+                  } else if (isFever) {
+                    feverTimer = Math.min(8.0, feverTimer + 3.0);
+                  }
+                  score += 500 * combo;
+                  soundFX.playTurboChirp();
+                  soundFX.playFeverBurst();
+                  triggerHaptic('double');
+                  spawnFloatingText(canX, pt.y + 1.2, canZ, '+NITRO BOOST!', '#00f0ff', 0.95);
+                  pushCallout(canX, pt.y + 1.8, canZ, '+NITRO BOOST!', '#00f0ff', 1.25);
+                  pushShockwave({
+                    x: canX,
+                    y: pt.y + 0.65,
+                    z: canZ,
+                    radius: 0.4,
+                    maxRadius: 4.2,
+                    color: '#00f0ff',
+                    life: 0.38,
+                    maxLife: 0.38,
+                  });
+                  for (let k = 0; k < 20; k++) {
+                    const ang = (k / 20) * Math.PI * 2 + (Math.random() - 0.5) * 0.3;
+                    const spd = 4.5 + Math.random() * 8.5;
+                    pushDebrisChunk({
+                      x: canX,
+                      y: pt.y + 0.75,
+                      z: canZ,
+                      vx: Math.cos(ang) * spd,
+                      vy: 2.8 + Math.random() * 5.2,
+                      vz: Math.sin(ang) * spd,
+                      size: 0.22 + Math.random() * 0.18,
+                      gravity: 14,
+                      rot: Math.random() * 6,
+                      vRot: (Math.random() - 0.5) * 22,
+                      life: 0.55,
+                      color: k % 3 === 0 ? '#00f0ff' : k % 3 === 1 ? '#38bdf8' : '#e0f2fe',
+                    });
+                  }
+                }
+              }
+
               if (pt.hasBoostPad && !pt.boostTriggered) {
                 const d = Math.hypot(driftState.x - pt.boostX, driftState.z - pt.boostZ);
                 if (d <= 2.4) {
@@ -2480,7 +2655,34 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               }
             }
           }
-        } else if (isFalling && simDt > 0) {
+        }
+
+        const finalizeGameOver = (reason: string) => {
+          if (recordedGhostFrameCount > 10) {
+            const appearance = resolveCarAppearance(carRef.current, carCustomRef.current);
+            const runToSave: GhostRun = {
+              mode: gameModeRef.current,
+              carId: carRef.current.id,
+              carColor: appearance.primaryColor,
+              score: Math.round(score),
+              distance: Math.round(distance),
+              createdAt: Date.now(),
+              frames: recordedGhostFrames.slice(0, recordedGhostFrameCount).map((f) => ({ ...f })),
+            };
+            saveBestGhostRun(runToSave);
+          }
+          onGameOverRef.current({
+            score: Math.round(score),
+            distance: Math.round(distance),
+            maxCombo,
+            coinsCollected: coinsRun,
+            overtakes,
+            nearMisses,
+            crashReason: reason,
+          });
+        };
+
+        if (isFalling && simDt > 0) {
           // STAGE 2 & 3: Dramatic Fall Off Viaduct, Fire Smoke Trail & Valley Impact Explosion!
           fallTimer += simDt;
           fallVelY -= 24.0 * simDt;
@@ -2582,15 +2784,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           }
 
           if (fallTimer >= 1.10) {
-            onGameOverRef.current({
-              score: Math.round(score),
-              distance: Math.round(distance),
-              maxCombo,
-              coinsCollected: coinsRun,
-              overtakes,
-              nearMisses,
-              crashReason: 'Guardrail Breached',
-            });
+            finalizeGameOver('Guardrail Breached');
           }
         } else if (isTrafficCrash && simDt > 0) {
           trafficCrashTimer += simDt;
@@ -2613,15 +2807,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             });
           }
           if (trafficCrashTimer >= 0.92) {
-            onGameOverRef.current({
-              score: Math.round(score),
-              distance: Math.round(distance),
-              maxCombo,
-              coinsCollected: coinsRun,
-              overtakes,
-              nearMisses,
-              crashReason,
-            });
+            finalizeGameOver(crashReason);
           }
         }
 
@@ -3539,6 +3725,91 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             ctx.fillRect(cx - 1, cy - 1, 2, 2);
           }
         }
+
+        if (pt.hasNitroCanister && !pt.canisterCollected) {
+          const cxWorld = pt.canisterX ?? pt.x;
+          const czWorld = pt.canisterZ ?? pt.z;
+          const bob = Math.sin(now * 0.005 + pt.index * 1.3) * 0.2;
+          const cyWorld = pt.y + 0.9 + bob;
+          if (
+            projectInto(cxWorld, cyWorld, czWorld, pScratchTmp) &&
+            pScratchTmp.z >= 1.5 &&
+            pScratchTmp.z <= 125 &&
+            !(phase === 'title' && pScratchTmp.z < 20)
+          ) {
+            const scale = pScratchTmp.scale;
+            const canW = Math.max(5, Math.round(0.55 * scale));
+            const canH = Math.max(9, Math.round(1.2 * scale));
+            const csx = Math.round(pScratchTmp.x);
+            const csy = Math.round(pScratchTmp.y);
+
+            ctx.save();
+            ctx.shadowBlur = Math.min(18, Math.round(10 * (scale / 18)));
+            ctx.shadowColor = '#00f0ff';
+
+            // Outer cyan aura
+            ctx.fillStyle = 'rgba(6, 182, 212, 0.28)';
+            ctx.beginPath();
+            ctx.arc(csx, csy, Math.round(canW * 1.4), 0, Math.PI * 2);
+            ctx.fill();
+
+            // Cylinder body
+            const bodyLeft = csx - Math.floor(canW * 0.5);
+            const bodyTop = csy - Math.floor(canH * 0.5);
+            const radY = Math.max(2, Math.round(canW * 0.28));
+
+            const grad = ctx.createLinearGradient(bodyLeft, csy, bodyLeft + canW, csy);
+            grad.addColorStop(0, '#0284c7');
+            grad.addColorStop(0.35, '#38bdf8');
+            grad.addColorStop(0.5, '#e0f2fe');
+            grad.addColorStop(0.8, '#00f0ff');
+            grad.addColorStop(1, '#0369a1');
+            ctx.fillStyle = grad;
+            ctx.fillRect(bodyLeft, bodyTop + radY, canW, Math.max(1, canH - radY * 2));
+
+            // Bottom cap
+            ctx.fillStyle = '#0284c7';
+            ctx.beginPath();
+            ctx.ellipse(csx, bodyTop + canH - radY, Math.floor(canW * 0.5), radY, 0, 0, Math.PI);
+            ctx.fill();
+
+            // Top cap
+            ctx.fillStyle = '#a5f3fc';
+            ctx.beginPath();
+            ctx.ellipse(csx, bodyTop + radY, Math.floor(canW * 0.5), radY, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Top nozzle
+            ctx.fillStyle = '#f8fafc';
+            ctx.fillRect(csx - 1, bodyTop - Math.max(2, Math.round(canH * 0.15)), 2, Math.max(2, Math.round(canH * 0.15)));
+
+            // Rotating star rune on canister face
+            const runeAngle = (now * 0.005 + pt.index * 0.8) % (Math.PI * 2);
+            const runeR = Math.max(2, Math.round(canW * 0.35));
+            ctx.shadowBlur = 4;
+            ctx.shadowColor = '#ffffff';
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = Math.max(1, Math.round(scale * 0.05));
+            ctx.beginPath();
+            for (let s = 0; s < 4; s++) {
+              const a = runeAngle + (s * Math.PI) / 2;
+              const rx = csx + Math.cos(a) * runeR;
+              const ry = csy + Math.sin(a) * runeR * 0.7;
+              if (s === 0) ctx.moveTo(rx, ry);
+              else {
+                ctx.moveTo(csx, csy);
+                ctx.lineTo(rx, ry);
+              }
+            }
+            ctx.stroke();
+
+            // Bright white star core
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(csx - 1, csy - 1, 2, 2);
+
+            ctx.restore();
+          }
+        }
       }
 
       const drawSmokePuff = (p: SmokePuff) => {
@@ -3678,6 +3949,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           if (projectInto(wx, wy, wz, slot.proj)) {
             slot.rawZ = rawZ;
             slot.isHero = false;
+            slot.isGhost = false;
+            slot.ghostFrame = undefined;
             slot.traffic = tc;
             vehicleCount++;
           }
@@ -3690,8 +3963,37 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         if (projectInto(driftState.x, driftState.y, driftState.z, heroSlot.proj)) {
           heroSlot.rawZ = heroRawZ;
           heroSlot.isHero = true;
+          heroSlot.isGhost = false;
+          heroSlot.ghostFrame = undefined;
           heroSlot.traffic = undefined;
           vehicleCount++;
+        }
+      }
+
+      // Sample and project Holographic Rival Ghost into 3D world space
+      if (activeGhost && vehicleCount < vehicleDrawBuf.length) {
+        const curGhost = sampleGhostPosition(activeGhost, runElapsedSec, ghostSampleScratch);
+        if (curGhost) {
+          const gSample = sampleTrackAtS(track, curGhost.distance, STEP_DIST);
+          if (gSample) {
+            const gx = gSample.x + gSample.nx * curGhost.lateralOffset;
+            const gy = gSample.y;
+            const gz = gSample.z + gSample.nz * curGhost.lateralOffset;
+            const gRawZ = (gx - camWorldX) * fwdX + (gz - camWorldZ) * fwdZ;
+            if (gRawZ >= 1.5 && gRawZ <= 145) {
+              const gSlot = vehicleDrawBuf[vehicleCount];
+              if (projectInto(gx, gy, gz, gSlot.proj)) {
+                gSlot.rawZ = gRawZ;
+                gSlot.isHero = false;
+                gSlot.traffic = undefined;
+                gSlot.isGhost = true;
+                gSlot.ghostFrame = curGhost;
+                gSlot.ghostColor = activeGhost.carColor;
+                gSlot.ghostCarId = activeGhost.carId;
+                vehicleCount++;
+              }
+            }
+          }
         }
       }
 
@@ -3789,6 +4091,70 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               );
             }
           }
+        } else if (item.isGhost && item.ghostFrame) {
+          const gf = item.ghostFrame;
+          const ghostDrawW = Math.max(8, Math.round(5.4 * item.proj.scale));
+          const ghostDrawH = Math.round(ghostDrawW * (108 / 144));
+          const gcx = Math.round(item.proj.x);
+          const gcy = Math.round(item.proj.y - ghostDrawH * 0.34);
+
+          const baseGhostSpec =
+            CAR_ROSTER.find((c) => c.id === item.ghostCarId) || CAR_ROSTER[0];
+          const ghostColor = item.ghostColor || '#06b6d4';
+          const ghostCarSpec: CarSpec = {
+            ...baseGhostSpec,
+            primaryColor: ghostColor,
+            accentColor: ghostColor,
+          };
+
+          ctx.save();
+          // Shimmering translucent holographic visual: ctx.globalAlpha = 0.42
+          const shimmer = 0.38 + Math.sin(now * 0.012) * 0.08;
+          ctx.globalAlpha = shimmer;
+          // Glowing neon cyan rim lighting
+          ctx.shadowBlur = 12;
+          ctx.shadowColor = ghostColor;
+
+          const ghostSprite = getPixelCarCanvas(
+            ghostCarSpec,
+            0,
+            false,
+            false,
+            now * 0.02
+          );
+
+          ctx.drawImage(
+            ghostSprite,
+            Math.round(gcx - ghostDrawW * 0.5),
+            Math.round(gcy - ghostDrawH * 0.5),
+            ghostDrawW,
+            ghostDrawH
+          );
+
+          // Holographic scanlines effect
+          ctx.shadowBlur = 0;
+          ctx.globalAlpha = 0.16;
+          ctx.fillStyle = ghostColor;
+          const topY = Math.round(gcy - ghostDrawH * 0.5);
+          const botY = Math.round(gcy + ghostDrawH * 0.5);
+          const scanShift = Math.floor(now * 0.025) % 4;
+          for (let sy = topY + scanShift; sy < botY; sy += 4) {
+            ctx.fillRect(Math.round(gcx - ghostDrawW * 0.5), sy, ghostDrawW, 1);
+          }
+
+          // Floating holographic tag above rival ghost
+          if (item.rawZ < 85) {
+            ctx.globalAlpha = 0.78;
+            ctx.font = 'bold 9px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = ghostColor;
+            ctx.shadowBlur = 6;
+            ctx.shadowColor = ghostColor;
+            const tag = wasGhostAhead && distance >= gf.distance ? 'RIVAL (PASSED)' : 'GHOST RIVAL';
+            ctx.fillText(tag, gcx, Math.round(gcy - ghostDrawH * 0.55));
+          }
+
+          ctx.restore();
         } else if (item.traffic) {
           const tc = item.traffic;
           const sizeScale = tc.kind === 'box_truck' ? 5.9 : tc.kind === 'van' ? 5.4 : 5.1;

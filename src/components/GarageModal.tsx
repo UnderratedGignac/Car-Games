@@ -25,8 +25,11 @@ import {
   WING_OPTIONS,
   computeEffectiveCarStats,
   getCarCategory,
+  getRainbowCycleColor,
   getUpgradeCost,
+  LEGACY_UNDERGLOW_MAP,
   resolveCarAppearance,
+  resolveUnderglowColor,
 } from '../game/rules';
 import { getPixelCarCanvas } from '../game/pixelSprites';
 import { soundFX } from '../game/audio';
@@ -47,7 +50,7 @@ interface GarageModalProps {
   onClearCustomSprite: () => void;
 }
 
-type GarageTabId = 'performance' | 'body' | 'wheels_aero' | 'power_audio';
+type GarageTabId = 'body' | 'wheels_aero' | 'underglow_horns' | 'power_audio' | 'performance';
 
 const CATEGORY_TABS: { id: VehicleCategory; label: string; icon: string }[] = [
   { id: 'all', label: 'All', icon: '🌐' },
@@ -85,6 +88,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
   const [previewFlashing, setPreviewFlashing] = useState<boolean>(false);
   const [previewRevving, setPreviewRevving] = useState<boolean>(false);
   const [previewSpin, setPreviewSpin] = useState<number>(0);
+  const [rainbowTick, setRainbowTick] = useState<number>(0);
   const spriteCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const dragStartXRef = useRef<number>(0);
   const dragStartYawRef = useRef<number>(0);
@@ -120,6 +124,12 @@ export const GarageModal: React.FC<GarageModalProps> = ({
   const resolved = resolveCarAppearance(previewCar, currentCustom);
   const effective = computeEffectiveCarStats(previewCar, upgrades, currentCustom);
 
+  const activeUnderglow = currentCustom.underglowColor || currentCustom.underglow || 'none';
+  const hasRainbow = activeUnderglow === 'rainbow';
+  const underglowColor = hasRainbow
+    ? getRainbowCycleColor(Date.now())
+    : resolveUnderglowColor(activeUnderglow);
+
   // Subtle wheel/flame toggle animation while previewing gas flames
   useEffect(() => {
     if (!isOpen || !previewRevving) return;
@@ -129,24 +139,31 @@ export const GarageModal: React.FC<GarageModalProps> = ({
     return () => window.clearInterval(id);
   }, [isOpen, previewRevving]);
 
-  // Smooth 360-degree Turntable Auto-Spin Loop
+  // Smooth 360-degree Turntable Auto-Spin Loop (+ Rainbow cycle continuous animation if equipped)
   useEffect(() => {
-    if (!isOpen || !isAutoSpin || isDragging) return;
+    if (!isOpen) return;
+    if (!isAutoSpin && !hasRainbow && isDragging) return;
+
     let animId: number;
     let lastTime = performance.now();
     const spinLoop = (now: number) => {
       const dt = Math.min(0.05, (now - lastTime) * 0.001);
       lastTime = now;
-      setPreviewYawRad((prev) => {
-        let next = prev + dt * 0.72; // ~0.72 rad/sec smooth continuous turntable rotation
-        if (next > Math.PI) next -= Math.PI * 2;
-        return next;
-      });
+      if (isAutoSpin && !isDragging) {
+        setPreviewYawRad((prev) => {
+          let next = prev + dt * 0.72; // ~0.72 rad/sec smooth continuous turntable rotation
+          if (next > Math.PI) next -= Math.PI * 2;
+          return next;
+        });
+      }
+      if (hasRainbow) {
+        setRainbowTick((r) => (r + 1) % 100000);
+      }
       animId = requestAnimationFrame(spinLoop);
     };
     animId = requestAnimationFrame(spinLoop);
     return () => cancelAnimationFrame(animId);
-  }, [isOpen, isAutoSpin, isDragging]);
+  }, [isOpen, isAutoSpin, isDragging, hasRainbow]);
 
   // Render crisp 1:1 3D pixel-art sprite from getPixelCarCanvas with continuous 360-degree rotation
   useEffect(() => {
@@ -170,6 +187,30 @@ export const GarageModal: React.FC<GarageModalProps> = ({
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.imageSmoothingEnabled = false;
+
+    // Render diffuse glowing radial ellipse under the car matching activeCustom.underglowColor
+    if (underglowColor && activeUnderglow !== 'none') {
+      ctx.save();
+      const cx = canvas.width / 2;
+      const cy = 154; // Ground plane for 288x216 centered vehicle
+      const cosYaw = Math.cos(previewYawRad);
+      const sinYaw = Math.sin(previewYawRad);
+      const rx = 70 + Math.abs(sinYaw) * 16;
+      const ry = 20 + Math.abs(cosYaw) * 6;
+
+      const grad = ctx.createRadialGradient(cx, cy, 2, cx, cy, rx);
+      grad.addColorStop(0, underglowColor);
+      grad.addColorStop(0.35, `${underglowColor}bb`);
+      grad.addColorStop(0.7, `${underglowColor}44`);
+      grad.addColorStop(1, 'transparent');
+
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
     // Scale 144x108 into 288x216 centered inside 300x220
     const drawW = 288;
     const drawH = 216;
@@ -180,7 +221,18 @@ export const GarageModal: React.FC<GarageModalProps> = ({
       drawW,
       drawH
     );
-  }, [isOpen, previewCar, previewYawRad, currentCustom, previewSpin, previewRevving, previewFlashing]);
+  }, [
+    isOpen,
+    previewCar,
+    previewYawRad,
+    currentCustom,
+    previewSpin,
+    previewRevving,
+    previewFlashing,
+    rainbowTick,
+    underglowColor,
+    activeUnderglow,
+  ]);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     setIsDragging(true);
@@ -232,7 +284,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
   };
 
   const triggerTestHorn = () => {
-    soundFX.playHorn(resolved.horn);
+    soundFX.playHorn((currentCustom.hornType || currentCustom.horn || (resolved as any).hornType || resolved.horn || 'dual') as any);
   };
 
   const triggerTestRev = () => {
@@ -391,8 +443,8 @@ export const GarageModal: React.FC<GarageModalProps> = ({
               style={{
                 backgroundImage: previewFlashing
                   ? `radial-gradient(circle at 50% 38%, ${resolved.headlightBeamHex}77, rgba(15, 23, 42, 0.96) 70%)`
-                  : resolved.underglowHex
-                  ? `radial-gradient(circle at 50% 66%, ${resolved.underglowHex}38, rgba(15, 23, 42, 0.96) 72%)`
+                  : underglowColor && activeUnderglow !== 'none'
+                  ? `radial-gradient(circle at 50% 66%, ${underglowColor}44, rgba(15, 23, 42, 0.96) 72%)`
                   : 'radial-gradient(circle at 50% 62%, rgba(251, 191, 36, 0.14), rgba(15, 23, 42, 0.96) 72%)',
               }}
             >
@@ -583,11 +635,12 @@ export const GarageModal: React.FC<GarageModalProps> = ({
             <div>
               {/* Primary Category Sub-Tabs */}
               <div className="mb-3.5 pb-3 border-b border-slate-800">
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5" role="tablist" aria-label="Mod Shop Categories">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5" role="tablist" aria-label="Mod Shop Categories">
                   {(
                     [
                       ['body', 'Body & Paint'],
                       ['wheels_aero', 'Wheels & Aero'],
+                      ['underglow_horns', 'Underglow & Horns'],
                       ['power_audio', 'Engine & Lights'],
                       ['performance', 'Stat Upgrades'],
                     ] as const
@@ -909,31 +962,217 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                     </div>
 
                     <div>
-                      <span className="block text-[11px] font-mono font-semibold text-slate-400 mb-1.5">
-                        NEON UNDERGLOW
-                      </span>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-[11px] font-mono font-semibold text-slate-400">
+                          NEON UNDERGLOW
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab('underglow_horns')}
+                          className="text-[10px] font-mono text-cyan-400 hover:underline"
+                        >
+                          Full Kits →
+                        </button>
+                      </div>
                       <div className="flex flex-wrap gap-1.5">
-                        {UNDERGLOW_OPTIONS.map((u) => (
+                        {UNDERGLOW_OPTIONS.map((u) => {
+                          const isSelected =
+                            (currentCustom.underglowColor || currentCustom.underglow) === u.id;
+                          return (
+                            <button
+                              key={u.id}
+                              type="button"
+                              onClick={() => {
+                                setCustomField('underglowColor', u.id);
+                                setCustomField(
+                                  'underglow',
+                                  (u.id in LEGACY_UNDERGLOW_MAP ? u.id : 'none') as any
+                                );
+                              }}
+                              className={`px-2.5 py-1.5 rounded-lg border text-[11px] flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                                isSelected
+                                  ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 font-bold'
+                                  : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-600'
+                              }`}
+                            >
+                              <span
+                                className="w-2.5 h-2.5 rounded-full"
+                                style={{
+                                  background:
+                                    u.id === 'rainbow'
+                                      ? 'linear-gradient(135deg, #06b6d4, #f43f5e, #10b981)'
+                                      : u.color === 'transparent'
+                                      ? '#475569'
+                                      : u.color,
+                                }}
+                              />
+                              <span>{u.label}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 3: NEON UNDERGLOW & CUSTOM HORNS */}
+              {activeTab === 'underglow_horns' && (
+                <div className="space-y-4 text-xs">
+                  {/* Underglow Kits Customizer */}
+                  <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+                    <div className="flex items-center justify-between mb-2">
+                      <div>
+                        <span className="block text-xs font-mono font-bold text-cyan-400 tracking-wide flex items-center gap-1.5">
+                          <span>✨</span> NEON UNDERGLOW KITS
+                        </span>
+                        <span className="text-[10px] text-slate-400">
+                          Ground-illumination lighting kits for midnight touge street runs
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-slate-800 text-cyan-300">
+                        {UNDERGLOW_OPTIONS.find((u) => u.id === (currentCustom.underglowColor || 'none'))?.label || 'None'}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
+                      {UNDERGLOW_OPTIONS.map((u) => {
+                        const isSelected =
+                          (currentCustom.underglowColor || 'none') === u.id ||
+                          (!currentCustom.underglowColor && currentCustom.underglow === u.id);
+                        const isRainbow = u.id === 'rainbow';
+
+                        return (
                           <button
                             key={u.id}
                             type="button"
-                            onClick={() => setCustomField('underglow', u.id)}
-                            className={`px-2.5 py-1.5 rounded-lg border text-[11px] flex items-center gap-1.5 transition-colors whitespace-nowrap ${
-                              currentCustom.underglow === u.id
-                                ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 font-bold'
-                                : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-600'
+                            onClick={() => {
+                              setCustomField('underglowColor', u.id);
+                              setCustomField(
+                                'underglow',
+                                (u.id in LEGACY_UNDERGLOW_MAP ? u.id : 'none') as any
+                              );
+                            }}
+                            className={`p-2.5 rounded-xl border text-left flex flex-col justify-between gap-2 transition-all ${
+                              isSelected
+                                ? 'border-cyan-400 bg-cyan-950/60 shadow-[0_0_12px_rgba(6,182,212,0.35)]'
+                                : 'border-slate-800 bg-slate-900/60 hover:border-slate-700 hover:bg-slate-800/50'
                             }`}
                           >
-                            {u.hex && (
-                              <span
-                                className="w-2.5 h-2.5 rounded-full"
-                                style={{ backgroundColor: u.hex }}
-                              />
-                            )}
-                            <span>{u.label}</span>
+                            <div className="flex items-center justify-between gap-1">
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className="w-4 h-4 rounded-full border border-white/20 shrink-0"
+                                  style={{
+                                    background: isRainbow
+                                      ? 'linear-gradient(135deg, #06b6d4, #f43f5e, #10b981)'
+                                      : u.color === 'transparent'
+                                      ? 'repeating-linear-gradient(45deg, #334155, #334155 2px, #1e293b 2px, #1e293b 4px)'
+                                      : u.color,
+                                    boxShadow:
+                                      u.color !== 'transparent'
+                                        ? `0 0 8px ${isRainbow ? '#06b6d4' : u.color}`
+                                        : undefined,
+                                  }}
+                                />
+                                <span className={`text-[11px] font-semibold truncate ${isSelected ? 'text-cyan-200 font-bold' : 'text-slate-200'}`}>
+                                  {u.label}
+                                </span>
+                              </div>
+                              {isSelected && (
+                                <span className="text-[10px] text-cyan-400 font-bold">✓</span>
+                              )}
+                            </div>
+
+                            <div className="flex items-center justify-between mt-1 text-[10px] font-mono">
+                              <span className={u.cost === 0 ? 'text-emerald-400 font-bold' : 'text-amber-400'}>
+                                {u.cost === 0 ? 'FREE' : `${u.cost.toLocaleString()} CR`}
+                              </span>
+                              <span className="text-[9px] text-slate-500 uppercase">
+                                {isRainbow ? 'RGB CYCLE' : u.id === 'none' ? 'STOCK' : 'NEON'}
+                              </span>
+                            </div>
                           </button>
-                        ))}
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Horn Selector with Interactive Test Horn Button */}
+                  <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+                    <div className="flex items-center justify-between mb-2">
+                      <div>
+                        <span className="block text-xs font-mono font-bold text-amber-400 tracking-wide flex items-center gap-1.5">
+                          <span>🔊</span> CUSTOM ARCADE HORNS
+                        </span>
+                        <span className="text-[10px] text-slate-400">
+                          Acoustic horn sound signatures for highway overtaking and slipstream alerts
+                        </span>
                       </div>
+                      <button
+                        type="button"
+                        onClick={() => soundFX.playHorn(currentCustom.hornType || currentCustom.horn || 'dual')}
+                        className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/50 text-[11px] font-mono font-bold flex items-center gap-1 transition-transform active:scale-95"
+                      >
+                        <span>🔊</span> Test Horn
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                      {HORN_OPTIONS.map((hrn) => {
+                        const isSelected =
+                          (currentCustom.hornType || (currentCustom.horn as unknown as string) || 'dual') === hrn.id;
+
+                        return (
+                          <div
+                            key={hrn.id}
+                            onClick={() => {
+                              setCustomField('hornType', hrn.id);
+                              setCustomField('horn', hrn.id as any);
+                              soundFX.playHorn(hrn.id);
+                            }}
+                            className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 cursor-pointer transition-all ${
+                              isSelected
+                                ? 'border-amber-400 bg-amber-950/60 shadow-[0_0_12px_rgba(251,191,36,0.3)]'
+                                : 'border-slate-800 bg-slate-900/60 hover:border-slate-700 hover:bg-slate-800/50'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <span className="text-xl shrink-0 p-1.5 rounded-lg bg-slate-950/60 border border-slate-800">
+                                {hrn.icon}
+                              </span>
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5">
+                                  <span className={`text-[11px] font-semibold truncate ${isSelected ? 'text-amber-200 font-bold' : 'text-slate-200'}`}>
+                                    {hrn.label}
+                                  </span>
+                                  {isSelected && (
+                                    <span className="text-[10px] text-amber-400 font-bold shrink-0">✓</span>
+                                  )}
+                                </div>
+                                <span className={`text-[10px] font-mono ${hrn.cost === 0 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                                  {hrn.cost === 0 ? 'FREE' : `${hrn.cost.toLocaleString()} CR`}
+                                </span>
+                              </div>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setCustomField('hornType', hrn.id);
+                                setCustomField('horn', hrn.id as any);
+                                soundFX.playHorn(hrn.id);
+                              }}
+                              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-amber-500 hover:text-slate-950 text-amber-300 border border-slate-700 hover:border-amber-400 text-[10px] font-mono font-bold shrink-0 flex items-center gap-1 transition-all active:scale-90"
+                              title={`Test ${hrn.label}`}
+                            >
+                              <span>🔊</span>
+                              <span>Test Horn</span>
+                            </button>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 </div>
@@ -1041,25 +1280,36 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                     </div>
 
                     <div>
-                      <span className="block text-[11px] font-mono font-semibold text-slate-400 mb-1.5">
-                        HORN KIT
-                      </span>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-[11px] font-mono font-semibold text-slate-400">
+                          HORN KIT
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab('underglow_horns')}
+                          className="text-[10px] font-mono text-amber-400 hover:underline"
+                        >
+                          Soundboard →
+                        </button>
+                      </div>
                       <div className="flex flex-wrap gap-1.5">
                         {HORN_OPTIONS.map((hrn) => (
                           <button
                             key={hrn.id}
                             type="button"
                             onClick={() => {
-                              setCustomField('horn', hrn.id);
+                              setCustomField('hornType', hrn.id);
+                              setCustomField('horn', hrn.id as any);
                               soundFX.playHorn(hrn.id);
                             }}
-                            className={`px-2.5 py-1.5 rounded-lg border text-[11px] transition-colors whitespace-nowrap ${
-                              (currentCustom.horn || 'stock') === hrn.id
+                            className={`px-2.5 py-1.5 rounded-lg border text-[11px] transition-colors whitespace-nowrap flex items-center gap-1.5 ${
+                              ((currentCustom.hornType || currentCustom.horn || 'dual') as any) === hrn.id
                                 ? 'border-amber-400 bg-amber-950/60 text-amber-200 font-bold'
                                 : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-600'
                             }`}
                           >
-                            {hrn.label}
+                            <span>{hrn.icon}</span>
+                            <span>{hrn.label}</span>
                           </button>
                         ))}
                       </div>

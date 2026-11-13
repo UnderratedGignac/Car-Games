@@ -1,4 +1,4 @@
-﻿import type { HornStyleId, SoundProfileId } from './rules';
+﻿import type { HornStyleId, HornTypeId, SoundProfileId } from './rules';
 import {
   AI_SFX_SLOT_MAP,
   AiSfxSlotId,
@@ -8,6 +8,22 @@ import {
   findPeakAudioWindow,
 } from './musicConfig';
 import { generateBuiltinArcadeTrack } from './synthTrack';
+
+export interface JukeboxTrack {
+  id: string;
+  title: string;
+  artist: string;
+  bpm: number;
+  genre: string;
+  mood: 'high_energy' | 'drift' | 'chill' | 'intense';
+}
+
+export const JUKEBOX_TRACKS: JukeboxTrack[] = [
+  { id: 'eurobeat', title: 'Tokyo Highway Eurobeat', artist: 'Neon Redline OST', bpm: 160, genre: 'Eurobeat', mood: 'high_energy' },
+  { id: 'synthwave', title: 'Cyberpunk Synthwave Pulse', artist: 'Neon Redline OST', bpm: 128, genre: 'Synthwave', mood: 'intense' },
+  { id: 'phonk', title: 'Midnight Touge Drift Phonk', artist: 'Neon Redline OST', bpm: 142, genre: 'Drift Phonk', mood: 'drift' },
+  { id: 'lofi', title: 'Neo-Tokyo Lo-Fi Serenity', artist: 'Neon Redline OST', bpm: 88, genre: 'Chillwave', mood: 'chill' },
+];
 
 export interface AiSfxEntry {
   slotId: AiSfxSlotId;
@@ -30,6 +46,7 @@ export interface AudioDeckSnapshot {
   engineVolume: number; // 0 .. 1
   activeTrackId: string;
   activeTrackTitle: string;
+  currentTrack: JukeboxTrack;
   loadedTrackIds: string[];
   loadedSfxIds: AiSfxSlotId[];
   dspModeLabel: string;
@@ -118,10 +135,13 @@ export class SoundFXSystem {
   private engineVolume = 0.7;
 
   // Standardized Official Soundtrack for all players
-  private activeTrackId = 'neon_redline_ost';
-  private activeTrackTitle = 'Neon Redline — Tokyo Highway Eurobeat';
+  private activeTrackId = JUKEBOX_TRACKS[0].id;
+  private activeTrackTitle = JUKEBOX_TRACKS[0].title;
+  private activeJukeboxTrack: JukeboxTrack = JUKEBOX_TRACKS[0];
   private builtinTrackBuffer: AudioBuffer | null = null;
+  private proceduralTrackBuffers = new Map<string, AudioBuffer>();
   private trackSources = new Map<string, { title: string; url: string; buffer: AudioBuffer | null; decoding: boolean }>([
+    ...JUKEBOX_TRACKS.map((t) => [t.id, { title: t.title, url: `./audio/${t.id}.mp3`, buffer: null, decoding: false }] as [string, { title: string; url: string; buffer: AudioBuffer | null; decoding: boolean }]),
     [
       'neon_redline_ost',
       {
@@ -173,8 +193,9 @@ export class SoundFXSystem {
 
   public getDeckSnapshot(): AudioDeckSnapshot {
     const loadedTrackIds: string[] = ['neon_redline_theme'];
+    JUKEBOX_TRACKS.forEach((t) => loadedTrackIds.push(t.id));
     this.trackSources.forEach((_v, k) => {
-      if (k !== 'neon_redline_theme') loadedTrackIds.push(k);
+      if (k !== 'neon_redline_theme' && !loadedTrackIds.includes(k)) loadedTrackIds.push(k);
     });
     const loadedSfxIds: AiSfxSlotId[] = [];
     this.aiSfxEntries.forEach((v, k) => {
@@ -192,6 +213,7 @@ export class SoundFXSystem {
       engineVolume: this.engineVolume,
       activeTrackId: this.activeTrackId,
       activeTrackTitle: this.activeTrackTitle,
+      currentTrack: this.activeJukeboxTrack,
       loadedTrackIds,
       loadedSfxIds,
       dspModeLabel: this.dspModeLabel,
@@ -201,8 +223,8 @@ export class SoundFXSystem {
   }
 
   private ensureContext(ignoreMute = false): AudioContext | null {
-    if ((!ignoreMute && this.muted) || typeof window === 'undefined') return null;
-    if (!this.ctx) {
+    if (!ignoreMute && this.muted) return null;
+    if (!this.ctx && typeof window !== 'undefined') {
       const AudioCtx =
         window.AudioContext ||
         (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -210,10 +232,13 @@ export class SoundFXSystem {
         this.ctx = new AudioCtx();
       }
     }
-    if (this.ctx && this.ctx.state === 'suspended') {
-      this.ctx.resume().catch(() => {});
+    if (!this.ctx) return null;
+    if (this.ctx.state === 'suspended') {
+      try {
+        this.ctx.resume().catch(() => {});
+      } catch {}
     }
-    if (this.ctx && !this.masterComp) {
+    if (!this.masterComp) {
       try {
         const comp = this.ctx.createDynamicsCompressor();
         comp.threshold.setValueAtTime(-12, this.ctx.currentTime);
@@ -403,7 +428,24 @@ export class SoundFXSystem {
 
     if (!this.musicEnabled || this.muted) return;
 
-    const targetId = preferredTrackId || this.activeTrackId || 'neon_redline_ost';
+    const targetId = preferredTrackId || this.activeTrackId || this.activeJukeboxTrack.id;
+    const jb = JUKEBOX_TRACKS.find((t) => t.id === targetId);
+    if (jb) {
+      this.activeJukeboxTrack = jb;
+      this.activeTrackId = jb.id;
+      this.activeTrackTitle = jb.title;
+      let buf = this.proceduralTrackBuffers.get(jb.id);
+      if (!buf) {
+        buf = generateBuiltinArcadeTrack(ctx, jb);
+        this.proceduralTrackBuffers.set(jb.id, buf);
+      }
+      this.builtinTrackBuffer = buf;
+      this.startBufferLoop(ctx, buf);
+      this.applyJukeboxMoodDsp(jb);
+      this.notifyListeners();
+      return;
+    }
+
     let track = this.trackSources.get(targetId);
     if (!track) {
       track = this.trackSources.get('neon_redline_ost')!;
@@ -412,6 +454,89 @@ export class SoundFXSystem {
 
     if (this.musicPlaying && this.activeTrackId === targetId) return;
     await this.loadAiMusicTrack(targetId, track.title, track.url, true);
+  }
+
+  public getJukeboxTrack(): JukeboxTrack {
+    return this.activeJukeboxTrack;
+  }
+
+  public getJukeboxTracks(): JukeboxTrack[] {
+    return JUKEBOX_TRACKS;
+  }
+
+  public switchJukeboxTrack(trackId: string): JukeboxTrack {
+    const found = JUKEBOX_TRACKS.find((t) => t.id === trackId) || JUKEBOX_TRACKS[0];
+    this.activeJukeboxTrack = found;
+    this.activeTrackId = found.id;
+    this.activeTrackTitle = found.title;
+
+    const ctx = this.ensureContext(true);
+    if (ctx) {
+      let buf = this.proceduralTrackBuffers.get(found.id);
+      if (!buf) {
+        buf = generateBuiltinArcadeTrack(ctx, found);
+        this.proceduralTrackBuffers.set(found.id, buf);
+      }
+      this.builtinTrackBuffer = buf;
+
+      if (this.musicPlaying && this.musicEnabled && !this.muted) {
+        this.startBufferLoop(ctx, buf);
+      }
+      this.applyJukeboxMoodDsp(found);
+    }
+
+    this.notifyListeners();
+    return found;
+  }
+
+  public nextJukeboxTrack(): JukeboxTrack {
+    const currentIndex = JUKEBOX_TRACKS.findIndex((t) => t.id === this.activeJukeboxTrack.id);
+    const nextIndex = (currentIndex + 1) % JUKEBOX_TRACKS.length;
+    return this.switchJukeboxTrack(JUKEBOX_TRACKS[nextIndex].id);
+  }
+
+  public prevJukeboxTrack(): JukeboxTrack {
+    const currentIndex = JUKEBOX_TRACKS.findIndex((t) => t.id === this.activeJukeboxTrack.id);
+    const prevIndex = (currentIndex - 1 + JUKEBOX_TRACKS.length) % JUKEBOX_TRACKS.length;
+    return this.switchJukeboxTrack(JUKEBOX_TRACKS[prevIndex].id);
+  }
+
+  private applyJukeboxMoodDsp(track: JukeboxTrack) {
+    if (!this.ctx || !this.musicLowpass || !this.musicBassShelf || !this.musicHighShelf || !this.musicGainNode) return;
+    const now = this.ctx.currentTime;
+    let lowpass = 21000;
+    let bassDb = 2.0;
+    let highDb = 0.0;
+    let drive = 0.0;
+
+    if (track.mood === 'chill') {
+      lowpass = 4800;
+      bassDb = 3.5;
+      highDb = -2.5;
+      drive = 0.0;
+    } else if (track.mood === 'drift') {
+      lowpass = 16000;
+      bassDb = 5.5;
+      highDb = 1.0;
+      drive = 0.08;
+    } else if (track.mood === 'intense') {
+      lowpass = 18000;
+      bassDb = 3.5;
+      highDb = 0.5;
+      drive = 0.04;
+    } else {
+      lowpass = 21000;
+      bassDb = 2.5;
+      highDb = 2.0;
+      drive = 0.02;
+    }
+
+    this.musicLowpass.frequency.setTargetAtTime(lowpass, now, 0.08);
+    this.musicBassShelf.gain.setTargetAtTime(bassDb, now, 0.08);
+    this.musicHighShelf.gain.setTargetAtTime(highDb, now, 0.08);
+    if (this.musicShaper) {
+      this.musicShaper.curve = makeSaturationCurve(drive);
+    }
   }
 
   public setMusicEnabled(enabled: boolean) {
@@ -1221,57 +1346,154 @@ export class SoundFXSystem {
     });
   }
 
-  // Customizable Car Horn Synthesizer (supports 5 distinct horn profiles)
-  public playHorn(hornStyle: HornStyleId = 'stock') {
+  // Customizable Car Horn Synthesizer (supports 5 distinct arcade horn profiles)
+  public playHorn(hornStyle?: HornStyleId | HornTypeId | string) {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const now = ctx.currentTime;
     const scale = this.sfxScale;
+    const out = this.getOutputNode(ctx);
 
-    const triggerChord = (freqs: number[], type: OscillatorType, start: number, dur: number, vol = 0.14) => {
-      freqs.forEach((f) => {
+    const style = String(hornStyle || 'dual').toLowerCase();
+
+    if (style === 'laser' || style === 'cyber_chirp') {
+      // Synthesized pitch-drop laser chirp (880Hz down to 220Hz with fast resonant sweep)
+      const osc = ctx.createOscillator();
+      const filter = ctx.createBiquadFilter();
+      const gain = ctx.createGain();
+
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(880, now);
+      osc.frequency.exponentialRampToValueAtTime(220, now + 0.16);
+
+      filter.type = 'lowpass';
+      filter.Q.setValueAtTime(7.0, now); // Fast resonant sweep
+      filter.frequency.setValueAtTime(2600, now);
+      filter.frequency.exponentialRampToValueAtTime(280, now + 0.16);
+
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(0.24 * scale, now + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(out);
+
+      osc.start(now);
+      osc.stop(now + 0.19);
+    } else if (style === 'fanfare') {
+      // Rapid 4-note ascending fanfare (C5, E5, G5, C6)
+      const notes = [
+        { f: 523.25, start: 0, dur: 0.08 },     // C5
+        { f: 659.25, start: 0.08, dur: 0.08 },  // E5
+        { f: 783.99, start: 0.16, dur: 0.08 },  // G5
+        { f: 1046.50, start: 0.24, dur: 0.24 }, // C6
+      ];
+      notes.forEach(({ f, start, dur }) => {
         const osc = ctx.createOscillator();
         const filter = ctx.createBiquadFilter();
         const gain = ctx.createGain();
-        osc.type = type;
-        osc.frequency.setValueAtTime(f, start);
+
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(f, now + start);
+
         filter.type = 'lowpass';
-        filter.frequency.setValueAtTime(hornStyle === 'train_bass' ? 900 : 2400, start);
-        gain.gain.setValueAtTime(0.001, start);
-        gain.gain.linearRampToValueAtTime(vol * scale, start + 0.018);
-        gain.gain.setValueAtTime(vol * scale, start + dur - 0.04);
-        gain.gain.exponentialRampToValueAtTime(0.001, start + dur);
+        filter.frequency.setValueAtTime(2200, now + start);
+
+        gain.gain.setValueAtTime(0.001, now + start);
+        gain.gain.linearRampToValueAtTime(0.18 * scale, now + start + 0.012);
+        gain.gain.setValueAtTime(0.18 * scale, now + start + dur - 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + start + dur);
+
         osc.connect(filter);
         filter.connect(gain);
-        gain.connect(this.getOutputNode(ctx));
-        osc.start(start);
-        osc.stop(start + dur + 0.02);
-      });
-    };
+        gain.connect(out);
 
-    if (hornStyle === 'jdm_sport') {
-      triggerChord([415.3, 523.25], 'sawtooth', now, 0.10, 0.12);
-      triggerChord([415.3, 523.25], 'sawtooth', now + 0.13, 0.17, 0.13);
-    } else if (hornStyle === 'air_horn') {
-      triggerChord([311.13, 392.0, 466.16], 'sawtooth', now, 0.34, 0.11);
-    } else if (hornStyle === 'train_bass') {
-      triggerChord([138.59, 174.61, 207.65], 'sawtooth', now, 0.42, 0.13);
-    } else if (hornStyle === 'cyber_chirp') {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'triangle';
-      osc.frequency.setValueAtTime(720, now);
-      osc.frequency.exponentialRampToValueAtTime(1480, now + 0.09);
-      osc.frequency.setValueAtTime(980, now + 0.11);
-      osc.frequency.exponentialRampToValueAtTime(1760, now + 0.20);
-      gain.gain.setValueAtTime(0.16 * scale, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
-      osc.connect(gain);
-      gain.connect(this.getOutputNode(ctx));
-      osc.start(now);
-      osc.stop(now + 0.23);
+        osc.start(now + start);
+        osc.stop(now + start + dur + 0.01);
+      });
+    } else if (style === 'melody' || style === 'jdm_sport') {
+      // Catchy 5-note retro chiptune riff
+      const riff = [
+        { f: 523.25, start: 0, dur: 0.07 },      // C5
+        { f: 659.25, start: 0.07, dur: 0.07 },     // E5
+        { f: 783.99, start: 0.14, dur: 0.07 },     // G5
+        { f: 880.00, start: 0.21, dur: 0.07 },     // A5
+        { f: 1046.50, start: 0.28, dur: 0.20 },    // C6
+      ];
+      riff.forEach(({ f, start, dur }) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(f, now + start);
+
+        gain.gain.setValueAtTime(0.001, now + start);
+        gain.gain.linearRampToValueAtTime(0.16 * scale, now + start + 0.008);
+        gain.gain.setValueAtTime(0.16 * scale, now + start + dur - 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + start + dur);
+
+        osc.connect(gain);
+        gain.connect(out);
+
+        osc.start(now + start);
+        osc.stop(now + start + dur + 0.01);
+      });
+    } else if (
+      style === 'train' ||
+      style === 'train_bass' ||
+      style === 'air_horn' ||
+      style === 'truck_air_blast'
+    ) {
+      // Low dual-frequency chord (150Hz + 225Hz with sawtooth warmth)
+      [150, 225].forEach((freq) => {
+        const osc = ctx.createOscillator();
+        const filter = ctx.createBiquadFilter();
+        const gain = ctx.createGain();
+
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(freq, now);
+
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(850, now);
+
+        gain.gain.setValueAtTime(0.001, now);
+        gain.gain.linearRampToValueAtTime(0.22 * scale, now + 0.025);
+        gain.gain.setValueAtTime(0.22 * scale, now + 0.32);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.38);
+
+        osc.connect(filter);
+        filter.connect(gain);
+        gain.connect(out);
+
+        osc.start(now);
+        osc.stop(now + 0.40);
+      });
     } else {
-      triggerChord([349.23, 440.0], 'sawtooth', now, 0.24, 0.11);
+      // Classic automotive dual horn (440Hz + 370Hz)
+      [440, 370].forEach((freq) => {
+        const osc = ctx.createOscillator();
+        const filter = ctx.createBiquadFilter();
+        const gain = ctx.createGain();
+
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(freq, now);
+
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(2400, now);
+
+        gain.gain.setValueAtTime(0.001, now);
+        gain.gain.linearRampToValueAtTime(0.17 * scale, now + 0.018);
+        gain.gain.setValueAtTime(0.17 * scale, now + 0.20);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+
+        osc.connect(filter);
+        filter.connect(gain);
+        gain.connect(out);
+
+        osc.start(now);
+        osc.stop(now + 0.26);
+      });
     }
   }
 
