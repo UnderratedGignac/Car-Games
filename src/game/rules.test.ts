@@ -1,0 +1,577 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  CAR_ROSTER,
+  flipDirection,
+  getDirectionVector,
+  computeEffectiveCarStats,
+  getUpgradeCost,
+  createInitialDriftState,
+  stepDriftPhysics,
+  stepHighwayPhysics,
+  generateSCurveTrack,
+  extendSCurveTrack,
+  evaluateCarOnSCurveRoad,
+  calculateDriftScoreStep,
+  resolveCarAppearance,
+  getDriftRank,
+  ROAD_BIOMES,
+  ROAD_MODE_OPTIONS,
+  resolveRoadBiome,
+  HIGHWAY_ROAD_WIDTH,
+  HIGHWAY_LANE_OFFSET,
+  generateHighwayTrack,
+  extendHighwayTrack,
+  sampleTrackAtS,
+  generateTrafficBatch,
+  evaluateTrafficInteraction,
+  VALLEY_BASE_Y,
+  sampleTerrainElevation,
+  evaluateSlipstreamDraft,
+  getOvertakeStreakLabel,
+  triggerTrafficFlashYield,
+  stepTrafficCars,
+  compactInPlace,
+} from './rules';
+
+test('CAR_ROSTER has 14 distinct progressive drift cars from T1 to T14', () => {
+  assert.equal(CAR_ROSTER.length, 14);
+  const ids = CAR_ROSTER.map((c) => c.id);
+  assert.deepEqual(ids, [
+    'blue_jdm',
+    'crimson_tuner',
+    'emerald_truck',
+    'midnight_muscle',
+    'sakura_silvia',
+    'yellow_kei',
+    'rally_legend',
+    'cyber_supercar',
+    'solar_hypercar',
+    'matte_boss',
+    'cobalt_gt3',
+    'crimson_wagon',
+    'neon_interceptor',
+    'apex_valkyrie',
+  ]);
+
+  const tiers = CAR_ROSTER.map((c) => c.tier);
+  assert.deepEqual(tiers, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+
+  const blueJdm = CAR_ROSTER.find((c) => c.id === 'blue_jdm')!;
+  assert.equal(blueJdm.decalText, '73');
+  assert.equal(blueJdm.hoodFeature, 'stripes');
+
+  const emeraldTruck = CAR_ROSTER.find((c) => c.id === 'emerald_truck')!;
+  assert.equal(emeraldTruck.bodyShape, 'truck');
+
+  const sakuraSilvia = CAR_ROSTER.find((c) => c.id === 'sakura_silvia')!;
+  assert.equal(sakuraSilvia.hoodFeature, 'sakura');
+  assert.equal(sakuraSilvia.decalText, '86');
+
+  const rallyLegend = CAR_ROSTER.find((c) => c.id === 'rally_legend')!;
+  assert.equal(rallyLegend.bodyShape, 'rally');
+  assert.equal(rallyLegend.decalText, '01');
+
+  const solarHyper = CAR_ROSTER.find((c) => c.id === 'solar_hypercar')!;
+  assert.equal(solarHyper.bodyShape, 'supercar');
+
+  assert.equal(CAR_ROSTER.find((c) => c.id === 'cobalt_gt3')!.bodyShape, 'gt3');
+  assert.equal(CAR_ROSTER.find((c) => c.id === 'crimson_wagon')!.bodyShape, 'wagon');
+  assert.equal(CAR_ROSTER.find((c) => c.id === 'neon_interceptor')!.bodyShape, 'interceptor');
+  assert.equal(CAR_ROSTER.find((c) => c.id === 'apex_valkyrie')!.bodyShape, 'prototype');
+});
+
+test('resolveCarAppearance resolves stock defaults and full custom Mod Shop overrides', () => {
+  const starter = CAR_ROSTER[0];
+  const stockAppearance = resolveCarAppearance(starter);
+  assert.equal(stockAppearance.primaryColor, starter.primaryColor);
+  assert.equal(stockAppearance.spoilerStyle, starter.spoilerStyle);
+  assert.equal(stockAppearance.number, '73');
+  assert.equal(stockAppearance.underglowHex, null);
+  assert.equal(stockAppearance.engine, 'stock');
+  assert.equal(stockAppearance.roof, 'stock');
+  assert.equal(stockAppearance.tires, 'stock');
+  assert.equal(stockAppearance.exhaust, 'stock');
+  assert.equal(stockAppearance.hood, 'stock');
+  assert.equal(stockAppearance.windows, 'stock');
+  assert.equal(stockAppearance.horn, 'stock');
+  assert.equal(stockAppearance.sound, 'stock');
+  assert.equal(stockAppearance.lights, 'stock');
+
+  const modded = resolveCarAppearance(starter, {
+    paint: 'sakura_pink',
+    livery: 'two_tone',
+    wing: 'cyber',
+    rims: 'gold',
+    underglow: 'cyan',
+    flame: 'plasma_pink',
+    number: '86',
+    engine: 'v12_hybrid',
+    roof: 'light_bar',
+    tires: 'drag_slick',
+    exhaust: 'quad_ti',
+    hood: 'clear_bay',
+    windows: 'chameleon_cyan',
+    horn: 'air_horn',
+    sound: 'f1_scream',
+    lights: 'cyber_cyan',
+  });
+  assert.equal(modded.primaryColor, '#f472b6');
+  assert.equal(modded.livery, 'two_tone');
+  assert.equal(modded.spoilerStyle, 'cyber');
+  assert.equal(modded.rimHex, '#fbbf24');
+  assert.equal(modded.underglowHex, '#22d3ee');
+  assert.equal(modded.flameOuter, '#ec4899');
+  assert.equal(modded.number, '86');
+  assert.equal(modded.engine, 'v12_hybrid');
+  assert.equal(modded.roof, 'light_bar');
+  assert.equal(modded.tires, 'drag_slick');
+  assert.equal(modded.tireStripeHex, '#ef4444');
+  assert.equal(modded.exhaust, 'quad_ti');
+  assert.equal(modded.hood, 'clear_bay');
+  assert.equal(modded.windows, 'chameleon_cyan');
+  assert.equal(modded.windowSpecHex, '#67e8f9');
+  assert.equal(modded.horn, 'air_horn');
+  assert.equal(modded.sound, 'f1_scream');
+  assert.equal(modded.lights, 'cyber_cyan');
+  assert.equal(modded.headlightBeamHex, '#22d3ee');
+});
+
+test('getDriftRank scales from D Rookie up to SS Drift King', () => {
+  assert.equal(getDriftRank(100).rank, 'D');
+  assert.equal(getDriftRank(650).rank, 'C');
+  assert.equal(getDriftRank(2000).rank, 'B');
+  assert.equal(getDriftRank(4500).rank, 'A');
+  assert.equal(getDriftRank(9000).rank, 'S');
+  assert.equal(getDriftRank(16000).rank, 'SS');
+});
+
+test('ROAD_BIOMES and resolveRoadBiome support fixed roads and 450m World Tour cycling', () => {
+  assert.equal(Object.keys(ROAD_BIOMES).length, 4);
+  assert.equal(ROAD_MODE_OPTIONS.length, 5);
+
+  assert.equal(resolveRoadBiome('tour', 0).id, 'alpine');
+  assert.equal(resolveRoadBiome('tour', 449).id, 'alpine');
+  assert.equal(resolveRoadBiome('tour', 450).id, 'canyon');
+  assert.equal(resolveRoadBiome('tour', 900).id, 'neon');
+  assert.equal(resolveRoadBiome('tour', 1350).id, 'sakura');
+  assert.equal(resolveRoadBiome('tour', 1800).id, 'alpine');
+
+  assert.equal(resolveRoadBiome('neon', 0).id, 'neon');
+  assert.equal(resolveRoadBiome('neon', 9999).id, 'neon');
+  assert.equal(resolveRoadBiome('neon', 0).isNight, true);
+  assert.equal(resolveRoadBiome('sakura', 0).ambientParticle, 'petal');
+});
+
+test('stepDriftPhysics decomposes forward drive and lateral friction with slip angle', () => {
+  const initial = createInitialDriftState(0, 0, 0, -Math.PI / 2, 18.0);
+  const stats = { topSpeed: 22.0, driftGrip: 0.78, handlingRate: 2.5 };
+
+  // Straight throttle step
+  const straight = stepDriftPhysics(
+    initial,
+    { steerInput: 0, throttle: 1.0 },
+    stats,
+    0.016
+  );
+  assert.ok(straight.vz < 0);
+  assert.ok(straight.absSlipAngle < 0.05);
+  assert.equal(straight.isDrifting, false);
+
+  // Sharp steering initiates drift slip
+  let drifting = straight;
+  for (let i = 0; i < 16; i++) {
+    drifting = stepDriftPhysics(
+      drifting,
+      { steerInput: 1.0, throttle: 1.0, handbrake: true },
+      stats,
+      0.016
+    );
+  }
+  assert.ok(drifting.absSlipAngle > 0.14);
+  assert.equal(drifting.isDrifting, true);
+  assert.ok(drifting.driftFactor > 0);
+});
+
+test('generateSCurveTrack and extendSCurveTrack produce continuous S-curves, coins, and Nitro Star Gems', () => {
+  const track = generateSCurveTrack(50, 2.6, 123);
+  assert.equal(track.length, 50);
+
+  // First 12 points form straight safe launchpad
+  for (let i = 0; i < 12; i++) {
+    assert.equal(track[i].curvature, 0);
+  }
+
+  // Every point advances forward (-Z)
+  for (let i = 1; i < track.length; i++) {
+    assert.ok(track[i].z < track[i - 1].z, `Point ${i} should advance in -Z`);
+  }
+
+  // Contains both coins and Nitro Star Gems
+  assert.ok(track.some((pt) => pt.hasCoin), 'Track should include coins');
+  assert.ok(track.some((pt) => pt.hasNitroGem), 'Track should include Nitro Star Gems');
+
+  // Seamless extension
+  const extended = extendSCurveTrack(track, 20, 2.6, 123);
+  assert.equal(extended.length, 20);
+  assert.equal(extended[0].index, 50);
+  assert.ok(extended[0].z < track[track.length - 1].z);
+
+  // Origin evaluation
+  const atSpawn = evaluateCarOnSCurveRoad(track[0].x, track[0].z, track);
+  assert.equal(atSpawn.onRoad, true);
+  assert.ok(atSpawn.perpDistance < 0.5);
+
+  // Off-road detection
+  const offRoad = evaluateCarOnSCurveRoad(track[10].x + 30, track[10].z, track);
+  assert.equal(offRoad.onRoad, false);
+});
+
+test('flipDirection toggles between right (/) and left (\\)', () => {
+  assert.equal(flipDirection('right'), 'left');
+  assert.equal(flipDirection('left'), 'right');
+});
+
+test('getDirectionVector returns normalized diagonal velocity vectors', () => {
+  const rightVec = getDirectionVector('right');
+  const leftVec = getDirectionVector('left');
+  assert.ok(rightVec.vx > 0 && rightVec.vz < 0);
+  assert.ok(leftVec.vx < 0 && leftVec.vz < 0);
+  assert.ok(Math.abs(Math.hypot(rightVec.vx, rightVec.vz) - 1) < 1e-6);
+  assert.ok(Math.abs(Math.hypot(leftVec.vx, leftVec.vz) - 1) < 1e-6);
+});
+
+test('computeEffectiveCarStats and getUpgradeCost scale with car tier, upgrades, engine & tire mods', () => {
+  const starter = CAR_ROSTER[0];
+  const baseStats = computeEffectiveCarStats(starter, { speed: 1, handling: 1, magnet: 1 });
+  const maxedStats = computeEffectiveCarStats(starter, { speed: 5, handling: 5, magnet: 5 });
+
+  assert.ok(maxedStats.topSpeed > baseStats.topSpeed);
+  assert.ok(maxedStats.magnetRadius > baseStats.magnetRadius);
+  assert.ok(getUpgradeCost(1, 1) > 0);
+  assert.equal(getUpgradeCost(1, 5), 0);
+
+  const kersDragStats = computeEffectiveCarStats(
+    starter,
+    { speed: 1, handling: 1, magnet: 1 },
+    { engine: 'v12_hybrid', tires: 'drag_slick' }
+  );
+  assert.ok(kersDragStats.topSpeed > baseStats.topSpeed + 2.5);
+  assert.ok(kersDragStats.driftGrip > baseStats.driftGrip);
+  assert.ok(kersDragStats.feverGainRate > baseStats.feverGainRate);
+
+  const rotaryDriftStats = computeEffectiveCarStats(
+    starter,
+    { speed: 1, handling: 1, magnet: 1 },
+    { engine: 'rotary_brap', tires: 'drift_spec' }
+  );
+  assert.ok(rotaryDriftStats.handlingRate > baseStats.handlingRate);
+  assert.ok(rotaryDriftStats.driftGrip < baseStats.driftGrip);
+});
+
+test('calculateDriftScoreStep increases with combo, nearEdge, and fever state', () => {
+  const normal = calculateDriftScoreStep({
+    distanceDelta: 2,
+    combo: 1,
+    isFever: false,
+    nearEdge: false,
+    isDrifting: false,
+  });
+  const feverDriftingEdge = calculateDriftScoreStep({
+    distanceDelta: 2,
+    combo: 5,
+    isFever: true,
+    nearEdge: true,
+    isDrifting: true,
+  });
+  assert.ok(feverDriftingEdge.scoreDelta > normal.scoreDelta * 10);
+  assert.ok(feverDriftingEdge.feverDelta > normal.feverDelta);
+});
+
+test('generateHighwayTrack & sampleTrackAtS produce wide 2-lane road with smooth interpolation', () => {
+  const hwy = generateHighwayTrack(40, 3.4, 77);
+  assert.equal(hwy.length, 40);
+  assert.equal(hwy[0].width, HIGHWAY_ROAD_WIDTH);
+  for (let i = 0; i < 12; i++) {
+    assert.equal(hwy[i].curvature, 0);
+  }
+  const ext = extendHighwayTrack(hwy, 15, 3.4, 77);
+  assert.equal(ext.length, 15);
+  assert.equal(ext[0].index, 40);
+
+  const sample = sampleTrackAtS(hwy, 5.1, 3.4);
+  assert.ok(sample !== null);
+  assert.ok(sample.z < 0);
+  assert.equal(sample.width, HIGHWAY_ROAD_WIDTH);
+});
+
+test('generateTrafficBatch leaves safe start zone and guaranteed staggered overtaking gaps', () => {
+  const { cars } = generateTrafficBatch({
+    startS: 0,
+    endS: 320,
+    nextIdStart: 1,
+    seed: 99,
+    existingCars: [],
+    difficultyProgress: 0.4,
+  });
+  assert.ok(cars.length >= 6);
+  // Safe initial launch margin
+  assert.ok(cars.every((c) => c.s >= 58));
+
+  const hasSameLane = cars.some((c) => !c.isOncoming && c.lane === 1);
+  const hasOncoming = cars.some((c) => c.isOncoming && c.lane === -1);
+  assert.ok(hasSameLane && hasOncoming, 'Batch should contain both same-lane and oncoming cars');
+
+  // Verify no two opposite-lane cars ever spawn side-by-side blocking both lanes
+  for (let i = 0; i < cars.length; i++) {
+    for (let j = i + 1; j < cars.length; j++) {
+      if (cars[i].lane !== cars[j].lane) {
+        assert.ok(
+          Math.abs(cars[i].s - cars[j].s) >= 15.0,
+          'Opposite-lane cars must maintain staggered passing pocket'
+        );
+      }
+    }
+  }
+});
+
+test('evaluateTrafficInteraction detects collisions, near-misses, and overtakes accurately', () => {
+  const { cars } = generateTrafficBatch({
+    startS: 60,
+    endS: 160,
+    nextIdStart: 1,
+    seed: 12,
+    existingCars: [],
+  });
+  const target = { ...cars[0], s: 100, lane: 1 as const, lateralOffset: HIGHWAY_LANE_OFFSET, halfWidth: 0.94, halfLength: 1.95, overtaken: false, nearMissed: false };
+
+  // Passing in left lane close enough for a near miss, no collision
+  const nearPass = evaluateTrafficInteraction({
+    playerS: 100,
+    playerLateralOffset: HIGHWAY_LANE_OFFSET - 2.6, // ~2.6m lateral gap (touch threshold is ~1.51m, near miss is ~3.29m)
+    trafficCars: [target],
+  });
+  assert.equal(nearPass.collidedCar, null);
+  assert.equal(nearPass.newlyNearMissed.length, 1);
+  assert.equal(nearPass.newlyOvertaken.length, 0);
+
+  // Clearing past the front bumper awards overtake
+  const cleared = evaluateTrafficInteraction({
+    playerS: 104,
+    playerLateralOffset: HIGHWAY_LANE_OFFSET - 2.6,
+    trafficCars: [target],
+  });
+  assert.equal(cleared.collidedCar, null);
+  assert.equal(cleared.newlyOvertaken.length, 1);
+
+  // Direct overlap triggers collision
+  const hit = evaluateTrafficInteraction({
+    playerS: 100.5,
+    playerLateralOffset: HIGHWAY_LANE_OFFSET,
+    trafficCars: [target],
+  });
+  assert.ok(hit.collidedCar !== null);
+});
+
+test('stepHighwayPhysics keeps grip planted without drifting and responds to Gas & Brake pedals', () => {
+  const stats = { topSpeed: 22.0, handlingRate: 2.8 };
+  let s = createInitialDriftState(0, 0, 0, -Math.PI / 2, 17.0);
+
+  // Normal lane steering should NOT trigger drift
+  for (let i = 0; i < 12; i++) {
+    s = stepHighwayPhysics(
+      s,
+      { steerInput: 1.0, accelInput: 0, brakeInput: 0, roadTangentAngle: -Math.PI / 2 },
+      stats,
+      0.016
+    );
+  }
+  assert.equal(s.isDrifting, false, 'Normal highway steering must not trigger perpetual drift');
+  assert.ok(s.absSlipAngle < 0.14, 'High lateral grip keeps slip angle low');
+
+  // Releasing steering self-centers heading cleanly back toward road tangent
+  for (let i = 0; i < 40; i++) {
+    s = stepHighwayPhysics(
+      s,
+      { steerInput: 0, accelInput: 0, brakeInput: 0, roadTangentAngle: -Math.PI / 2 },
+      stats,
+      0.016
+    );
+  }
+  assert.ok(Math.abs(s.heading - -Math.PI / 2) < 0.12, 'Highway steering self-centers smoothly');
+
+  const cruiseSpeed = Math.hypot(s.vx, s.vz);
+
+  // Holding Gas accelerates significantly above cruise speed
+  let gassed = s;
+  for (let i = 0; i < 45; i++) {
+    gassed = stepHighwayPhysics(
+      gassed,
+      { steerInput: 0, accelInput: 1, brakeInput: 0, roadTangentAngle: -Math.PI / 2 },
+      stats,
+      0.016
+    );
+  }
+  const gasSpeed = Math.hypot(gassed.vx, gassed.vz);
+  assert.ok(gasSpeed > cruiseSpeed * 1.35, `Gas speed (${gasSpeed}) should exceed cruise (${cruiseSpeed})`);
+
+  // Holding Brake decelerates smoothly well below cruise without stalling backward
+  let braked = gassed;
+  for (let i = 0; i < 35; i++) {
+    braked = stepHighwayPhysics(
+      braked,
+      { steerInput: 0, accelInput: 0, brakeInput: 1, roadTangentAngle: -Math.PI / 2 },
+      stats,
+      0.016
+    );
+  }
+  const brakeSpeed = Math.hypot(braked.vx, braked.vz);
+  assert.ok(brakeSpeed < cruiseSpeed * 0.72, `Brake speed (${brakeSpeed}) should drop below cruise (${cruiseSpeed})`);
+  assert.ok(brakeSpeed >= stats.topSpeed * 0.34, 'Braking preserves forward motion floor');
+  assert.ok(braked.vz < 0, 'Car continues advancing forward when braking');
+});
+
+test('sampleTerrainElevation forms low viaduct river basin and rising 3D biome flanks', () => {
+  const riverCenter = sampleTerrainElevation(0, -40, 'alpine');
+  const embankment = sampleTerrainElevation(20, -40, 'alpine');
+  const mountainOuter = sampleTerrainElevation(48, -40, 'alpine');
+  assert.ok(riverCenter < VALLEY_BASE_Y, 'Center basin under viaduct stays recessed below VALLEY_BASE_Y');
+  assert.ok(embankment > riverCenter, 'Embankment rises above river basin');
+  assert.ok(mountainOuter > embankment, 'Outer foothills rise above inner embankment');
+
+  // Canyon terraces & Neon decks remain well below road level (y ~ 0) so terrain never clips viaduct
+  for (const biome of ['alpine', 'canyon', 'neon', 'sakura'] as const) {
+    assert.ok(sampleTerrainElevation(16, -80, biome) < -4.0, `${biome} inner bank stays below elevated road`);
+  }
+});
+
+test('generateSCurveTrack and generateHighwayTrack keep launchpad flat and roll into 3D hills', () => {
+  const driftTrack = generateSCurveTrack(90, 2.6, 42);
+  const hwyTrack = generateHighwayTrack(90, 3.4, 42);
+
+  for (let i = 0; i <= 6; i++) {
+    assert.equal(driftTrack[i].y, 0, 'Drift launchpad stays flat');
+    assert.equal(hwyTrack[i].y, 0, 'Highway launchpad stays flat');
+  }
+  const driftYs = driftTrack.slice(12).map((p) => p.y);
+  const hwyYs = hwyTrack.slice(12).map((p) => p.y);
+  assert.ok(Math.max(...driftYs) > 1.5 && Math.min(...driftYs) < -1.5, 'Drift road has rolling hills & dips');
+  assert.ok(Math.max(...hwyYs) > 1.0 && Math.min(...hwyYs) < -1.0, 'Highway road has rolling hills & dips');
+});
+
+test('evaluateSlipstreamDraft & getOvertakeStreakLabel reward drafting and multi-pass chains', () => {
+  const { cars } = generateTrafficBatch({
+    startS: 60,
+    endS: 160,
+    nextIdStart: 1,
+    seed: 12,
+    existingCars: [],
+  });
+  const sameLaneAhead = { ...cars[0], s: 112, lane: 1 as const, isOncoming: false, lateralOffset: HIGHWAY_LANE_OFFSET };
+  const oncomingAhead = { ...cars[0], id: 99, s: 108, lane: -1 as const, isOncoming: true, lateralOffset: -HIGHWAY_LANE_OFFSET };
+
+  const activeDraft = evaluateSlipstreamDraft({
+    playerS: 100,
+    playerLateralOffset: HIGHWAY_LANE_OFFSET + 0.2,
+    trafficCars: [sameLaneAhead, oncomingAhead],
+  });
+  assert.ok(activeDraft.draftingCar !== null);
+  assert.equal(activeDraft.draftingCar!.id, sameLaneAhead.id);
+  assert.ok(activeDraft.intensity > 0.35);
+
+  const noDraft = evaluateSlipstreamDraft({
+    playerS: 100,
+    playerLateralOffset: -HIGHWAY_LANE_OFFSET,
+    trafficCars: [sameLaneAhead, oncomingAhead],
+  });
+  assert.equal(noDraft.draftingCar, null);
+  assert.equal(noDraft.intensity, 0);
+
+  assert.equal(getOvertakeStreakLabel(1), '');
+  assert.equal(getOvertakeStreakLabel(2), 'DOUBLE PASS x2!');
+  assert.equal(getOvertakeStreakLabel(3), 'TRIPLE PASS x3!');
+  assert.equal(getOvertakeStreakLabel(5), 'APEX SLASH x5!');
+  assert.equal(getOvertakeStreakLabel(7), 'UNSTOPPABLE x7!');
+});
+
+test('triggerTrafficFlashYield & stepTrafficCars move same-lane traffic out of player path and recover cleanly', () => {
+  const { cars } = generateTrafficBatch({
+    startS: 60,
+    endS: 160,
+    nextIdStart: 1,
+    seed: 12,
+    existingCars: [],
+  });
+  const aheadSameLane = {
+    ...cars[0],
+    id: 101,
+    s: 118,
+    lane: 1 as const,
+    isOncoming: false,
+    lateralOffset: HIGHWAY_LANE_OFFSET,
+    speed: 10,
+  };
+  const aheadOncoming = {
+    ...cars[0],
+    id: 102,
+    s: 118,
+    lane: -1 as const,
+    isOncoming: true,
+    lateralOffset: -HIGHWAY_LANE_OFFSET,
+    speed: 12,
+  };
+
+  const traffic = [aheadSameLane, aheadOncoming];
+  const res = triggerTrafficFlashYield({
+    playerS: 100,
+    playerLateralOffset: HIGHWAY_LANE_OFFSET,
+    trafficCars: traffic,
+    rangeMeters: 48,
+  });
+
+  assert.equal(res.yieldedCars.length, 1);
+  assert.equal(res.newlyFlashedCount, 1);
+  assert.equal(aheadSameLane.yieldingToSide, 1);
+  assert.ok((aheadSameLane.yieldTimer || 0) > 2.5);
+  assert.ok((aheadSameLane.targetLateralOffset || 0) > HIGHWAY_LANE_OFFSET + 0.8);
+  assert.equal(aheadOncoming.yieldingToSide, undefined);
+
+  // Repeated flash counts only once per traffic vehicle
+  const repeatRes = triggerTrafficFlashYield({
+    playerS: 100,
+    playerLateralOffset: HIGHWAY_LANE_OFFSET,
+    trafficCars: traffic,
+    rangeMeters: 48,
+  });
+  assert.equal(repeatRes.newlyFlashedCount, 0);
+
+  // Step forward and confirm lateral pocket yield displacement
+  const initialLat = aheadSameLane.lateralOffset;
+  for (let i = 0; i < 20; i++) {
+    stepTrafficCars(traffic, 0.05);
+  }
+  assert.ok(aheadSameLane.lateralOffset > initialLat + 0.85, 'Yielding car pulls toward right shoulder');
+  assert.ok(aheadOncoming.s < 118, 'Oncoming car continues advancing opposite way');
+
+  // After timer expires, car smoothly drifts back to its lane center
+  for (let i = 0; i < 90; i++) {
+    stepTrafficCars(traffic, 0.05);
+  }
+  assert.equal(aheadSameLane.yieldingToSide, undefined);
+  assert.ok(Math.abs(aheadSameLane.lateralOffset - HIGHWAY_LANE_OFFSET) < 0.35);
+});
+
+test('compactInPlace filters elements in-place preserving order and zeroing array tail length', () => {
+  const arr = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }];
+  const sameRef = arr;
+  compactInPlace(arr, (item) => item.id % 2 === 1);
+  assert.equal(arr, sameRef);
+  assert.deepEqual(
+    arr.map((x) => x.id),
+    [1, 3, 5]
+  );
+
+  compactInPlace(arr, () => false);
+  assert.equal(arr.length, 0);
+});
+

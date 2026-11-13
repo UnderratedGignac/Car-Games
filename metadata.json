@@ -1,0 +1,6 @@
+{
+  "name": "Apex Slash: 3D Diagonal Drift",
+  "description": "High-dopamine vertical arcade drift game with 2D directional car sprites on a 3D canyon road, progressive car unlocks, destruction physics, Cloud SQL leaderboards, and Gemini AI Pit Studio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
