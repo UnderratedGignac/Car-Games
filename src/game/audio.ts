@@ -1,9 +1,57 @@
 import type { HornStyleId, SoundProfileId } from './rules';
+import {
+  AI_SFX_SLOT_MAP,
+  AiSfxSlotId,
+  MusicDspInput,
+  MusicDspParams,
+  computeMusicDspParams,
+  findPeakAudioWindow,
+} from './musicConfig';
 
-// Procedural Web Audio API Synthesizer for High-Dopamine Drift Feedback
+export interface AiSfxEntry {
+  slotId: AiSfxSlotId;
+  url: string;
+  buffer: AudioBuffer | null;
+  startSec: number;
+  durationSec: number;
+  decoding: boolean;
+}
+
+export interface AudioDeckSnapshot {
+  muted: boolean;
+  musicEnabled: boolean;
+  musicPlaying: boolean;
+  aiSfxEnabled: boolean;
+  dspEnabled: boolean;
+  musicVolume: number; // 0 .. 1
+  sfxVolume: number; // 0 .. 1
+  activeTrackId: string;
+  activeTrackTitle: string;
+  loadedTrackIds: string[];
+  loadedSfxIds: AiSfxSlotId[];
+  dspModeLabel: string;
+  dspLowpassHz: number;
+  dspPlaybackRate: number;
+}
+
+function makeSaturationCurve(drive: number): Float32Array<ArrayBuffer> {
+  const n = 256;
+  const curve = new Float32Array(new ArrayBuffer(n * 4));
+  const k = Math.max(0.01, drive * 28);
+  for (let i = 0; i < n; i++) {
+    const x = (i * 2) / n - 1;
+    curve[i] = drive <= 0.01 ? x : ((3 + k) * x * 20 * (Math.PI / 180)) / (Math.PI + k * Math.abs(x));
+  }
+  return curve;
+}
+
+// Procedural Web Audio API Synthesizer + AI Music DSP Rack & AI SFX Sampler
 class DriftAudioEngine {
   private ctx: AudioContext | null = null;
   public muted = false;
+
+  // Master compressor to prevent clipping when AI music + AI SFX + engine stack
+  private masterComp: DynamicsCompressorNode | null = null;
 
   // Live continuous engine synth nodes
   private engOscA: OscillatorNode | null = null;
@@ -17,10 +65,87 @@ class DriftAudioEngine {
   private lastEngCutoff = -1;
   private lastEngVol = -1;
 
-  private ensureContext(): AudioContext | null {
-    if (this.muted || typeof window === 'undefined') return null;
+  // AI Music Deck + Real-Time Web Audio DSP Chain
+  private musicEnabled = true;
+  private musicPlaying = false;
+  private aiSfxEnabled = true;
+  private dspEnabled = true;
+  private musicVolume = 0.58;
+  private sfxVolume = 0.82;
+
+  private activeTrackId = '';
+  private activeTrackTitle = '';
+  private trackSources = new Map<string, { title: string; url: string; buffer: AudioBuffer | null; decoding: boolean }>();
+  private musicSourceNode: AudioBufferSourceNode | null = null;
+  private musicLowpass: BiquadFilterNode | null = null;
+  private musicBassShelf: BiquadFilterNode | null = null;
+  private musicHighShelf: BiquadFilterNode | null = null;
+  private musicShaper: WaveShaperNode | null = null;
+  private musicGainNode: GainNode | null = null;
+
+  private lastDspUpdateTime = 0;
+  private lastDspPhase = '';
+  private lastDspParams: MusicDspParams = {
+    lowpassHz: 18000,
+    bassBoostDb: 2.0,
+    highShelfDb: 0,
+    driveAmount: 0,
+    playbackRate: 1.0,
+    gainMultiplier: 1.0,
+  };
+  private lastDriveBucket = -1;
+  private dspModeLabel = 'CRUISE CLEAN';
+
+  // AI SFX Buffer Sampler
+  private aiSfxEntries = new Map<AiSfxSlotId, AiSfxEntry>();
+  private listeners = new Set<() => void>();
+
+  private notifyListeners() {
+    this.listeners.forEach((cb) => {
+      try {
+        cb();
+      } catch {}
+    });
+  }
+
+  public subscribe(cb: () => void): () => void {
+    this.listeners.add(cb);
+    return () => {
+      this.listeners.delete(cb);
+    };
+  }
+
+  public getDeckSnapshot(): AudioDeckSnapshot {
+    const loadedTrackIds: string[] = [];
+    this.trackSources.forEach((_v, k) => loadedTrackIds.push(k));
+    const loadedSfxIds: AiSfxSlotId[] = [];
+    this.aiSfxEntries.forEach((v, k) => {
+      if (v.url || v.buffer) loadedSfxIds.push(k);
+    });
+    return {
+      muted: this.muted,
+      musicEnabled: this.musicEnabled,
+      musicPlaying: this.musicPlaying,
+      aiSfxEnabled: this.aiSfxEnabled,
+      dspEnabled: this.dspEnabled,
+      musicVolume: this.musicVolume,
+      sfxVolume: this.sfxVolume,
+      activeTrackId: this.activeTrackId,
+      activeTrackTitle: this.activeTrackTitle,
+      loadedTrackIds,
+      loadedSfxIds,
+      dspModeLabel: this.dspModeLabel,
+      dspLowpassHz: this.lastDspParams.lowpassHz,
+      dspPlaybackRate: this.lastDspParams.playbackRate,
+    };
+  }
+
+  private ensureContext(ignoreMute = false): AudioContext | null {
+    if ((!ignoreMute && this.muted) || typeof window === 'undefined') return null;
     if (!this.ctx) {
-      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       if (AudioCtx) {
         this.ctx = new AudioCtx();
       }
@@ -28,7 +153,416 @@ class DriftAudioEngine {
     if (this.ctx && this.ctx.state === 'suspended') {
       this.ctx.resume().catch(() => {});
     }
+    if (this.ctx && !this.masterComp) {
+      try {
+        const comp = this.ctx.createDynamicsCompressor();
+        comp.threshold.setValueAtTime(-12, this.ctx.currentTime);
+        comp.knee.setValueAtTime(14, this.ctx.currentTime);
+        comp.ratio.setValueAtTime(4, this.ctx.currentTime);
+        comp.attack.setValueAtTime(0.005, this.ctx.currentTime);
+        comp.release.setValueAtTime(0.18, this.ctx.currentTime);
+        comp.connect(this.ctx.destination);
+        this.masterComp = comp;
+      } catch {}
+    }
     return this.ctx;
+  }
+
+  private getOutputNode(ctx: AudioContext): AudioNode {
+    return this.masterComp || ctx.destination;
+  }
+
+  private ensureMusicChain(ctx: AudioContext) {
+    if (
+      this.musicLowpass &&
+      this.musicBassShelf &&
+      this.musicHighShelf &&
+      this.musicShaper &&
+      this.musicGainNode
+    ) {
+      return;
+    }
+    const now = ctx.currentTime;
+    const lowpass = ctx.createBiquadFilter();
+    lowpass.type = 'lowpass';
+    lowpass.frequency.setValueAtTime(18000, now);
+    lowpass.Q.setValueAtTime(0.9, now);
+
+    const bass = ctx.createBiquadFilter();
+    bass.type = 'lowshelf';
+    bass.frequency.setValueAtTime(115, now);
+    bass.gain.setValueAtTime(2.0, now);
+
+    const high = ctx.createBiquadFilter();
+    high.type = 'highshelf';
+    high.frequency.setValueAtTime(6200, now);
+    high.gain.setValueAtTime(0.5, now);
+
+    const shaper = ctx.createWaveShaper();
+    shaper.curve = makeSaturationCurve(0);
+    shaper.oversample = 'none';
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(this.computeEffectiveMusicGain(this.lastDspParams.gainMultiplier), now);
+
+    lowpass.connect(bass);
+    bass.connect(high);
+    high.connect(shaper);
+    shaper.connect(gain);
+    gain.connect(this.getOutputNode(ctx));
+
+    this.musicLowpass = lowpass;
+    this.musicBassShelf = bass;
+    this.musicHighShelf = high;
+    this.musicShaper = shaper;
+    this.musicGainNode = gain;
+  }
+
+  private computeEffectiveMusicGain(dspMultiplier: number): number {
+    if (this.muted || !this.musicEnabled) return 0;
+    return Math.max(0, Math.min(1, this.musicVolume * dspMultiplier * 0.72));
+  }
+
+  private async decodeUrlToBuffer(ctx: AudioContext, url: string): Promise<AudioBuffer | null> {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      const arr = await res.arrayBuffer();
+      return await ctx.decodeAudioData(arr);
+    } catch {
+      return null;
+    }
+  }
+
+  public registerCachedTrack(trackId: string, title: string, url: string) {
+    const existing = this.trackSources.get(trackId);
+    if (existing && existing.url === url) return;
+    this.trackSources.set(trackId, { title, url, buffer: null, decoding: false });
+    if (!this.activeTrackId) {
+      this.activeTrackId = trackId;
+      this.activeTrackTitle = title;
+    }
+    this.notifyListeners();
+  }
+
+  public async loadAiMusicTrack(
+    trackId: string,
+    title: string,
+    url: string,
+    autoPlay = true
+  ): Promise<boolean> {
+    const existing = this.trackSources.get(trackId);
+    let buffer = existing && existing.url === url ? existing.buffer : null;
+    this.trackSources.set(trackId, { title, url, buffer, decoding: !buffer });
+    this.activeTrackId = trackId;
+    this.activeTrackTitle = title;
+    this.notifyListeners();
+
+    if (!autoPlay) {
+      return true;
+    }
+
+    const ctx = this.ensureContext(true);
+    if (!ctx) return false;
+    if (!buffer) {
+      buffer = await this.decodeUrlToBuffer(ctx, url);
+      const entry = this.trackSources.get(trackId);
+      if (entry) {
+        entry.buffer = buffer;
+        entry.decoding = false;
+      }
+    }
+    if (!buffer) {
+      this.notifyListeners();
+      return false;
+    }
+
+    if (this.activeTrackId === trackId && this.musicEnabled) {
+      this.startBufferLoop(ctx, buffer);
+    }
+    this.notifyListeners();
+    return true;
+  }
+
+  private stopMusicSourceOnly() {
+    if (this.musicSourceNode) {
+      try {
+        this.musicSourceNode.stop();
+        this.musicSourceNode.disconnect();
+      } catch {}
+      this.musicSourceNode = null;
+    }
+    this.musicPlaying = false;
+  }
+
+  private startBufferLoop(ctx: AudioContext, buffer: AudioBuffer) {
+    this.stopMusicSourceOnly();
+    this.ensureMusicChain(ctx);
+    if (!this.musicLowpass || !this.musicGainNode) return;
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.loop = true;
+    src.playbackRate.setValueAtTime(
+      this.dspEnabled ? this.lastDspParams.playbackRate : 1.0,
+      ctx.currentTime
+    );
+    src.connect(this.musicLowpass);
+    src.start(0);
+
+    this.musicSourceNode = src;
+    this.musicPlaying = true;
+    this.musicGainNode.gain.setTargetAtTime(
+      this.computeEffectiveMusicGain(this.dspEnabled ? this.lastDspParams.gainMultiplier : 1.0),
+      ctx.currentTime,
+      0.08
+    );
+  }
+
+  /**
+   * Called on user gesture (Launch Drift Run, Audio Toggle, etc.) to resume
+   * or start whichever AI music track is active, plus hydrate pending AI SFX.
+   */
+  public async unlockAndEnsureMusic(preferredTrackId?: string): Promise<void> {
+    const ctx = this.ensureContext(true);
+    if (!ctx) return;
+
+    // Hydrate any registered AI SFX buffers lazily in background
+    this.aiSfxEntries.forEach((entry, slotId) => {
+      if (!entry.buffer && !entry.decoding && entry.url) {
+        this.decodeSfxSlot(ctx, slotId, entry.url).catch(() => {});
+      }
+    });
+
+    if (!this.musicEnabled || this.muted) return;
+
+    const targetId =
+      preferredTrackId && this.trackSources.has(preferredTrackId)
+        ? preferredTrackId
+        : this.activeTrackId;
+
+    if (!targetId) return;
+    const track = this.trackSources.get(targetId);
+    if (!track) return;
+
+    if (this.musicPlaying && this.activeTrackId === targetId) return;
+    await this.loadAiMusicTrack(targetId, track.title, track.url, true);
+  }
+
+  public setMusicEnabled(enabled: boolean) {
+    this.musicEnabled = enabled;
+    if (!enabled) {
+      this.stopMusicSourceOnly();
+    } else if (this.activeTrackId && !this.muted) {
+      this.unlockAndEnsureMusic(this.activeTrackId).catch(() => {});
+    }
+    this.notifyListeners();
+  }
+
+  public setAiSfxEnabled(enabled: boolean) {
+    this.aiSfxEnabled = enabled;
+    this.notifyListeners();
+  }
+
+  public setDspEnabled(enabled: boolean) {
+    this.dspEnabled = enabled;
+    if (!enabled && this.ctx && this.musicLowpass && this.musicBassShelf && this.musicHighShelf && this.musicShaper) {
+      const now = this.ctx.currentTime;
+      this.musicLowpass.frequency.setTargetAtTime(21000, now, 0.08);
+      this.musicBassShelf.gain.setTargetAtTime(0, now, 0.08);
+      this.musicHighShelf.gain.setTargetAtTime(0, now, 0.08);
+      this.musicShaper.curve = makeSaturationCurve(0);
+      this.musicSourceNode?.playbackRate.setTargetAtTime(1.0, now, 0.08);
+      this.dspModeLabel = 'BYPASS CLEAN';
+    }
+    this.notifyListeners();
+  }
+
+  public setMusicVolume(vol: number) {
+    this.musicVolume = Math.max(0, Math.min(1, vol));
+    if (this.ctx && this.musicGainNode) {
+      const mult = this.dspEnabled ? this.lastDspParams.gainMultiplier : 1.0;
+      this.musicGainNode.gain.setTargetAtTime(
+        this.computeEffectiveMusicGain(mult),
+        this.ctx.currentTime,
+        0.05
+      );
+    }
+    this.notifyListeners();
+  }
+
+  public setSfxVolume(vol: number) {
+    this.sfxVolume = Math.max(0, Math.min(1, vol));
+    this.notifyListeners();
+  }
+
+  public stopMusic() {
+    this.stopMusicSourceOnly();
+    this.notifyListeners();
+  }
+
+  public updateMusicEffects(input: MusicDspInput) {
+    if (!this.ctx || !this.musicPlaying || !this.musicLowpass || !this.musicBassShelf || !this.musicHighShelf || !this.musicGainNode) {
+      return;
+    }
+    const now = this.ctx.currentTime;
+    // Allow immediate update on phase change, otherwise throttle ~25Hz
+    if (input.phase === this.lastDspPhase && now - this.lastDspUpdateTime < 0.04) {
+      return;
+    }
+    this.lastDspUpdateTime = now;
+    this.lastDspPhase = input.phase;
+
+    if (!this.dspEnabled) {
+      this.dspModeLabel = 'BYPASS CLEAN';
+      return;
+    }
+
+    const params = computeMusicDspParams(input);
+    this.lastDspParams = params;
+
+    if (input.phase === 'paused') this.dspModeLabel = 'PIT MUFFLE';
+    else if (input.phase === 'gameover') this.dspModeLabel = 'WRECK TAPE-SLOW';
+    else if (input.phase === 'title') this.dspModeLabel = 'GARAGE LOUNGE';
+    else if (input.isFever) this.dspModeLabel = 'FEVER OVERDRIVE';
+    else if (input.isBraking) this.dspModeLabel = 'BRAKE DUCK';
+    else if (input.isDrifting) this.dspModeLabel = 'DRIFT RESONANCE';
+    else this.dspModeLabel = 'CRUISE DYNAMIC';
+
+    this.musicLowpass.frequency.setTargetAtTime(params.lowpassHz, now, 0.07);
+    this.musicBassShelf.gain.setTargetAtTime(params.bassBoostDb, now, 0.07);
+    this.musicHighShelf.gain.setTargetAtTime(params.highShelfDb, now, 0.07);
+    this.musicGainNode.gain.setTargetAtTime(
+      this.computeEffectiveMusicGain(params.gainMultiplier),
+      now,
+      0.08
+    );
+    if (this.musicSourceNode) {
+      this.musicSourceNode.playbackRate.setTargetAtTime(params.playbackRate, now, 0.08);
+    }
+    if (this.musicShaper) {
+      const bucket = Math.round(params.driveAmount * 10);
+      if (bucket !== this.lastDriveBucket) {
+        this.lastDriveBucket = bucket;
+        this.musicShaper.curve = makeSaturationCurve(params.driveAmount);
+      }
+    }
+  }
+
+  public registerCachedSfx(slotId: AiSfxSlotId, url: string) {
+    const existing = this.aiSfxEntries.get(slotId);
+    if (existing && existing.url === url) return;
+    this.aiSfxEntries.set(slotId, {
+      slotId,
+      url,
+      buffer: null,
+      startSec: 0,
+      durationSec: AI_SFX_SLOT_MAP[slotId]?.targetDurationSec || 1.0,
+      decoding: false,
+    });
+    this.notifyListeners();
+  }
+
+  private async decodeSfxSlot(ctx: AudioContext, slotId: AiSfxSlotId, url: string): Promise<boolean> {
+    const existing = this.aiSfxEntries.get(slotId);
+    if (existing?.decoding) return false;
+    const spec = AI_SFX_SLOT_MAP[slotId];
+    const targetDur = spec?.targetDurationSec || 1.0;
+
+    this.aiSfxEntries.set(slotId, {
+      slotId,
+      url,
+      buffer: null,
+      startSec: 0,
+      durationSec: targetDur,
+      decoding: true,
+    });
+
+    const buffer = await this.decodeUrlToBuffer(ctx, url);
+    if (!buffer) {
+      this.aiSfxEntries.set(slotId, {
+        slotId,
+        url,
+        buffer: null,
+        startSec: 0,
+        durationSec: targetDur,
+        decoding: false,
+      });
+      return false;
+    }
+
+    const channel = buffer.getChannelData(0);
+    const window = findPeakAudioWindow(channel, buffer.sampleRate, targetDur);
+    this.aiSfxEntries.set(slotId, {
+      slotId,
+      url,
+      buffer,
+      startSec: window.startSec,
+      durationSec: window.durationSec,
+      decoding: false,
+    });
+    this.notifyListeners();
+    return true;
+  }
+
+  public async loadAiSfxClip(slotId: AiSfxSlotId, url: string): Promise<boolean> {
+    this.registerCachedSfx(slotId, url);
+    const ctx = this.ensureContext(true);
+    if (!ctx) return false;
+    return this.decodeSfxSlot(ctx, slotId, url);
+  }
+
+  private playAiSfxClip(slotId: AiSfxSlotId, pitchMult = 1.0, gainScale = 1.0): boolean {
+    if (!this.aiSfxEnabled || this.muted) return false;
+    const entry = this.aiSfxEntries.get(slotId);
+    if (!entry) return false;
+    const ctx = this.ensureContext();
+    if (!ctx) return false;
+
+    if (!entry.buffer) {
+      if (!entry.decoding && entry.url) {
+        this.decodeSfxSlot(ctx, slotId, entry.url).catch(() => {});
+      }
+      return false;
+    }
+
+    const spec = AI_SFX_SLOT_MAP[slotId];
+    const now = ctx.currentTime;
+    const dur = Math.max(0.18, entry.durationSec);
+    const vol = Math.max(0.05, Math.min(1.0, (spec?.baseGain ?? 0.55) * this.sfxVolume * gainScale));
+
+    const src = ctx.createBufferSource();
+    src.buffer = entry.buffer;
+    src.playbackRate.setValueAtTime(Math.max(0.75, Math.min(1.4, pitchMult)), now);
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = slotId === 'crash' ? 'lowpass' : 'highpass';
+    filter.frequency.setValueAtTime(slotId === 'crash' ? 5200 : 120, now);
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(vol, now + 0.016);
+    gain.gain.setValueAtTime(vol, now + Math.max(0.04, dur * 0.52));
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.getOutputNode(ctx));
+
+    src.start(now, entry.startSec, dur + 0.04);
+    src.stop(now + dur + 0.06);
+    return true;
+  }
+
+  public async previewAiSfx(slotId: AiSfxSlotId): Promise<boolean> {
+    const ctx = this.ensureContext(true);
+    if (!ctx) return false;
+    const entry = this.aiSfxEntries.get(slotId);
+    if (!entry) return false;
+    if (!entry.buffer && entry.url) {
+      await this.decodeSfxSlot(ctx, slotId, entry.url);
+    }
+    return this.playAiSfxClip(slotId, 1.0, 1.05);
   }
 
   public setMuted(mute: boolean) {
@@ -36,6 +570,19 @@ class DriftAudioEngine {
     if (mute) {
       this.stopEngineSound();
     }
+    if (this.ctx && this.musicGainNode) {
+      const mult = this.dspEnabled ? this.lastDspParams.gainMultiplier : 1.0;
+      this.musicGainNode.gain.setTargetAtTime(
+        this.computeEffectiveMusicGain(mult),
+        this.ctx.currentTime,
+        0.04
+      );
+    }
+    this.notifyListeners();
+  }
+
+  private get sfxScale(): number {
+    return Math.max(0, Math.min(1.25, this.sfxVolume));
   }
 
   // Light pitch-varied tire screech + turbo flutter on diagonal direction flip (/ <-> \)
@@ -43,9 +590,12 @@ class DriftAudioEngine {
     const ctx = this.ensureContext();
     if (!ctx) return;
 
-    const now = ctx.currentTime;
     const pitchVariance = 0.94 + Math.random() * 0.12;
-    const comboSemitone = Math.pow(1.045, Math.min(16, combo));
+    const comboSemitone = Math.pow(1.035, Math.min(12, combo));
+    const hasAi = this.playAiSfxClip('drift_flip', pitchVariance * comboSemitone, isFever ? 0.95 : 0.78);
+    const layer = (hasAi ? 0.48 : 1.0) * this.sfxScale;
+
+    const now = ctx.currentTime;
 
     // Turbo blow-off / synth chord stab
     const osc = ctx.createOscillator();
@@ -55,11 +605,11 @@ class DriftAudioEngine {
     osc.frequency.setValueAtTime(baseFreq, now);
     osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.35, now + 0.09);
 
-    gain.gain.setValueAtTime(0.14, now);
+    gain.gain.setValueAtTime(0.14 * layer, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
 
     osc.connect(gain);
-    gain.connect(ctx.destination);
+    gain.connect(this.getOutputNode(ctx));
     osc.start(now);
     osc.stop(now + 0.15);
 
@@ -79,12 +629,12 @@ class DriftAudioEngine {
     filter.Q.setValueAtTime(3.2, now);
 
     const nGain = ctx.createGain();
-    nGain.gain.setValueAtTime(0.08, now);
+    nGain.gain.setValueAtTime(0.08 * layer, now);
     nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
 
     noise.connect(filter);
     filter.connect(nGain);
-    nGain.connect(ctx.destination);
+    nGain.connect(this.getOutputNode(ctx));
     noise.start(now);
   }
 
@@ -94,25 +644,29 @@ class DriftAudioEngine {
     if (!ctx) return;
     const now = ctx.currentTime;
     const mult = Math.pow(1.05, Math.min(14, combo));
+    const scale = this.sfxScale;
 
     [587.33, 880].forEach((freq, idx) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
       osc.frequency.setValueAtTime(freq * mult, now + idx * 0.045);
-      gain.gain.setValueAtTime(0.16, now + idx * 0.045);
+      gain.gain.setValueAtTime(0.16 * scale, now + idx * 0.045);
       gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.045 + 0.16);
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
       osc.start(now + idx * 0.045);
       osc.stop(now + idx * 0.045 + 0.17);
     });
   }
 
-  // Nitro boost pad / Fever activation fanfare
+  // Nitro boost pad / Fever activation fanfare (AI Fever Drop + Synth Harmonic)
   public playFeverBurst() {
     const ctx = this.ensureContext();
     if (!ctx) return;
+    const hasAi = this.playAiSfxClip('fever', 1.0, 1.0);
+    const layer = (hasAi ? 0.5 : 1.0) * this.sfxScale;
+
     const now = ctx.currentTime;
     const notes = [261.63, 329.63, 392.0, 523.25, 659.25];
     notes.forEach((f, i) => {
@@ -120,10 +674,10 @@ class DriftAudioEngine {
       const gain = ctx.createGain();
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(f, now + i * 0.04);
-      gain.gain.setValueAtTime(0.11, now + i * 0.04);
+      gain.gain.setValueAtTime(0.11 * layer, now + i * 0.04);
       gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.04 + 0.28);
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
       osc.start(now + i * 0.04);
       osc.stop(now + i * 0.04 + 0.29);
     });
@@ -133,17 +687,20 @@ class DriftAudioEngine {
   public playStyleSwitch(combo: number) {
     const ctx = this.ensureContext();
     if (!ctx) return;
-    const now = ctx.currentTime;
     const mult = Math.pow(1.04, Math.min(16, combo));
+    const hasAi = this.playAiSfxClip('drift_flip', mult, 0.72);
+    const layer = (hasAi ? 0.55 : 1.0) * this.sfxScale;
+
+    const now = ctx.currentTime;
     [440, 659.25].forEach((freq, i) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'triangle';
       osc.frequency.setValueAtTime(freq * mult, now + i * 0.035);
-      gain.gain.setValueAtTime(0.14, now + i * 0.035);
+      gain.gain.setValueAtTime(0.14 * layer, now + i * 0.035);
       gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.035 + 0.14);
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
       osc.start(now + i * 0.035);
       osc.stop(now + i * 0.035 + 0.15);
     });
@@ -168,12 +725,12 @@ class DriftAudioEngine {
     filter.frequency.setValueAtTime(2800 + Math.random() * 900, now);
 
     const gain = ctx.createGain();
-    gain.gain.setValueAtTime(0.09, now);
+    gain.gain.setValueAtTime(0.09 * this.sfxScale, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
 
     noise.connect(filter);
     filter.connect(gain);
-    gain.connect(ctx.destination);
+    gain.connect(this.getOutputNode(ctx));
     noise.start(now);
   }
 
@@ -188,19 +745,22 @@ class DriftAudioEngine {
       const gain = ctx.createGain();
       osc.type = 'sine';
       osc.frequency.setValueAtTime(f, now + i * 0.032);
-      gain.gain.setValueAtTime(0.14, now + i * 0.032);
+      gain.gain.setValueAtTime(0.14 * this.sfxScale, now + i * 0.032);
       gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.032 + 0.18);
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
       osc.start(now + i * 0.032);
       osc.stop(now + i * 0.032 + 0.19);
     });
   }
 
-  // Car falling off the 3D cliff + guardrail crunch + explosive valley impact
+  // Car falling off the 3D cliff + guardrail crunch + AI Crash Impact & valley boom
   public playFallAndDestroy() {
     const ctx = this.ensureContext();
     if (!ctx) return;
+    const hasAi = this.playAiSfxClip('crash', 0.96, 1.0);
+    const layer = (hasAi ? 0.65 : 1.0) * this.sfxScale;
+
     const now = ctx.currentTime;
 
     // Stage 1: Metallic guardrail crunch burst
@@ -217,11 +777,11 @@ class DriftAudioEngine {
     crunchFilter.frequency.setValueAtTime(1600, now);
     crunchFilter.Q.setValueAtTime(1.5, now);
     const crunchGain = ctx.createGain();
-    crunchGain.gain.setValueAtTime(0.24, now);
+    crunchGain.gain.setValueAtTime(0.24 * layer, now);
     crunchGain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
     crunchNoise.connect(crunchFilter);
     crunchFilter.connect(crunchGain);
-    crunchGain.connect(ctx.destination);
+    crunchGain.connect(this.getOutputNode(ctx));
     crunchNoise.start(now);
 
     // Stage 2: Falling whistle while tumbling off viaduct
@@ -230,10 +790,10 @@ class DriftAudioEngine {
     fallOsc.type = 'sine';
     fallOsc.frequency.setValueAtTime(540, now);
     fallOsc.frequency.exponentialRampToValueAtTime(90, now + 0.42);
-    fallGain.gain.setValueAtTime(0.18, now);
+    fallGain.gain.setValueAtTime(0.18 * layer, now);
     fallGain.gain.exponentialRampToValueAtTime(0.01, now + 0.42);
     fallOsc.connect(fallGain);
-    fallGain.connect(ctx.destination);
+    fallGain.connect(this.getOutputNode(ctx));
     fallOsc.start(now);
     fallOsc.stop(now + 0.43);
 
@@ -244,10 +804,10 @@ class DriftAudioEngine {
     subOsc.type = 'triangle';
     subOsc.frequency.setValueAtTime(145, boomTime);
     subOsc.frequency.exponentialRampToValueAtTime(26, boomTime + 0.62);
-    subGain.gain.setValueAtTime(0.36, boomTime);
+    subGain.gain.setValueAtTime(0.36 * layer, boomTime);
     subGain.gain.exponentialRampToValueAtTime(0.001, boomTime + 0.64);
     subOsc.connect(subGain);
-    subGain.connect(ctx.destination);
+    subGain.connect(this.getOutputNode(ctx));
     subOsc.start(boomTime);
     subOsc.stop(boomTime + 0.65);
 
@@ -260,10 +820,10 @@ class DriftAudioEngine {
     const crashNoise = ctx.createBufferSource();
     crashNoise.buffer = buf;
     const crashGain = ctx.createGain();
-    crashGain.gain.setValueAtTime(0.28, boomTime);
+    crashGain.gain.setValueAtTime(0.28 * layer, boomTime);
     crashGain.gain.exponentialRampToValueAtTime(0.001, boomTime + 0.56);
     crashNoise.connect(crashGain);
-    crashGain.connect(ctx.destination);
+    crashGain.connect(this.getOutputNode(ctx));
     crashNoise.start(boomTime);
   }
 
@@ -271,17 +831,20 @@ class DriftAudioEngine {
   public playOvertake(combo: number) {
     const ctx = this.ensureContext();
     if (!ctx) return;
+    const mult = Math.pow(1.035, Math.min(12, combo));
+    const hasAi = this.playAiSfxClip('overtake', mult, 0.85);
+    const layer = (hasAi ? 0.5 : 1.0) * this.sfxScale;
+
     const now = ctx.currentTime;
-    const mult = Math.pow(1.045, Math.min(14, combo));
     [392.0, 587.33].forEach((f, idx) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'triangle';
       osc.frequency.setValueAtTime(f * mult, now + idx * 0.04);
-      gain.gain.setValueAtTime(0.13, now + idx * 0.04);
+      gain.gain.setValueAtTime(0.13 * layer, now + idx * 0.04);
       gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.04 + 0.14);
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
       osc.start(now + idx * 0.04);
       osc.stop(now + idx * 0.04 + 0.15);
     });
@@ -291,6 +854,9 @@ class DriftAudioEngine {
   public playNearMiss(isOncoming: boolean) {
     const ctx = this.ensureContext();
     if (!ctx) return;
+    const hasAi = this.playAiSfxClip('overtake', isOncoming ? 1.15 : 1.05, 0.9);
+    const layer = (hasAi ? 0.65 : 1.0) * this.sfxScale;
+
     const now = ctx.currentTime;
 
     // Doppler air-whoosh noise sweep
@@ -311,11 +877,11 @@ class DriftAudioEngine {
     filter.Q.setValueAtTime(2.4, now);
 
     const nGain = ctx.createGain();
-    nGain.gain.setValueAtTime(0.22, now);
+    nGain.gain.setValueAtTime(0.22 * layer, now);
     nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
     noise.connect(filter);
     filter.connect(nGain);
-    nGain.connect(ctx.destination);
+    nGain.connect(this.getOutputNode(ctx));
     noise.start(now);
 
     // Bright reward chime
@@ -325,10 +891,10 @@ class DriftAudioEngine {
       const gain = ctx.createGain();
       osc.type = 'sine';
       osc.frequency.setValueAtTime(f, now + idx * 0.032);
-      gain.gain.setValueAtTime(0.14, now + idx * 0.032);
+      gain.gain.setValueAtTime(0.14 * layer, now + idx * 0.032);
       gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.032 + 0.16);
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
       osc.start(now + idx * 0.032);
       osc.stop(now + idx * 0.032 + 0.17);
     });
@@ -338,17 +904,20 @@ class DriftAudioEngine {
   public playSlipstreamPass(combo: number) {
     const ctx = this.ensureContext();
     if (!ctx) return;
-    const now = ctx.currentTime;
     const mult = Math.pow(1.035, Math.min(12, combo));
+    const hasAi = this.playAiSfxClip('fever', 1.08, 0.65);
+    const layer = (hasAi ? 0.58 : 1.0) * this.sfxScale;
+
+    const now = ctx.currentTime;
     [440, 659.25, 880, 1174.66].forEach((f, idx) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(f * mult, now + idx * 0.028);
-      gain.gain.setValueAtTime(0.09, now + idx * 0.028);
+      gain.gain.setValueAtTime(0.09 * layer, now + idx * 0.028);
       gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.028 + 0.18);
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
       osc.start(now + idx * 0.028);
       osc.stop(now + idx * 0.028 + 0.19);
     });
@@ -358,16 +927,19 @@ class DriftAudioEngine {
   public playMilestone() {
     const ctx = this.ensureContext();
     if (!ctx) return;
+    const hasAi = this.playAiSfxClip('milestone', 1.0, 1.0);
+    const layer = (hasAi ? 0.5 : 1.0) * this.sfxScale;
+
     const now = ctx.currentTime;
     [523.25, 659.25, 783.99, 1046.5, 1318.51].forEach((f, idx) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'triangle';
       osc.frequency.setValueAtTime(f, now + idx * 0.04);
-      gain.gain.setValueAtTime(0.12, now + idx * 0.04);
+      gain.gain.setValueAtTime(0.12 * layer, now + idx * 0.04);
       gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.04 + 0.25);
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
       osc.start(now + idx * 0.04);
       osc.stop(now + idx * 0.04 + 0.26);
     });
@@ -378,6 +950,7 @@ class DriftAudioEngine {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const now = ctx.currentTime;
+    const scale = this.sfxScale;
 
     const triggerChord = (freqs: number[], type: OscillatorType, start: number, dur: number, vol = 0.14) => {
       freqs.forEach((f) => {
@@ -389,12 +962,12 @@ class DriftAudioEngine {
         filter.type = 'lowpass';
         filter.frequency.setValueAtTime(hornStyle === 'train_bass' ? 900 : 2400, start);
         gain.gain.setValueAtTime(0.001, start);
-        gain.gain.linearRampToValueAtTime(vol, start + 0.018);
-        gain.gain.setValueAtTime(vol, start + dur - 0.04);
+        gain.gain.linearRampToValueAtTime(vol * scale, start + 0.018);
+        gain.gain.setValueAtTime(vol * scale, start + dur - 0.04);
         gain.gain.exponentialRampToValueAtTime(0.001, start + dur);
         osc.connect(filter);
         filter.connect(gain);
-        gain.connect(ctx.destination);
+        gain.connect(this.getOutputNode(ctx));
         osc.start(start);
         osc.stop(start + dur + 0.02);
       });
@@ -415,10 +988,10 @@ class DriftAudioEngine {
       osc.frequency.exponentialRampToValueAtTime(1480, now + 0.09);
       osc.frequency.setValueAtTime(980, now + 0.11);
       osc.frequency.exponentialRampToValueAtTime(1760, now + 0.20);
-      gain.gain.setValueAtTime(0.16, now);
+      gain.gain.setValueAtTime(0.16 * scale, now);
       gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
       osc.start(now);
       osc.stop(now + 0.23);
     } else {
@@ -437,10 +1010,10 @@ class DriftAudioEngine {
       osc.type = 'triangle';
       osc.frequency.setValueAtTime(i === 0 ? 1120 : 1380, now + offset);
       osc.frequency.exponentialRampToValueAtTime(520, now + offset + 0.055);
-      gain.gain.setValueAtTime(0.11, now + offset);
+      gain.gain.setValueAtTime(0.11 * this.sfxScale, now + offset);
       gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.06);
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
       osc.start(now + offset);
       osc.stop(now + offset + 0.07);
     });
@@ -456,10 +1029,10 @@ class DriftAudioEngine {
       const gain = ctx.createGain();
       osc.type = 'sine';
       osc.frequency.setValueAtTime(f, now + idx * 0.048);
-      gain.gain.setValueAtTime(0.10, now + idx * 0.048);
+      gain.gain.setValueAtTime(0.10 * this.sfxScale, now + idx * 0.048);
       gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.048 + 0.14);
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
       osc.start(now + idx * 0.048);
       osc.stop(now + idx * 0.048 + 0.15);
     });
@@ -498,7 +1071,7 @@ class DriftAudioEngine {
         this.engOscA.connect(this.engFilter);
         this.engOscB.connect(this.engFilter);
         this.engFilter.connect(this.engGain);
-        this.engGain.connect(ctx.destination);
+        this.engGain.connect(this.getOutputNode(ctx));
 
         this.engOscA.start(now);
         this.engOscB.start(now);
@@ -552,11 +1125,8 @@ class DriftAudioEngine {
     }
 
     const effectiveCutoff = cutoff + (params.isGassing ? 240 : 0);
-    const targetVol = params.isGassing
-      ? 0.048
-      : params.isBraking
-      ? 0.022
-      : 0.032;
+    const baseVol = params.isGassing ? 0.046 : params.isBraking ? 0.02 : 0.03;
+    const targetVol = baseVol * this.sfxScale;
 
     if (this.engOscA.type !== oscTypeA) this.engOscA.type = oscTypeA;
     if (this.engOscB.type !== oscTypeB) this.engOscB.type = oscTypeB;
@@ -583,10 +1153,10 @@ class DriftAudioEngine {
       tOsc.type = 'sine';
       tOsc.frequency.setValueAtTime(1650, now);
       tOsc.frequency.exponentialRampToValueAtTime(2400, now + 0.14);
-      tGain.gain.setValueAtTime(0.02, now);
+      tGain.gain.setValueAtTime(0.02 * this.sfxScale, now);
       tGain.gain.exponentialRampToValueAtTime(0.0005, now + 0.16);
       tOsc.connect(tGain);
-      tGain.connect(ctx.destination);
+      tGain.connect(this.getOutputNode(ctx));
       tOsc.start(now);
       tOsc.stop(now + 0.17);
     }

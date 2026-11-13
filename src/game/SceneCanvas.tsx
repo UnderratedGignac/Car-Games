@@ -41,7 +41,7 @@ import {
   triggerTrafficFlashYield,
   compactInPlace,
 } from './rules';
-import { getPixelCarCanvas, getTrafficVehicleCanvas } from './pixelSprites';
+import { getPixelCarCanvas, getPixelCarTireAnchors, getTrafficVehicleCanvas } from './pixelSprites';
 import {
   Project3DIntoFn,
   Projected3D,
@@ -53,6 +53,15 @@ import {
   renderWorldObject3D,
 } from './world3d';
 import { soundFX } from './audio';
+import {
+  ANIME_CLOUD_COUNT,
+  SkyAtmosphereConfig,
+  SkyThemeId,
+  renderAnimeCloudSprite,
+  renderCelestialSprite,
+  renderDynamicSkyAtmosphere,
+  resolveSkyAtmosphere,
+} from './skyArt';
 
 export type GamePhase = 'title' | 'playing' | 'paused' | 'gameover';
 
@@ -81,6 +90,7 @@ interface SceneCanvasProps {
   carCustom?: Partial<CarCustomization>;
   customSpriteUrl?: string;
   roadMode?: RoadSelectionMode;
+  skyMode?: SkyThemeId;
   steerHold?: number; // -1 left, 0 neutral, +1 right from UI buttons or steering wheel
   accelHold?: boolean; // Gas pedal hold from UI button
   brakeHold?: boolean; // Brake pedal hold from UI button
@@ -108,6 +118,10 @@ interface SkidSegment {
   rz: number;
   y: number;
   connected: boolean;
+  widthScale: number;
+  alpha: number;
+  color: string;
+  dirSign: -1 | 1;
 }
 
 interface SmokePuff {
@@ -121,7 +135,8 @@ interface SmokePuff {
   maxRadius: number;
   life: number;
   maxLife: number;
-  tint: 'white' | 'cyan' | 'fire' | 'dark';
+  tint: 'white' | 'cyan' | 'fire' | 'dark' | 'pink' | 'aqua' | 'warm';
+  overCar?: boolean;
 }
 
 interface DebrisChunk {
@@ -180,6 +195,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
   carCustom,
   customSpriteUrl,
   roadMode = 'tour',
+  skyMode = 'auto',
   steerHold = 0,
   accelHold = false,
   brakeHold = false,
@@ -213,6 +229,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
   const roadModeRef = useRef<RoadSelectionMode>(roadMode);
   roadModeRef.current = roadMode;
+
+  const skyModeRef = useRef<SkyThemeId>(skyMode);
+  skyModeRef.current = skyMode;
 
   const steerHoldRef = useRef<number>(steerHold);
   steerHoldRef.current = steerHold;
@@ -278,22 +297,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     if (!rawCtx) return;
     const ctx: CanvasRenderingContext2D = rawCtx;
 
-    // Offscreen cached biome layers (clouds & skyline/horizon backdrop)
+    // Offscreen cached biome layers (4-layer cel-shaded anime clouds, sun/moon disc & skyline backdrop)
     const horizonCanvas = document.createElement('canvas');
     const horizonCtx = horizonCanvas.getContext('2d');
-    const CLOUD_SPECS: [number, number][] = [
-      [68, 22],
-      [78, 24],
-      [96, 20],
-      [60, 18],
-      [64, 18],
-    ];
-    const cloudCanvases = CLOUD_SPECS.map(([cw, ch]) => {
-      const c = document.createElement('canvas');
-      c.width = cw + 12;
-      c.height = ch + 14;
-      return c;
-    });
+    const celestialCanvas = document.createElement('canvas');
+    const cloudCanvases = Array.from({ length: ANIME_CLOUD_COUNT }, () =>
+      document.createElement('canvas')
+    );
 
     let viewW = window.innerWidth;
     let viewH = window.innerHeight;
@@ -301,50 +311,29 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let pxH = 340;
     let cachedSkyGrad: CanvasGradient | null = null;
     let cachedMeadowGrad: CanvasGradient | null = null;
-    let cachedBiomeId: RoadBiomeId | null = null;
+    let cachedSkyKey: string | null = null;
     let cachedHorizonY = Math.round(pxH * 0.35);
 
-    const ensureBiomeLayers = (biome: RoadBiomeConfig) => {
-      if (cachedBiomeId === biome.id && cachedSkyGrad && cachedMeadowGrad) return;
-      cachedBiomeId = biome.id;
+    const ensureBiomeLayers = (biome: RoadBiomeConfig, sky: SkyAtmosphereConfig) => {
+      const nextSkyKey = `${biome.id}:${sky.id}:${pxW}`;
+      if (cachedSkyKey === nextSkyKey && cachedSkyGrad && cachedMeadowGrad) return;
+      cachedSkyKey = nextSkyKey;
       cachedSkyGrad = ctx.createLinearGradient(0, 0, 0, cachedHorizonY + 14);
-      cachedSkyGrad.addColorStop(0.0, biome.skyStops[0]);
-      cachedSkyGrad.addColorStop(0.55, biome.skyStops[1]);
-      cachedSkyGrad.addColorStop(1.0, biome.skyStops[2]);
+      cachedSkyGrad.addColorStop(0.0, sky.skyStops[0]);
+      cachedSkyGrad.addColorStop(0.55, sky.skyStops[1]);
+      cachedSkyGrad.addColorStop(1.0, sky.skyStops[2]);
 
       cachedMeadowGrad = ctx.createLinearGradient(0, cachedHorizonY, 0, pxH);
       cachedMeadowGrad.addColorStop(0.0, biome.valleyStops[0]);
       cachedMeadowGrad.addColorStop(0.35, biome.valleyStops[1]);
       cachedMeadowGrad.addColorStop(1.0, biome.valleyStops[2]);
 
-      // Pre-render biome-tinted clouds into tiny sprite canvases
-      for (let i = 0; i < CLOUD_SPECS.length; i++) {
-        const [cw, ch] = CLOUD_SPECS[i];
-        const cc = cloudCanvases[i];
-        const cctx = cc.getContext('2d');
-        if (!cctx) continue;
-        cctx.clearRect(0, 0, cc.width, cc.height);
-        const x = Math.round(cc.width * 0.5);
-        const y = Math.round(cc.height * 0.55);
-        const r1 = Math.round(ch * 0.48);
-        const r2 = Math.round(ch * 0.62);
-        const r3 = Math.round(ch * 0.42);
-        cctx.fillStyle = biome.cloudShadow;
-        cctx.beginPath();
-        cctx.arc(x - Math.round(cw * 0.25), y + 2, r1, 0, Math.PI * 2);
-        cctx.arc(x, y + 1, r2, 0, Math.PI * 2);
-        cctx.arc(x + Math.round(cw * 0.28), y + 2, r3, 0, Math.PI * 2);
-        cctx.fill();
-        cctx.fillRect(x - Math.round(cw * 0.34), y + 1, Math.round(cw * 0.68), Math.round(ch * 0.35));
-
-        cctx.fillStyle = biome.cloudTop;
-        cctx.beginPath();
-        cctx.arc(x - Math.round(cw * 0.26), y - 1, r1, 0, Math.PI * 2);
-        cctx.arc(x, y - 3, r2, 0, Math.PI * 2);
-        cctx.arc(x + Math.round(cw * 0.27), y - 1, r3, 0, Math.PI * 2);
-        cctx.fill();
-        cctx.fillRect(x - Math.round(cw * 0.34), y - 2, Math.round(cw * 0.68), Math.round(ch * 0.30));
+      // Pre-render sculpted Shinkai-style anime cloud sprites and celestial Sun/Moon disc offscreen
+      const sunRightBias = sky.celestialXRatio >= 0.5;
+      for (let i = 0; i < ANIME_CLOUD_COUNT; i++) {
+        renderAnimeCloudSprite(cloudCanvases[i], i, sky.clouds, sunRightBias);
       }
+      renderCelestialSprite(celestialCanvas, sky);
 
       // Pre-render distant skyline / mesas / mountains onto horizonCanvas (with 160px parallax overscan)
       const overscan = 160;
@@ -357,21 +346,31 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         if (biome.propStyle === 'tower') {
           const bWidths = [18, 24, 16, 28, 20, 22, 16, 26, 18, 22];
           const bHeights = [26, 40, 22, 48, 30, 36, 24, 44, 28, 34];
+          const farTower = sky.id === 'red_moon' ? '#2c0a18' : sky.isNight ? biome.mtnFar : '#334155';
+          const nearTower = sky.id === 'red_moon' ? '#17040c' : sky.isNight ? biome.mtnNear : '#1e293b';
           let bx = 0;
           let b = 0;
           while (bx < hw) {
             const bw = bWidths[b % bWidths.length];
             const bh = bHeights[b % bHeights.length];
             const by = cachedHorizonY - bh + 8;
-            horizonCtx.fillStyle = b % 2 === 0 ? biome.mtnFar : biome.mtnNear;
+            horizonCtx.fillStyle = b % 2 === 0 ? farTower : nearTower;
             horizonCtx.fillRect(bx, by, bw - 2, bh + 6);
-            horizonCtx.fillStyle = b % 3 === 0 ? '#22d3ee' : '#ec4899';
+            horizonCtx.fillStyle = sky.id === 'red_moon' ? '#fb7185' : b % 3 === 0 ? '#22d3ee' : '#ec4899';
             horizonCtx.fillRect(bx, by, bw - 2, 1);
             for (let wy = by + 4; wy < cachedHorizonY + 2; wy += 5) {
               for (let wx = bx + 3; wx < bx + bw - 5; wx += 4) {
                 if ((wx + wy + b) % 3 !== 0) {
                   horizonCtx.fillStyle =
-                    (wx + b) % 4 === 0 ? '#22d3ee' : (wy + b) % 5 === 0 ? '#f472b6' : '#fef08a';
+                    sky.id === 'red_moon'
+                      ? (wx + b) % 4 === 0
+                        ? '#fda4af'
+                        : '#fbbf24'
+                      : (wx + b) % 4 === 0
+                      ? '#22d3ee'
+                      : (wy + b) % 5 === 0
+                      ? '#f472b6'
+                      : '#fef08a';
                   horizonCtx.fillRect(wx, wy, 2, 2);
                 }
               }
@@ -380,7 +379,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             b++;
           }
         } else if (biome.propStyle === 'cactus') {
-          horizonCtx.fillStyle = biome.mtnFar;
+          horizonCtx.fillStyle = sky.mtnFar;
           horizonCtx.beginPath();
           horizonCtx.moveTo(0, hh);
           horizonCtx.lineTo(0, Math.round(cachedHorizonY * 0.72));
@@ -395,7 +394,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           horizonCtx.closePath();
           horizonCtx.fill();
 
-          horizonCtx.fillStyle = biome.mtnNear;
+          horizonCtx.fillStyle = sky.mtnNear;
           horizonCtx.beginPath();
           horizonCtx.moveTo(0, hh);
           horizonCtx.lineTo(Math.round(overscan + pxW * 0.12), Math.round(cachedHorizonY * 0.70));
@@ -408,7 +407,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           horizonCtx.closePath();
           horizonCtx.fill();
         } else {
-          horizonCtx.fillStyle = biome.mtnFar;
+          horizonCtx.fillStyle = sky.mtnFar;
           horizonCtx.beginPath();
           horizonCtx.moveTo(0, hh);
           const ridgePts: [number, number][] = [
@@ -433,7 +432,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           if (biome.id === 'sakura') {
             const peakX = Math.round(overscan + 0.86 * pxW);
             const peakY = Math.round(cachedHorizonY * 0.56);
-            horizonCtx.fillStyle = '#fdf2f8';
+            horizonCtx.fillStyle =
+              sky.id === 'red_moon'
+                ? '#fda4af'
+                : sky.id === 'golden_sunset'
+                ? '#fed7aa'
+                : sky.id === 'aurora_night'
+                ? '#cffafe'
+                : '#fdf2f8';
             horizonCtx.beginPath();
             horizonCtx.moveTo(peakX, peakY);
             horizonCtx.lineTo(peakX + 14, peakY + 11);
@@ -442,7 +448,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             horizonCtx.fill();
           }
 
-          horizonCtx.fillStyle = biome.mtnNear;
+          horizonCtx.fillStyle = sky.mtnNear;
           horizonCtx.beginPath();
           horizonCtx.moveTo(0, hh);
           horizonCtx.lineTo(0, Math.round(cachedHorizonY * 0.84));
@@ -471,10 +477,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       cachedHorizonY = Math.round(pxH * 0.35);
       cachedSkyGrad = null;
       cachedMeadowGrad = null;
-      cachedBiomeId = null;
+      cachedSkyKey = null;
     };
     resize();
     window.addEventListener('resize', resize);
+
+    // Pre-allocated mutable biome config so frame rendering incurs zero object allocations
+    const biome: RoadBiomeConfig = { ...resolveRoadBiome('tour', 0) };
 
     // Preload custom AI sprite if provided
     let customImgEl: HTMLImageElement | null = null;
@@ -553,20 +562,41 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let highBeamTimer = 0;
     let lastBiomeId: RoadBiomeId = resolveRoadBiome(roadModeRef.current, 0).id;
 
-    // Ring buffer for skid marks + bounded pools for particles & reusable 3D render slices
-    const MAX_SKID = 150;
-    const skidMarks: SkidSegment[] = Array.from({ length: MAX_SKID }, () => ({
+    // Ring buffers for rear & front skid marks + bounded pools for particles & reusable 3D render slices
+    const MAX_SKID = 160;
+    const MAX_FRONT_SKID = 80;
+    const makeSkidSlot = (): SkidSegment => ({
       lx: 0,
       lz: 0,
       rx: 0,
       rz: 0,
       y: 0,
       connected: false,
-    }));
+      widthScale: 1,
+      alpha: 0.8,
+      color: '#11141c',
+      dirSign: 1,
+    });
+    const skidMarks: SkidSegment[] = Array.from({ length: MAX_SKID }, makeSkidSlot);
     let skidHead = 0;
     let skidCount = 0;
 
-    const pushSkidMark = (lx: number, lz: number, rx: number, rz: number, y: number, connected: boolean) => {
+    const frontSkidMarks: SkidSegment[] = Array.from({ length: MAX_FRONT_SKID }, makeSkidSlot);
+    let frontSkidHead = 0;
+    let frontSkidCount = 0;
+
+    const pushSkidMark = (
+      lx: number,
+      lz: number,
+      rx: number,
+      rz: number,
+      y: number,
+      connected: boolean,
+      widthScale = 1,
+      alpha = 0.8,
+      color = '#11141c',
+      dirSign: -1 | 1 = 1
+    ) => {
       const idx = (skidHead + skidCount) % MAX_SKID;
       const seg = skidMarks[idx];
       seg.lx = lx;
@@ -575,6 +605,10 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       seg.rz = rz;
       seg.y = y;
       seg.connected = connected;
+      seg.widthScale = widthScale;
+      seg.alpha = alpha;
+      seg.color = color;
+      seg.dirSign = dirSign;
       if (skidCount < MAX_SKID) {
         skidCount++;
       } else {
@@ -582,10 +616,56 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       }
     };
 
+    const pushFrontSkidMark = (
+      lx: number,
+      lz: number,
+      rx: number,
+      rz: number,
+      y: number,
+      connected: boolean,
+      widthScale = 0.85,
+      alpha = 0.7,
+      color = '#11141c',
+      dirSign: -1 | 1 = 1
+    ) => {
+      const idx = (frontSkidHead + frontSkidCount) % MAX_FRONT_SKID;
+      const seg = frontSkidMarks[idx];
+      seg.lx = lx;
+      seg.lz = lz;
+      seg.rx = rx;
+      seg.rz = rz;
+      seg.y = y;
+      seg.connected = connected;
+      seg.widthScale = widthScale;
+      seg.alpha = alpha;
+      seg.color = color;
+      seg.dirSign = dirSign;
+      if (frontSkidCount < MAX_FRONT_SKID) {
+        frontSkidCount++;
+      } else {
+        frontSkidHead = (frontSkidHead + 1) % MAX_FRONT_SKID;
+      }
+    };
+
     const getLastSkidMark = (): SkidSegment | null => {
       if (skidCount === 0) return null;
       return skidMarks[(skidHead + skidCount - 1) % MAX_SKID];
     };
+    const getLastFrontSkidMark = (): SkidSegment | null => {
+      if (frontSkidCount === 0) return null;
+      return frontSkidMarks[(frontSkidHead + frontSkidCount - 1) % MAX_FRONT_SKID];
+    };
+
+    // Per-frame interactive tire state consumed right after camera registers lock in
+    let tireEmitMode: 'none' | 'drift' | 'brake' | 'burnout' | 'scrape' | 'spray' = 'none';
+    let tireSlipIntensity = 0;
+    let tireBrakingNow = false;
+    let tireGassingNow = false;
+    let tireHighSparks = false;
+    const tireWorldA = { x: 0, z: 0 };
+    const tireWorldB = { x: 0, z: 0 };
+    const tireFrontWorldA = { x: 0, z: 0 };
+    const tireFrontWorldB = { x: 0, z: 0 };
 
     const MAX_SMOKE = 95;
     const MAX_DEBRIS = 95;
@@ -799,6 +879,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
       skidHead = 0;
       skidCount = 0;
+      frontSkidHead = 0;
+      frontSkidCount = 0;
+      tireEmitMode = 'none';
+      tireSlipIntensity = 0;
+      tireBrakingNow = false;
+      tireGassingNow = false;
+      tireHighSparks = false;
       smokePuffs.length = 0;
       debrisChunks.length = 0;
       shockwaves.length = 0;
@@ -946,6 +1033,17 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       return true;
     };
 
+    // Closed-form inverse of projectInto onto horizontal road plane y = roadY
+    const unprojectTireToRoad = (sx: number, sy: number, roadY: number, out: { x: number; z: number }) => {
+      const dy = roadY - fCamY;
+      const syNorm = (fHorizonY + fShakeY - sy) / fFovScale;
+      const denom = Math.min(-0.08, syNorm - 0.068);
+      const camZ = Math.max(2.0, Math.min(25.0, dy / denom));
+      const camX = ((sx - pxW * 0.5 - fShakeX) * camZ) / fFovScale;
+      out.x = fCamX + camZ * fFwdX + camX * fRightX;
+      out.z = fCamZ + camZ * fFwdZ + camX * fRightZ;
+    };
+
     function drawQuadPts(
       a: { x: number; y: number },
       b: { x: number; y: number },
@@ -1034,6 +1132,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         resetSimulation();
       }
 
+      tireEmitMode = 'none';
+      tireSlipIntensity = 0;
+      tireBrakingNow = false;
+      tireGassingNow = false;
+      tireHighSparks = false;
+
       if (highBeamTimer > 0) {
         highBeamTimer = Math.max(0, highBeamTimer - dt);
       }
@@ -1052,6 +1156,15 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
       if (phase !== 'playing') {
         soundFX.stopEngineSound();
+        soundFX.updateMusicEffects({
+          phase,
+          speedRatio: 0.7,
+          isDrifting: false,
+          driftFactor: 0,
+          isFever: false,
+          isBraking: false,
+          isNearEdge: false,
+        });
       }
 
       // Title Showcase Cruise along the continuous S-curve viaduct or 2-lane highway!
@@ -1142,7 +1255,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             camHeading += normalizeAngle(roadEval.closestPoint.heading - camHeading) * Math.min(1, 4.5 * dt);
           }
 
-          // Showcase diagonal drift pose (`/` angle) + dual rear tire skid marks & billowing white smoke!
+          // Showcase diagonal drift pose (`/` angle) + exact tire-anchored skid marks & smoke!
           const angleDiff = normalizeAngle(driftState.heading - camHeading);
           const showcaseBias = Math.sin(now * 0.0011) >= -0.3 ? 0.68 : -0.68;
           const targetPose = Math.max(-1, Math.min(1, angleDiff * 2.2 + showcaseBias * 0.55));
@@ -1150,42 +1263,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           activeDir = visualDriftAngle >= 0 ? 'right' : 'left';
           wheelSpinPhase += dt * 16;
 
-          const cosH = Math.cos(driftState.heading);
-          const sinH = Math.sin(driftState.heading);
-          const rightH_X = -sinH;
-          const rightH_Z = cosH;
-          const rearOffset = 1.05;
-          const halfAxle = 0.72;
-          const lx = driftState.x - cosH * rearOffset - rightH_X * halfAxle;
-          const lz = driftState.z - sinH * rearOffset - rightH_Z * halfAxle;
-          const rx = driftState.x - cosH * rearOffset + rightH_X * halfAxle;
-          const rz = driftState.z - sinH * rearOffset + rightH_Z * halfAxle;
-
-          const prevSkid = getLastSkidMark();
-          const connected = !!prevSkid && Math.hypot(lx - prevSkid.lx, lz - prevSkid.lz) < 3.2;
-          if (!prevSkid || Math.hypot(lx - prevSkid.lx, lz - prevSkid.lz) > 0.35) {
-            pushSkidMark(lx, lz, rx, rz, driftState.y + 0.03, connected);
-          }
-
-          if (Math.abs(visualDriftAngle) > 0.25 && Math.random() < 0.72) {
-            for (let w = 0; w < 2; w++) {
-              const wx = w === 0 ? lx : rx;
-              const wz = w === 0 ? lz : rz;
-              const sideSign = w === 0 ? -1 : 1;
-              pushSmokePuff({
-                x: wx + (Math.random() - 0.5) * 0.18,
-                y: driftState.y + 0.12,
-                z: wz + (Math.random() - 0.5) * 0.18,
-                vx: -cosH * 2.4 + rightH_X * sideSign * 0.9 + (Math.random() - 0.5) * 1.1,
-                vy: 0.45 + Math.random() * 0.65,
-                vz: -sinH * 2.4 + rightH_Z * sideSign * 0.9 + (Math.random() - 0.5) * 1.1,
-                radius: 0.26,
-                maxRadius: 0.96,
-                life: 0.45,
-                maxLife: 0.45,
-                tint: 'white',
-              });
-            }
+          if (Math.abs(visualDriftAngle) > 0.22) {
+            tireEmitMode = 'drift';
+            tireSlipIntensity = Math.min(1, Math.abs(visualDriftAngle) * 1.15);
           }
 
           // Extend endless road for continuous title flyover
@@ -1313,13 +1393,23 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           distance += stepDist;
           wheelSpinPhase += stepDist * 0.65;
 
+          const speedRatio = curSpeed / Math.max(12, stats.topSpeed);
           soundFX.updateEngineSound({
             active: true,
-            speedRatio: curSpeed / Math.max(12, stats.topSpeed),
+            speedRatio,
             isGassing: accelInput > 0,
             isBraking: brakeInput > 0,
             isFever,
             soundProfile: currentAppearance.sound,
+          });
+          soundFX.updateMusicEffects({
+            phase: isFalling ? 'gameover' : 'playing',
+            speedRatio,
+            isDrifting: driftState.isDrifting,
+            driftFactor: driftState.driftFactor,
+            isFever,
+            isBraking: brakeInput > 0,
+            isNearEdge: Boolean(wasDrifting && combo >= 3),
           });
 
           // Distance Milestone & Live Mid-Run Rank-Up Dopamine Bursts!
@@ -1602,61 +1692,49 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               }
             }
 
-            // Spawn Dual Tire Skid Marks, Billowing Smoke & High-Combo Wheel Sparks during Drifts or Hard Rail Scrapes
-            if (driftingNow || hardRailScrape) {
-              const cosH = Math.cos(driftState.heading);
-              const sinH = Math.sin(driftState.heading);
-              const rightH_X = -sinH;
-              const rightH_Z = cosH;
-              const rearOffset = 1.05;
-              const halfAxle = 0.72;
+            // Record Interactive Tire State (applied after camera lock-in so marks & smoke match exact pixel tires!)
+            const simSpeedNow = Math.hypot(driftState.vx, driftState.vz);
+            const activeTireId = currentCustom?.tires || 'stock';
+            const isGasInputNow = keyUp || accelHoldRef.current || isFever;
+            const isBrakeInputNow = (keyDown || brakeHoldRef.current) && simSpeedNow > 4.5;
+            const isLaunchBurnout =
+              isGasInputNow &&
+              ((simSpeedNow > 2.5 && simSpeedNow < 13.5) ||
+                (activeTireId === 'drag_slick' && simSpeedNow < 19.5) ||
+                isFever);
+            const isRainMist =
+              activeTireId === 'rain_groove' &&
+              simSpeedNow > 10.5 &&
+              (Math.abs(steerInput) > 0.22 || driftingNow || isBrakeInputNow);
 
-              const lx = driftState.x - cosH * rearOffset - rightH_X * halfAxle;
-              const lz = driftState.z - sinH * rearOffset - rightH_Z * halfAxle;
-              const rx = driftState.x - cosH * rearOffset + rightH_X * halfAxle;
-              const rz = driftState.z - sinH * rearOffset + rightH_Z * halfAxle;
+            tireBrakingNow = isBrakeInputNow;
+            tireGassingNow = isGasInputNow;
+            tireHighSparks = combo >= 3 || isFever;
 
-              const prev = getLastSkidMark();
-              const connected =
-                !!prev && Math.hypot(lx - prev.lx, lz - prev.lz) < 3.2;
-
-              pushSkidMark(lx, lz, rx, rz, driftState.y + 0.03, connected);
-
-              for (let w = 0; w < 2; w++) {
-                const wx = w === 0 ? lx : rx;
-                const wz = w === 0 ? lz : rz;
-                const sideSign = w === 0 ? -1 : 1;
-                pushSmokePuff({
-                  x: wx + (Math.random() - 0.5) * 0.18,
-                  y: driftState.y + 0.12,
-                  z: wz + (Math.random() - 0.5) * 0.18,
-                  vx: -cosH * 2.6 + rightH_X * sideSign * 1.1 + (Math.random() - 0.5) * 1.2,
-                  vy: 0.5 + Math.random() * 0.75,
-                  vz: -sinH * 2.6 + rightH_Z * sideSign * 1.1 + (Math.random() - 0.5) * 1.2,
-                  radius: 0.22,
-                  maxRadius: 0.78 + driftState.driftFactor * 0.28,
-                  life: 0.40,
-                  maxLife: 0.40,
-                  tint: isFever ? 'cyan' : 'white',
-                });
-
-                if ((combo >= 3 || isFever) && Math.random() < 0.35) {
-                  pushDebrisChunk({
-                    x: wx,
-                    y: driftState.y + 0.14,
-                    z: wz,
-                    vx: -cosH * 3.5 + (Math.random() - 0.5) * 2.8,
-                    vy: 1.4 + Math.random() * 2.2,
-                    vz: -sinH * 3.5 + (Math.random() - 0.5) * 2.8,
-                    size: 0.14 + Math.random() * 0.12,
-                    gravity: 16,
-                    rot: 0,
-                    vRot: 0,
-                    life: 0.22,
-                    color: isFever ? '#22d3ee' : '#fbbf24',
-                  });
-                }
-              }
+            if (driftingNow || hardRailScrape || isBrakeInputNow || isLaunchBurnout || isRainMist) {
+              tireEmitMode = hardRailScrape
+                ? 'scrape'
+                : isBrakeInputNow
+                ? 'brake'
+                : driftingNow
+                ? 'drift'
+                : isLaunchBurnout
+                ? 'burnout'
+                : 'spray';
+              const baseSlip = Math.max(
+                driftState.driftFactor,
+                Math.min(1, Math.abs(visualDriftAngle) * 1.1)
+              );
+              tireSlipIntensity = Math.min(
+                1,
+                Math.max(
+                  baseSlip,
+                  isBrakeInputNow ? 0.75 : 0,
+                  isLaunchBurnout ? 0.58 : 0,
+                  hardRailScrape ? 0.8 : 0,
+                  isRainMist ? 0.48 : 0
+                )
+              );
             }
 
             // Check Coins, Nitro Star Gems & Boost Pads
@@ -2320,8 +2398,11 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       // ============================================================
       // 5. RENDER PIXEL-ART WORLD DIRECTLY ONTO GPU-SCALED CANVAS
       // ============================================================
-      const biome = resolveRoadBiome(roadModeRef.current, distance);
-      ensureBiomeLayers(biome);
+      const rawBiome = resolveRoadBiome(roadModeRef.current, distance);
+      const sky = resolveSkyAtmosphere(skyModeRef.current, rawBiome);
+      Object.assign(biome, rawBiome);
+      biome.isNight = sky.isNight;
+      ensureBiomeLayers(biome, sky);
 
       cameraTrauma = Math.max(0, cameraTrauma - dt * 2.1);
       if (screenFlashAlpha > 0) screenFlashAlpha = Math.max(0, screenFlashAlpha - dt * 2.4);
@@ -2370,56 +2451,278 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       fShakeX = shakeX;
       fShakeY = shakeY;
 
-      // A. Biome Sky Gradient + Batched Night Stars + Sun/Moon Disc
-      ctx.fillStyle = cachedSkyGrad || biome.skyStops[1];
-      ctx.fillRect(0, 0, pxW, horizonY + 14);
+      // Exact Tire-Locked Skid Marks, Lockup Streaks, Smoke & Sparks anchored to rendered car tires!
+      if (
+        !isFalling &&
+        !isTrafficCrash &&
+        tireEmitMode !== 'none' &&
+        projectInto(driftState.x, driftState.y, driftState.z, pScratchTmp)
+      ) {
+        const carDrawW = Math.round(5.4 * pScratchTmp.scale);
+        const carDrawH = Math.round(carDrawW * (108 / 144));
+        const drawCx = Math.round(pScratchTmp.x);
+        const drawCy = Math.round(pScratchTmp.y - carDrawH * 0.34);
+        const spriteLeft = Math.round(drawCx - carDrawW * 0.5);
+        const spriteTop = Math.round(drawCy - carDrawH * 0.5);
 
-      if (biome.isNight) {
-        ctx.fillStyle = '#ffffff';
-        for (let st = 0; st < 28; st++) {
-          if (st % 4 === 0) continue;
-          const sx = Math.round(((st * 67 + 19) % pxW));
-          const sy = Math.round(((st * 29 + 7) % (horizonY - 12)));
-          if (Math.sin(now * 0.005 + st * 1.3) > 0.25) {
-            ctx.fillRect(sx, sy, st % 5 === 0 ? 2 : 1, st % 5 === 0 ? 2 : 1);
+        const anchors = getPixelCarTireAnchors(currentCar, visualDriftAngle, currentCustom);
+        const tireY = driftState.y + 0.025;
+
+        const rlxScr = spriteLeft + anchors.rearLeft.u * carDrawW;
+        const rlyScr = spriteTop + anchors.rearLeft.v * carDrawH;
+        const rrxScr = spriteLeft + anchors.rearRight.u * carDrawW;
+        const rryScr = spriteTop + anchors.rearRight.v * carDrawH;
+
+        unprojectTireToRoad(rlxScr, rlyScr, tireY, tireWorldA);
+        unprojectTireToRoad(rrxScr, rryScr, tireY, tireWorldB);
+
+        const tireId = currentCustom?.tires || 'stock';
+        const isSprayOnly = tireEmitMode === 'spray';
+        const markColor =
+          tireId === 'drag_slick'
+            ? '#090b10'
+            : tireId === 'rain_groove'
+            ? '#0c1624'
+            : tireId === 'semi_slick'
+            ? '#0d1017'
+            : '#11141c';
+        const markWidth =
+          anchors.tireWidthScale *
+          (tireBrakingNow ? 1.16 : tireEmitMode === 'burnout' ? 1.12 : 1.0);
+        const markAlpha = isSprayOnly
+          ? 0.42
+          : tireBrakingNow
+          ? 0.88
+          : Math.min(0.90, 0.54 + tireSlipIntensity * 0.36);
+
+        const prevSkid = getLastSkidMark();
+        const moveDist = prevSkid
+          ? Math.hypot(tireWorldA.x - prevSkid.lx, tireWorldA.z - prevSkid.lz)
+          : 99;
+        if (moveDist > 0.24) {
+          const connected =
+            !!prevSkid &&
+            prevSkid.dirSign === anchors.dirSign &&
+            moveDist < 3.2 &&
+            Math.hypot(tireWorldB.x - prevSkid.rx, tireWorldB.z - prevSkid.rz) < 3.2;
+          pushSkidMark(
+            tireWorldA.x,
+            tireWorldA.z,
+            tireWorldB.x,
+            tireWorldB.z,
+            tireY,
+            connected,
+            markWidth,
+            markAlpha,
+            markColor,
+            anchors.dirSign
+          );
+        }
+
+        // Interactive Front Tire Lockup / Deep Scrub Tracks on hard Braking or extreme drift lock
+        if (tireBrakingNow || (tireEmitMode === 'drift' && tireSlipIntensity > 0.72)) {
+          const flxScr = spriteLeft + anchors.frontLeft.u * carDrawW;
+          const flyScr = spriteTop + anchors.frontLeft.v * carDrawH;
+          const frxScr = spriteLeft + anchors.frontRight.u * carDrawW;
+          const fryScr = spriteTop + anchors.frontRight.v * carDrawH;
+          unprojectTireToRoad(flxScr, flyScr, tireY, tireFrontWorldA);
+          unprojectTireToRoad(frxScr, fryScr, tireY, tireFrontWorldB);
+
+          const prevFront = getLastFrontSkidMark();
+          const fMoveDist = prevFront
+            ? Math.hypot(tireFrontWorldA.x - prevFront.lx, tireFrontWorldA.z - prevFront.lz)
+            : 99;
+          if (fMoveDist > 0.28) {
+            const fConnected =
+              !!prevFront &&
+              prevFront.dirSign === anchors.dirSign &&
+              fMoveDist < 3.0 &&
+              Math.hypot(tireFrontWorldB.x - prevFront.rx, tireFrontWorldB.z - prevFront.rz) < 3.0;
+            pushFrontSkidMark(
+              tireFrontWorldA.x,
+              tireFrontWorldA.z,
+              tireFrontWorldB.x,
+              tireFrontWorldB.z,
+              tireY,
+              fConnected,
+              tireBrakingNow ? 0.92 : 0.74,
+              tireBrakingNow ? 0.74 : 0.48,
+              markColor,
+              anchors.dirSign
+            );
           }
         }
-        ctx.fillStyle = '#22d3ee';
-        for (let st = 0; st < 28; st += 4) {
-          const sx = Math.round(((st * 67 + 19) % pxW));
-          const sy = Math.round(((st * 29 + 7) % (horizonY - 12)));
-          ctx.fillRect(sx, sy, st % 5 === 0 ? 2 : 1, st % 5 === 0 ? 2 : 1);
+
+        // Interactive Tire Smoke & Compound Plumes ejected along wheel scrub vector
+        const cosH = Math.cos(driftState.heading);
+        const sinH = Math.sin(driftState.heading);
+        const rightH_X = -sinH;
+        const rightH_Z = cosH;
+
+        const smokeChance =
+          tireId === 'drift_spec'
+            ? 0.95
+            : tireEmitMode === 'burnout'
+            ? 0.65
+            : Math.min(0.92, 0.45 + tireSlipIntensity * 0.55);
+
+        if (Math.random() < smokeChance) {
+          const smokeTint: SmokePuff['tint'] = isFever
+            ? 'cyan'
+            : tireId === 'rain_groove'
+            ? 'aqua'
+            : tireId === 'drift_spec'
+            ? 'pink'
+            : tireId === 'semi_slick' || tireId === 'drag_slick'
+            ? 'warm'
+            : 'white';
+          const compoundScale =
+            tireId === 'drift_spec'
+              ? 1.24
+              : tireId === 'drag_slick'
+              ? 1.18
+              : tireId === 'rain_groove'
+              ? 0.92
+              : 1.0;
+
+          for (let w = 0; w < 2; w++) {
+            const isLeft = w === 0;
+            const anchor = isLeft ? anchors.rearLeft : anchors.rearRight;
+            const wx = isLeft ? tireWorldA.x : tireWorldB.x;
+            const wz = isLeft ? tireWorldA.z : tireWorldB.z;
+            const sideSign = isLeft ? -1 : 1;
+            const lateralPush = (0.75 + tireSlipIntensity * 0.95) * sideSign;
+            const backPush = tireGassingNow ? 3.2 : 2.3;
+
+            // Main billowing smoke trail directly from tire tread contact
+            pushSmokePuff({
+              x: wx + (Math.random() - 0.5) * 0.12,
+              y: driftState.y + 0.08,
+              z: wz + (Math.random() - 0.5) * 0.12,
+              vx: -cosH * backPush + rightH_X * lateralPush + (Math.random() - 0.5) * 0.85,
+              vy: 0.36 + tireSlipIntensity * 0.45 + Math.random() * 0.42,
+              vz: -sinH * backPush + rightH_Z * lateralPush + (Math.random() - 0.5) * 0.85,
+              radius: (0.18 + tireSlipIntensity * 0.07) * compoundScale,
+              maxRadius: (0.68 + tireSlipIntensity * 0.36) * compoundScale,
+              life: tireId === 'drift_spec' ? 0.52 : 0.42,
+              maxLife: tireId === 'drift_spec' ? 0.52 : 0.42,
+              tint: smokeTint,
+            });
+
+            // Foreground wheel-hugging wisp wrapping the camera-facing tire lip
+            if (anchor.isCameraFacing && Math.random() < 0.45) {
+              pushSmokePuff({
+                x: wx + rightH_X * sideSign * 0.08,
+                y: driftState.y + 0.14,
+                z: wz + rightH_Z * sideSign * 0.08,
+                vx: -cosH * (backPush * 0.72) + rightH_X * lateralPush * 0.65,
+                vy: 0.28 + Math.random() * 0.32,
+                vz: -sinH * (backPush * 0.72) + rightH_Z * lateralPush * 0.65,
+                radius: 0.15 * compoundScale,
+                maxRadius: 0.46 * compoundScale,
+                life: 0.28,
+                maxLife: 0.28,
+                tint: smokeTint,
+                overCar: true,
+              });
+            }
+
+            // High-combo, Fever, or hot Semi-Slick curb sparks directly off loaded rear tire
+            if (
+              (tireHighSparks || tireEmitMode === 'scrape') &&
+              (anchor.isCameraFacing || tireEmitMode === 'scrape') &&
+              Math.random() < 0.35
+            ) {
+              pushDebrisChunk({
+                x: wx,
+                y: driftState.y + 0.10,
+                z: wz,
+                vx: -cosH * 3.8 + rightH_X * sideSign * 1.4 + (Math.random() - 0.5) * 2.2,
+                vy: 1.3 + Math.random() * 2.2,
+                vz: -sinH * 3.8 + rightH_Z * sideSign * 1.4 + (Math.random() - 0.5) * 2.2,
+                size: 0.14 + Math.random() * 0.11,
+                gravity: 16,
+                rot: 0,
+                vRot: 0,
+                life: 0.22,
+                color: isFever ? '#22d3ee' : '#fbbf24',
+              });
+            }
+          }
+
+          // Front brake-lockup or counter-steer scrub smoke off front outer tire
+          if ((tireBrakingNow || tireSlipIntensity > 0.76) && Math.random() < 0.45) {
+            const frontTarget = anchors.frontRight.isCameraFacing
+              ? anchors.frontRight
+              : anchors.frontLeft;
+            unprojectTireToRoad(
+              spriteLeft + frontTarget.u * carDrawW,
+              spriteTop + frontTarget.v * carDrawH,
+              tireY,
+              tireFrontWorldA
+            );
+            pushSmokePuff({
+              x: tireFrontWorldA.x,
+              y: driftState.y + 0.08,
+              z: tireFrontWorldA.z,
+              vx: -cosH * 2.0 + (Math.random() - 0.5) * 0.9,
+              vy: 0.32 + Math.random() * 0.35,
+              vz: -sinH * 2.0 + (Math.random() - 0.5) * 0.9,
+              radius: 0.14,
+              maxRadius: 0.44,
+              life: 0.26,
+              maxLife: 0.26,
+              tint: smokeTint,
+              overCar: frontTarget.isCameraFacing,
+            });
+          }
         }
       }
 
-      const sunX = Math.round(pxW * 0.74 - (camHeading + Math.PI / 2) * 18);
-      const sunY = Math.round(horizonY * (biome.id === 'canyon' ? 0.78 : 0.65));
-      ctx.fillStyle = biome.sunGlow;
-      ctx.beginPath();
-      ctx.arc(sunX, sunY, biome.id === 'canyon' ? 21 : 17, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = biome.sunColor;
-      ctx.beginPath();
-      ctx.arc(sunX, sunY, biome.id === 'canyon' ? 14 : 11, 0, Math.PI * 2);
-      ctx.fill();
-      if (biome.isNight) {
-        ctx.fillStyle = biome.skyStops[0];
-        ctx.beginPath();
-        ctx.arc(sunX + 4, sunY - 2, 9, 0, Math.PI * 2);
-        ctx.fill();
-      }
+      // A. Anime Sky Gradient, Dynamic Stars/Aurora/God-Rays & Offscreen Celestial Sun/Moon
+      ctx.fillStyle = cachedSkyGrad || sky.skyStops[1];
+      ctx.fillRect(0, 0, pxW, horizonY + 14);
 
-      // B. Pre-Rendered Biome Cloud Sprites
+      const sunX = Math.round(pxW * sky.celestialXRatio - (camHeading + Math.PI / 2) * 18);
+      const sunY = Math.round(horizonY * sky.celestialYRatio);
+
+      renderDynamicSkyAtmosphere({
+        ctx,
+        pxW,
+        horizonY,
+        nowMs: now,
+        camHeading,
+        sky,
+        sunScreenX: sunX,
+        sunScreenY: sunY,
+      });
+
+      ctx.drawImage(
+        celestialCanvas,
+        Math.round(sunX - celestialCanvas.width * 0.5),
+        Math.round(sunY - celestialCanvas.height * 0.5)
+      );
+
+      // B. Pre-Rendered 4-Layer Cel-Shaded Shinkai Anime Clouds
       const cloudDrift = (camHeading + Math.PI / 2) * 32;
-      const drawCloudSprite = (idx: number, cx: number, cy: number) => {
+      const drawAnimeCloud = (
+        idx: number,
+        baseFrac: number,
+        yFrac: number,
+        parallax: number,
+        breezePxPerMs: number
+      ) => {
         const cc = cloudCanvases[idx];
-        ctx.drawImage(cc, Math.round(cx - cc.width * 0.5), Math.round(cy - cc.height * 0.55));
+        const span = pxW + cc.width + 24;
+        const rawX = baseFrac * pxW + now * breezePxPerMs - cloudDrift * parallax;
+        const wrappedX = (((rawX + cc.width * 0.5 + 12) % span) + span) % span - cc.width - 12;
+        ctx.drawImage(cc, Math.round(wrappedX), Math.round(horizonY * yFrac - cc.height * 0.65));
       };
-      drawCloudSprite(0, pxW * 0.18 - cloudDrift * 0.4, horizonY * 0.28);
-      drawCloudSprite(1, pxW * 0.80 - cloudDrift * 0.4, horizonY * 0.20);
-      drawCloudSprite(2, pxW * 0.50 - cloudDrift * 0.25, horizonY * 0.62);
-      drawCloudSprite(3, pxW * 0.10 - cloudDrift * 0.3, horizonY * 0.78);
-      drawCloudSprite(4, pxW * 0.90 - cloudDrift * 0.3, horizonY * 0.75);
+      drawAnimeCloud(4, 0.20, 0.30, 0.24, 0.0022);
+      drawAnimeCloud(3, 0.56, 0.25, 0.28, 0.0031);
+      drawAnimeCloud(0, 0.14, 0.64, 0.42, 0.0018);
+      drawAnimeCloud(1, 0.88, 0.58, 0.44, 0.0015);
+      drawAnimeCloud(2, 0.46, 0.78, 0.32, 0.0026);
 
       // C. Offscreen Cached Horizon Skyline / Mesas / Alpine Peaks
       const mtnShift = (camHeading + Math.PI / 2) * 44;
@@ -2508,6 +2811,16 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           pxW,
           projectInto,
         });
+      }
+
+      if (sky.isNight && (rawBiome.id !== 'neon' || sky.id === 'red_moon')) {
+        ctx.fillStyle =
+          sky.id === 'red_moon'
+            ? rawBiome.id === 'neon'
+              ? 'rgba(56, 8, 22, 0.24)'
+              : 'rgba(38, 6, 18, 0.44)'
+            : 'rgba(6, 12, 34, 0.44)';
+        ctx.fillRect(0, horizonY, pxW, pxH - horizonY);
       }
 
       // F. Continuous Elevated Viaduct Overpass (Painter's Algorithm: Far to Near with Distance LOD & Batched Strokes)
@@ -2823,34 +3136,42 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         renderBridgeTrussArch3D({ ctx, far, biome, projectInto });
       }
 
-      // G. Persistent Dark Dual Tire Skid Marks painted on the continuous road (Ring Buffer!)
-      ctx.strokeStyle = 'rgba(17, 20, 28, 0.80)';
-      for (let k = 1; k < skidCount; k++) {
-        const prev = skidMarks[(skidHead + k - 1) % MAX_SKID];
-        const curr = skidMarks[(skidHead + k) % MAX_SKID];
-        if (!curr.connected) continue;
+      // G. Persistent Dual Tire Skid Marks & Brake Lockup Streaks anchored to Car Tires (Ring Buffers!)
+      const renderSkidRing = (buf: SkidSegment[], head: number, count: number, cap: number) => {
+        for (let k = 1; k < count; k++) {
+          const prev = buf[(head + k - 1) % cap];
+          const curr = buf[(head + k) % cap];
+          if (!curr.connected) continue;
 
-        if (
-          projectInto(prev.lx, prev.y, prev.lz, pScratchTmp) &&
-          projectInto(curr.lx, curr.y, curr.lz, pScratchTmp2)
-        ) {
-          ctx.lineWidth = Math.max(2, Math.round(0.28 * pScratchTmp2.scale));
-          ctx.beginPath();
-          ctx.moveTo(Math.round(pScratchTmp.x), Math.round(pScratchTmp.y));
-          ctx.lineTo(Math.round(pScratchTmp2.x), Math.round(pScratchTmp2.y));
-          ctx.stroke();
+          ctx.globalAlpha = curr.alpha;
+          ctx.strokeStyle = curr.color;
+          if (
+            projectInto(prev.lx, prev.y, prev.lz, pScratchTmp) &&
+            projectInto(curr.lx, curr.y, curr.lz, pScratchTmp2)
+          ) {
+            ctx.lineWidth = Math.max(2, Math.round(0.25 * curr.widthScale * pScratchTmp2.scale));
+            ctx.beginPath();
+            ctx.moveTo(Math.round(pScratchTmp.x), Math.round(pScratchTmp.y));
+            ctx.lineTo(Math.round(pScratchTmp2.x), Math.round(pScratchTmp2.y));
+            ctx.stroke();
+          }
+          if (
+            projectInto(prev.rx, prev.y, prev.rz, pScratchTmp) &&
+            projectInto(curr.rx, curr.y, curr.rz, pScratchTmp2)
+          ) {
+            ctx.lineWidth = Math.max(2, Math.round(0.25 * curr.widthScale * pScratchTmp2.scale));
+            ctx.beginPath();
+            ctx.moveTo(Math.round(pScratchTmp.x), Math.round(pScratchTmp.y));
+            ctx.lineTo(Math.round(pScratchTmp2.x), Math.round(pScratchTmp2.y));
+            ctx.stroke();
+          }
         }
-        if (
-          projectInto(prev.rx, prev.y, prev.rz, pScratchTmp) &&
-          projectInto(curr.rx, curr.y, curr.rz, pScratchTmp2)
-        ) {
-          ctx.lineWidth = Math.max(2, Math.round(0.28 * pScratchTmp2.scale));
-          ctx.beginPath();
-          ctx.moveTo(Math.round(pScratchTmp.x), Math.round(pScratchTmp.y));
-          ctx.lineTo(Math.round(pScratchTmp2.x), Math.round(pScratchTmp2.y));
-          ctx.stroke();
-        }
+      };
+      renderSkidRing(skidMarks, skidHead, skidCount, MAX_SKID);
+      if (frontSkidCount > 1) {
+        renderSkidRing(frontSkidMarks, frontSkidHead, frontSkidCount, MAX_FRONT_SKID);
       }
+      ctx.globalAlpha = 1.0;
 
       // H. Spinning Gold Nitro Coins & Teal/Gold Nitro Star Gems along the S-Curve
       for (let i = track.length - 1; i >= 0; i--) {
@@ -2903,31 +3224,25 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         }
       }
 
-      // I. Billowing Layered Pixel Tire Smoke & Crash Plumes (O(1) swap-remove)
-      for (let i = smokePuffs.length - 1; i >= 0; i--) {
-        const p = smokePuffs[i];
-        p.life -= dt;
-        if (p.life <= 0) {
-          smokePuffs[i] = smokePuffs[smokePuffs.length - 1];
-          smokePuffs.pop();
-          continue;
-        }
-        p.x += p.vx * dt;
-        p.y += p.vy * dt;
-        p.z += p.vz * dt;
-        if (!projectInto(p.x, p.y, p.z, pScratchTmp)) continue;
-
+      const drawSmokePuff = (p: SmokePuff) => {
+        if (!projectInto(p.x, p.y, p.z, pScratchTmp)) return;
         const age = 1 - p.life / p.maxLife;
         const curRad = p.radius + (p.maxRadius - p.radius) * age;
         const pr = Math.max(2, Math.round(curRad * pScratchTmp.scale));
         const sx = Math.round(pScratchTmp.x);
         const sy = Math.round(pScratchTmp.y);
-        const alpha = Math.min(0.82, (p.life / p.maxLife) * 0.94);
+        const alpha = Math.min(0.84, (p.life / p.maxLife) * 0.94);
 
         ctx.globalAlpha = alpha;
         ctx.fillStyle =
           p.tint === 'cyan'
             ? '#0891b2'
+            : p.tint === 'aqua'
+            ? '#0e7490'
+            : p.tint === 'pink'
+            ? '#db2777'
+            : p.tint === 'warm'
+            ? '#94a3b8'
             : p.tint === 'fire'
             ? '#dc2626'
             : p.tint === 'dark'
@@ -2941,6 +3256,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         ctx.fillStyle =
           p.tint === 'cyan'
             ? '#cffafe'
+            : p.tint === 'aqua'
+            ? '#a5f3fc'
+            : p.tint === 'pink'
+            ? '#fbcfe8'
+            : p.tint === 'warm'
+            ? '#fef3c7'
             : p.tint === 'fire'
             ? '#fef08a'
             : p.tint === 'dark'
@@ -2950,6 +3271,23 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         ctx.arc(sx - Math.round(pr * 0.12), sy - Math.round(pr * 0.18), Math.max(1, Math.round(pr * 0.78)), 0, Math.PI * 2);
         ctx.arc(sx + Math.round(pr * 0.35), sy - Math.round(pr * 0.05), Math.max(1, Math.round(pr * 0.56)), 0, Math.PI * 2);
         ctx.fill();
+      };
+
+      // I. Billowing Layered Pixel Tire Smoke & Crash Plumes (behind vehicles, O(1) swap-remove)
+      for (let i = smokePuffs.length - 1; i >= 0; i--) {
+        const p = smokePuffs[i];
+        p.life -= dt;
+        if (p.life <= 0) {
+          smokePuffs[i] = smokePuffs[smokePuffs.length - 1];
+          smokePuffs.pop();
+          continue;
+        }
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.z += p.vz * dt;
+        if (!p.overCar) {
+          drawSmokePuff(p);
+        }
       }
       ctx.globalAlpha = 1.0;
 
@@ -3159,6 +3497,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           }
         }
       }
+
+      // J2. Foreground Wheel-Hugging Tire Smoke Wisps curling off camera-facing tires
+      for (let i = 0; i < smokePuffs.length; i++) {
+        if (smokePuffs[i].overCar) {
+          drawSmokePuff(smokePuffs[i]);
+        }
+      }
+      ctx.globalAlpha = 1.0;
 
       // K. Shattered Guardrail Beams, Wreckage Panels & Spark Chunks (O(1) swap-remove)
       for (let i = debrisChunks.length - 1; i >= 0; i--) {

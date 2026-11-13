@@ -1,5 +1,8 @@
 import React, { useState } from 'react';
-import { CarSpec } from '../game/rules';
+import { CarSpec, ROAD_BIOME_ORDER, RoadBiomeId } from '../game/rules';
+import { AI_SFX_SLOTS, AiSfxSlotId, BIOME_MUSIC_PRESETS } from '../game/musicConfig';
+import { soundFX } from '../game/audio';
+import { saveAiAudioClip } from '../lib/audioCache';
 
 interface AiPitStudioModalProps {
   isOpen: boolean;
@@ -9,7 +12,7 @@ interface AiPitStudioModalProps {
   lastScore: number;
   maxCombo: number;
   onApplyCustomSprite: (dataUrl: string) => void;
-  onSetCustomBgm: (audioUrl: string, title: string) => void;
+  onSetCustomBgm: (audioUrl: string, title: string, trackId?: string) => void;
 }
 
 type StudioTab = 'coach' | 'tts' | 'music' | 'livery' | 'poster' | 'video';
@@ -147,9 +150,11 @@ export const AiPitStudioModal: React.FC<AiPitStudioModalProps> = ({
     }
   }
 
-  async function runMusic() {
+  async function runMusic(presetId: RoadBiomeId | 'custom' = 'custom') {
     setBusy(true);
     setErrorMsg('');
+    const promptToSend =
+      presetId === 'custom' ? musicPrompt : BIOME_MUSIC_PRESETS[presetId].prompt;
     setStatusMsg(
       `Generating drift track with ${
         musicDuration === 'full' ? 'lyria-3-pro-preview' : 'lyria-3-clip-preview'
@@ -160,18 +165,71 @@ export const AiPitStudioModal: React.FC<AiPitStudioModalProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt: musicPrompt,
+          presetId,
+          prompt: presetId === 'custom' ? promptToSend : '',
           durationMode: musicDuration,
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Music generation failed');
-      setMusicAudioUrl(data.audioDataUrl);
-      setMusicNotes(data.lyrics || 'Instrumental Drift Track Ready');
-      onSetCustomBgm(data.audioDataUrl, `${data.modelUsed} Drift Track`);
+      const sourceUrl = data.audioDataUrl || data.audioUrl;
+      const trackTitle =
+        data.title ||
+        (presetId !== 'custom'
+          ? BIOME_MUSIC_PRESETS[presetId].title
+          : `${data.modelUsed} Drift Track`);
+
+      await saveAiAudioClip({
+        key: `track:${presetId}`,
+        kind: 'track',
+        slotId: presetId,
+        title: trackTitle,
+        modelUsed: data.modelUsed || 'lyria-3-clip-preview',
+        lyrics: data.lyrics || '',
+        audioDataUrl: sourceUrl,
+        updatedAt: Date.now(),
+      });
+
+      setMusicAudioUrl(sourceUrl);
+      setMusicNotes(data.lyrics || `${trackTitle} · Web Audio DSP Active`);
+      onSetCustomBgm(sourceUrl, trackTitle, presetId);
       setStatusMsg('');
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Music generation failed');
+      setStatusMsg('');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runAiSfx(slotId: AiSfxSlotId) {
+    setBusy(true);
+    setErrorMsg('');
+    setStatusMsg(`Generating AI SFX stinger (${slotId}) with lyria-3-clip-preview...`);
+    try {
+      const res = await fetch('/api/ai/sfx', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slotId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'AI SFX generation failed');
+      const sourceUrl = data.audioDataUrl || data.audioUrl;
+      await saveAiAudioClip({
+        key: `sfx:${slotId}`,
+        kind: 'sfx',
+        slotId,
+        title: data.label || slotId,
+        modelUsed: data.modelUsed || 'lyria-3-clip-preview',
+        audioDataUrl: sourceUrl,
+        updatedAt: Date.now(),
+      });
+      soundFX.setAiSfxEnabled(true);
+      await soundFX.loadAiSfxClip(slotId, sourceUrl);
+      await soundFX.previewAiSfx(slotId);
+      setStatusMsg('');
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'AI SFX generation failed');
       setStatusMsg('');
     } finally {
       setBusy(false);
@@ -300,7 +358,7 @@ export const AiPitStudioModal: React.FC<AiPitStudioModalProps> = ({
             [
               ['coach', '1. AI Engineer'],
               ['tts', '2. Voice TTS'],
-              ['music', '3. Lyria Music'],
+              ['music', '3. Lyria Music & FX'],
               ['livery', '4. Sprite Edit'],
               ['poster', '5. Pro 1K/2K/4K'],
               ['video', '6. Omni Video'],
@@ -441,10 +499,10 @@ export const AiPitStudioModal: React.FC<AiPitStudioModalProps> = ({
           </div>
         )}
 
-        {/* TAB 3: Generate Music (lyria-3-clip-preview / lyria-3-pro-preview) */}
+        {/* TAB 3: Generate Music & AI SFX (lyria-3-clip-preview / lyria-3-pro-preview) */}
         {activeTab === 'music' && (
           <div className="space-y-4">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-xs text-slate-400">Select Lyria Music Engine:</span>
               <div className="flex gap-2">
                 <button
@@ -472,6 +530,27 @@ export const AiPitStudioModal: React.FC<AiPitStudioModalProps> = ({
               </div>
             </div>
 
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {ROAD_BIOME_ORDER.map((bId) => {
+                const preset = BIOME_MUSIC_PRESETS[bId];
+                return (
+                  <button
+                    key={bId}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      setMusicPrompt(preset.prompt);
+                      runMusic(bId);
+                    }}
+                    className="p-2.5 rounded-xl bg-slate-950 hover:bg-slate-900 border border-slate-800 text-left transition-colors disabled:opacity-50"
+                  >
+                    <div className="text-xs font-bold text-white truncate">{preset.title}</div>
+                    <div className="text-[10px] font-mono text-cyan-400">{preset.genreTag}</div>
+                  </button>
+                );
+              })}
+            </div>
+
             <div>
               <label className="block text-xs text-slate-300 mb-1.5" htmlFor="music-prompt-input">
                 Drift Soundtrack Prompt
@@ -488,16 +567,35 @@ export const AiPitStudioModal: React.FC<AiPitStudioModalProps> = ({
             <button
               type="button"
               disabled={busy}
-              onClick={runMusic}
+              onClick={() => runMusic('custom')}
               className="min-h-[44px] px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-sm font-bold transition-colors whitespace-nowrap"
             >
               Generate Custom Drift Soundtrack
             </button>
 
+            <div className="p-3.5 rounded-xl border border-slate-800 bg-slate-950 space-y-2">
+              <div className="text-xs font-mono font-bold text-cyan-300">
+                AI SOUND EFFECTS STINGERS (PEAK-SLICED LYRIA FX)
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {AI_SFX_SLOTS.map((slot) => (
+                  <button
+                    key={slot.id}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => runAiSfx(slot.id)}
+                    className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-semibold text-slate-200 disabled:opacity-50"
+                  >
+                    Generate {slot.shortTag} FX
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {musicAudioUrl && (
               <div className="p-4 rounded-xl border border-slate-800 bg-slate-950 space-y-2">
                 <div className="text-xs text-emerald-400 font-semibold">
-                  Soundtrack Ready & Linked to Game Audio Deck
+                  Soundtrack Ready &amp; Active in Web Audio DSP Deck
                 </div>
                 {musicNotes && <p className="text-xs text-slate-400">{musicNotes}</p>}
                 <audio controls src={musicAudioUrl} className="w-full" />

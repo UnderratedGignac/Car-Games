@@ -1,9 +1,14 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
+import fs from 'fs';
+import crypto from 'crypto';
 import * as dotenv from 'dotenv';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { requireAuth, AuthRequest } from './src/middleware/auth.ts';
+import { AI_SFX_SLOT_MAP, BIOME_MUSIC_PRESETS } from './src/game/musicConfig.ts';
+import type { AiSfxSlotId } from './src/game/musicConfig.ts';
+import type { RoadBiomeId } from './src/game/rules.ts';
 import {
   getOrCreateUser,
   updateUserGarage,
@@ -23,11 +28,98 @@ const ai = new GoogleGenAI({
   },
 });
 
+const AI_AUDIO_ROOT = path.join(process.cwd(), 'public', 'ai-audio');
+const AI_TRACKS_DIR = path.join(AI_AUDIO_ROOT, 'tracks');
+const AI_SFX_DIR = path.join(AI_AUDIO_ROOT, 'sfx');
+
+function ensureAiAudioDirs() {
+  fs.mkdirSync(AI_TRACKS_DIR, { recursive: true });
+  fs.mkdirSync(AI_SFX_DIR, { recursive: true });
+}
+
+function getExtFromMime(mimeType: string): string {
+  if (mimeType.includes('wav')) return 'wav';
+  if (mimeType.includes('ogg')) return 'ogg';
+  return 'mp3';
+}
+
+function findCachedAudioFile(dir: string, baseName: string): { fileName: string; fullPath: string; mimeType: string } | null {
+  try {
+    if (!fs.existsSync(dir)) return null;
+    for (const ext of ['mp3', 'wav', 'ogg']) {
+      const fileName = `${baseName}.${ext}`;
+      const fullPath = path.join(dir, fileName);
+      if (fs.existsSync(fullPath)) {
+        const mimeType = ext === 'wav' ? 'audio/wav' : ext === 'ogg' ? 'audio/ogg' : 'audio/mpeg';
+        return { fileName, fullPath, mimeType };
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function formatGeminiError(error: unknown, fallback: string): string {
+  const raw = error instanceof Error ? error.message : String(error || fallback);
+  try {
+    const outer = JSON.parse(raw);
+    const innerRaw = outer?.error?.message;
+    if (typeof innerRaw === 'string') {
+      try {
+        const inner = JSON.parse(innerRaw);
+        if (inner?.error?.message) return String(inner.error.message);
+      } catch {
+        return innerRaw;
+      }
+    }
+    if (outer?.error?.message) return String(outer.error.message);
+  } catch {}
+  return raw || fallback;
+}
+
+async function generateLyriaStream(modelName: string, prompt: string) {
+  const responseStream = await ai.models.generateContentStream({
+    model: modelName,
+    contents: prompt,
+  });
+
+  const audioChunks: Buffer[] = [];
+  let lyrics = '';
+  let mimeType = 'audio/mpeg';
+
+  for await (const chunk of responseStream) {
+    const parts = chunk.candidates?.[0]?.content?.parts;
+    if (!parts) continue;
+    for (const part of parts) {
+      if (part.inlineData?.data) {
+        if (audioChunks.length === 0 && part.inlineData.mimeType) {
+          mimeType = part.inlineData.mimeType;
+        }
+        audioChunks.push(Buffer.from(part.inlineData.data, 'base64'));
+      }
+      if (part.text) {
+        lyrics += part.text;
+      }
+    }
+  }
+
+  if (audioChunks.length === 0) {
+    throw new Error(`No audio stream chunks returned from ${modelName}.`);
+  }
+
+  return {
+    buffer: Buffer.concat(audioChunks),
+    mimeType,
+    lyrics: lyrics.trim(),
+  };
+}
+
 async function startServer() {
+  ensureAiAudioDirs();
   const app = express();
   const PORT = 3000;
 
   app.use(express.json({ limit: '25mb' }));
+  app.use('/ai-audio', express.static(AI_AUDIO_ROOT));
 
   // --- Cloud SQL Leaderboard & User Progression Routes ---
   app.get('/api/leaderboard', async (_req, res) => {
@@ -223,56 +315,178 @@ async function startServer() {
     }
   });
 
-  // 3. Generate Music using lyria-3-clip-preview (30s clip) or lyria-3-pro-preview (full track)
+  // 3a. Inspect pre-generated / cached Lyria tracks & SFX files on disk
+  app.get('/api/ai/audio-manifest', (_req, res) => {
+    try {
+      ensureAiAudioDirs();
+      const tracks: { presetId: string; title: string; audioUrl: string; mimeType: string }[] = [];
+      const biomeIds: RoadBiomeId[] = ['alpine', 'canyon', 'neon', 'sakura'];
+      for (const bId of biomeIds) {
+        const hit = findCachedAudioFile(AI_TRACKS_DIR, bId);
+        if (hit) {
+          tracks.push({
+            presetId: bId,
+            title: BIOME_MUSIC_PRESETS[bId].title,
+            audioUrl: `/ai-audio/tracks/${hit.fileName}`,
+            mimeType: hit.mimeType,
+          });
+        }
+      }
+      const customHit = findCachedAudioFile(AI_TRACKS_DIR, 'custom');
+      if (customHit) {
+        tracks.push({
+          presetId: 'custom',
+          title: 'Custom Lyria Drift Track',
+          audioUrl: `/ai-audio/tracks/${customHit.fileName}`,
+          mimeType: customHit.mimeType,
+        });
+      }
+
+      const sfx: { slotId: string; label: string; audioUrl: string; mimeType: string }[] = [];
+      for (const slotId of Object.keys(AI_SFX_SLOT_MAP) as AiSfxSlotId[]) {
+        const hit = findCachedAudioFile(AI_SFX_DIR, slotId);
+        if (hit) {
+          sfx.push({
+            slotId,
+            label: AI_SFX_SLOT_MAP[slotId].label,
+            audioUrl: `/ai-audio/sfx/${hit.fileName}`,
+            mimeType: hit.mimeType,
+          });
+        }
+      }
+
+      res.json({ tracks, sfx });
+    } catch (error: unknown) {
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Failed to inspect AI audio manifest.',
+      });
+    }
+  });
+
+  // 3b. Generate Music using lyria-3-clip-preview (30s clip) or lyria-3-pro-preview (full track)
   app.post('/api/ai/music', async (req, res) => {
     try {
       const {
-        prompt = 'High-octane Japanese drift phonk and synthwave beat with punchy 808 cowbells and turbo bassline',
+        presetId = 'custom',
+        prompt: rawPrompt = '',
         durationMode = 'clip', // 'clip' -> lyria-3-clip-preview, 'full' -> lyria-3-pro-preview
+        forceRefresh = false,
       } = req.body;
+
+      const safePreset = ['alpine', 'canyon', 'neon', 'sakura'].includes(String(presetId))
+        ? (String(presetId) as RoadBiomeId)
+        : 'custom';
+
+      const prompt =
+        String(rawPrompt || '').trim() ||
+        (safePreset !== 'custom'
+          ? BIOME_MUSIC_PRESETS[safePreset].prompt
+          : 'High-octane Japanese drift phonk and synthwave beat with punchy 808 cowbells and turbo bassline, instrumental');
 
       const modelName =
         durationMode === 'full' ? 'lyria-3-pro-preview' : 'lyria-3-clip-preview';
 
-      const responseStream = await ai.models.generateContentStream({
-        model: modelName,
-        contents: prompt,
-      });
+      const cacheKey =
+        safePreset !== 'custom' && !String(rawPrompt || '').trim()
+          ? safePreset
+          : `custom_${crypto.createHash('sha1').update(`${modelName}:${prompt}`).digest('hex').slice(0, 12)}`;
 
-      const audioChunks: Buffer[] = [];
-      let lyrics = '';
-      let mimeType = 'audio/mpeg';
-
-      for await (const chunk of responseStream) {
-        const parts = chunk.candidates?.[0]?.content?.parts;
-        if (!parts) continue;
-        for (const part of parts) {
-          if (part.inlineData?.data) {
-            if (audioChunks.length === 0 && part.inlineData.mimeType) {
-              mimeType = part.inlineData.mimeType;
-            }
-            audioChunks.push(Buffer.from(part.inlineData.data, 'base64'));
-          }
-          if (part.text) {
-            lyrics += part.text;
-          }
+      if (!forceRefresh) {
+        const cachedHit = findCachedAudioFile(AI_TRACKS_DIR, cacheKey);
+        if (cachedHit) {
+          const buf = fs.readFileSync(cachedHit.fullPath);
+          const audioBase64 = buf.toString('base64');
+          return res.json({
+            modelUsed: modelName,
+            presetId: safePreset,
+            title: safePreset !== 'custom' ? BIOME_MUSIC_PRESETS[safePreset].title : 'Custom Lyria Drift Track',
+            audioUrl: `/ai-audio/tracks/${cachedHit.fileName}`,
+            audioDataUrl: `data:${cachedHit.mimeType};base64,${audioBase64}`,
+            lyrics: '',
+            cached: true,
+          });
         }
       }
 
-      if (audioChunks.length === 0) {
-        throw new Error(`No audio stream chunks returned from ${modelName}.`);
+      const generated = await generateLyriaStream(modelName, prompt);
+      ensureAiAudioDirs();
+      const ext = getExtFromMime(generated.mimeType);
+      const fileName = `${cacheKey}.${ext}`;
+      fs.writeFileSync(path.join(AI_TRACKS_DIR, fileName), generated.buffer);
+
+      // Also save latest custom alias if custom
+      if (safePreset === 'custom') {
+        fs.writeFileSync(path.join(AI_TRACKS_DIR, `custom.${ext}`), generated.buffer);
       }
 
-      const audioBase64 = Buffer.concat(audioChunks).toString('base64');
+      const audioBase64 = generated.buffer.toString('base64');
       res.json({
         modelUsed: modelName,
-        audioDataUrl: `data:${mimeType};base64,${audioBase64}`,
-        lyrics: lyrics.trim(),
+        presetId: safePreset,
+        title: safePreset !== 'custom' ? BIOME_MUSIC_PRESETS[safePreset].title : 'Custom Lyria Drift Track',
+        audioUrl: `/ai-audio/tracks/${fileName}`,
+        audioDataUrl: `data:${generated.mimeType};base64,${audioBase64}`,
+        lyrics: generated.lyrics,
+        cached: false,
       });
     } catch (error: unknown) {
       console.error('Lyria music generation error:', error);
       res.status(500).json({
-        error: error instanceof Error ? error.message : 'Music generation failed.',
+        error: formatGeminiError(error, 'Music generation failed.'),
+      });
+    }
+  });
+
+  // 3c. Generate AI Sound Effects / Musical Stingers using lyria-3-clip-preview
+  app.post('/api/ai/sfx', async (req, res) => {
+    try {
+      const {
+        slotId = 'fever',
+        prompt: rawPrompt = '',
+        forceRefresh = false,
+      } = req.body;
+
+      const validSlot = (Object.keys(AI_SFX_SLOT_MAP).includes(String(slotId))
+        ? String(slotId)
+        : 'fever') as AiSfxSlotId;
+      const spec = AI_SFX_SLOT_MAP[validSlot];
+      const prompt = String(rawPrompt || '').trim() || spec.prompt;
+
+      if (!forceRefresh) {
+        const cachedHit = findCachedAudioFile(AI_SFX_DIR, validSlot);
+        if (cachedHit) {
+          const buf = fs.readFileSync(cachedHit.fullPath);
+          const audioBase64 = buf.toString('base64');
+          return res.json({
+            modelUsed: 'lyria-3-clip-preview',
+            slotId: validSlot,
+            label: spec.label,
+            audioUrl: `/ai-audio/sfx/${cachedHit.fileName}`,
+            audioDataUrl: `data:${cachedHit.mimeType};base64,${audioBase64}`,
+            cached: true,
+          });
+        }
+      }
+
+      const generated = await generateLyriaStream('lyria-3-clip-preview', prompt);
+      ensureAiAudioDirs();
+      const ext = getExtFromMime(generated.mimeType);
+      const fileName = `${validSlot}.${ext}`;
+      fs.writeFileSync(path.join(AI_SFX_DIR, fileName), generated.buffer);
+
+      const audioBase64 = generated.buffer.toString('base64');
+      res.json({
+        modelUsed: 'lyria-3-clip-preview',
+        slotId: validSlot,
+        label: spec.label,
+        audioUrl: `/ai-audio/sfx/${fileName}`,
+        audioDataUrl: `data:${generated.mimeType};base64,${audioBase64}`,
+        cached: false,
+      });
+    } catch (error: unknown) {
+      console.error('Lyria AI SFX generation error:', error);
+      res.status(500).json({
+        error: formatGeminiError(error, 'AI SFX generation failed.'),
       });
     }
   });

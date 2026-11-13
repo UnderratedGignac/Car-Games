@@ -23,10 +23,14 @@ import {
   resolveRoadBiome,
 } from './game/rules';
 import { GamePhase, LiveTelemetry, SceneCanvas } from './game/SceneCanvas';
-import { soundFX } from './game/audio';
+import { SKY_THEME_OPTIONS, SkyThemeId } from './game/skyArt';
+import { AudioDeckSnapshot, soundFX } from './game/audio';
+import { AI_SFX_SLOT_MAP, AiSfxSlotId, BIOME_MUSIC_PRESETS } from './game/musicConfig';
+import { listAiAudioClips } from './lib/audioCache';
 import { GarageModal } from './components/GarageModal';
 import { LeaderboardEntry, LeaderboardModal } from './components/LeaderboardModal';
 import { AiPitStudioModal } from './components/AiPitStudioModal';
+import { AiAudioModal } from './components/AiAudioModal';
 import { SteeringWheel } from './components/SteeringWheel';
 
 const INITIAL_UPGRADES: Record<string, CarUpgradeLevels> = {
@@ -99,6 +103,36 @@ export default function App() {
     return 'drift';
   });
 
+  const [skyMode, setSkyMode] = useState<SkyThemeId>(() => {
+    if (typeof window === 'undefined') return 'auto';
+    const params = new URLSearchParams(window.location.search);
+    const qSky = params.get('sky');
+    if (
+      qSky === 'auto' ||
+      qSky === 'sun_day' ||
+      qSky === 'golden_sunset' ||
+      qSky === 'big_moon' ||
+      qSky === 'red_moon' ||
+      qSky === 'aurora_night'
+    ) {
+      return qSky;
+    }
+    try {
+      const saved = window.localStorage.getItem('apex_slash_sky_v1');
+      if (
+        saved === 'auto' ||
+        saved === 'sun_day' ||
+        saved === 'golden_sunset' ||
+        saved === 'big_moon' ||
+        saved === 'red_moon' ||
+        saved === 'aurora_night'
+      ) {
+        return saved;
+      }
+    } catch {}
+    return 'auto';
+  });
+
   const handleSelectGameMode = useCallback((mode: GameModeId) => {
     setGameMode(mode);
     try {
@@ -110,6 +144,13 @@ export default function App() {
     setRoadMode(mode);
     try {
       window.localStorage.setItem('apex_slash_road_v1', mode);
+    } catch {}
+  }, []);
+
+  const handleSelectSkyMode = useCallback((mode: SkyThemeId) => {
+    setSkyMode(mode);
+    try {
+      window.localStorage.setItem('apex_slash_sky_v1', mode);
     } catch {}
   }, []);
 
@@ -180,14 +221,17 @@ export default function App() {
   // Modals & Collapsible Bottom Dock
   const [isGarageOpen, setIsGarageOpen] = useState<boolean>(false);
   const [isAiStudioOpen, setIsAiStudioOpen] = useState<boolean>(false);
+  const [isAudioModalOpen, setIsAudioModalOpen] = useState<boolean>(false);
   const [isLeaderboardOpen, setIsLeaderboardOpen] = useState<boolean>(false);
   const [dockCollapsed, setDockCollapsed] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(false);
 
-  // Leaderboard & Custom Lyria BGM
+  // Leaderboard & Custom Lyria BGM / AI SFX Deck
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [loadingLeaderboard, setLoadingLeaderboard] = useState<boolean>(false);
   const [customBgmTitle, setCustomBgmTitle] = useState<string>('');
+  const [autoBiomeDj, setAutoBiomeDj] = useState<boolean>(true);
+  const [audioDeck, setAudioDeck] = useState<AudioDeckSnapshot>(() => soundFX.getDeckSnapshot());
   const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // Post-run AI Announcer TTS clip on Game Over
@@ -242,6 +286,73 @@ export default function App() {
   useEffect(() => {
     fetchLeaderboard();
   }, [fetchLeaderboard]);
+
+  // Subscribe to AI Audio Deck state & hydrate cached Lyria tracks + AI SFX clips on startup
+  useEffect(() => {
+    const unsub = soundFX.subscribe(() => {
+      setAudioDeck(soundFX.getDeckSnapshot());
+    });
+
+    (async () => {
+      try {
+        const localClips = await listAiAudioClips();
+        for (const clip of localClips) {
+          if (clip.kind === 'track' && clip.audioDataUrl) {
+            soundFX.registerCachedTrack(clip.slotId, clip.title, clip.audioDataUrl);
+          } else if (clip.kind === 'sfx' && clip.audioDataUrl && clip.slotId in AI_SFX_SLOT_MAP) {
+            soundFX.registerCachedSfx(clip.slotId as AiSfxSlotId, clip.audioDataUrl);
+          }
+        }
+      } catch {}
+
+      try {
+        const res = await fetch('/api/ai/audio-manifest');
+        if (res.ok) {
+          const manifest = await res.json();
+          if (Array.isArray(manifest.tracks)) {
+            for (const tr of manifest.tracks) {
+              soundFX.registerCachedTrack(tr.presetId, tr.title, tr.audioUrl);
+            }
+          }
+          if (Array.isArray(manifest.sfx)) {
+            for (const fx of manifest.sfx) {
+              if (fx.slotId in AI_SFX_SLOT_MAP) {
+                soundFX.registerCachedSfx(fx.slotId as AiSfxSlotId, fx.audioUrl);
+              }
+            }
+          }
+        }
+      } catch {}
+
+      const snap = soundFX.getDeckSnapshot();
+      if (snap.activeTrackTitle) {
+        setCustomBgmTitle(snap.activeTrackTitle);
+      }
+    })();
+
+    return unsub;
+  }, []);
+
+  // Auto-Biome DJ: seamlessly switches to the active biome's cached Lyria track during World Tour or road changes
+  const activeRoadBiome = resolveRoadBiome(roadMode, telemetry.distance);
+  useEffect(() => {
+    if (!autoBiomeDj || !audioDeck.musicEnabled || isMuted) return;
+    if (audioDeck.loadedTrackIds.includes(activeRoadBiome.id) && audioDeck.activeTrackId !== activeRoadBiome.id) {
+      const presetTitle = BIOME_MUSIC_PRESETS[activeRoadBiome.id].title;
+      setCustomBgmTitle(presetTitle);
+      if (gamePhase === 'playing') {
+        soundFX.unlockAndEnsureMusic(activeRoadBiome.id).catch(() => {});
+      }
+    }
+  }, [
+    autoBiomeDj,
+    activeRoadBiome.id,
+    audioDeck.musicEnabled,
+    audioDeck.loadedTrackIds,
+    audioDeck.activeTrackId,
+    gamePhase,
+    isMuted,
+  ]);
 
   // Firebase Auth listener + Cloud SQL Profile Load
   useEffect(() => {
@@ -332,11 +443,14 @@ export default function App() {
     }
     setIsGarageOpen(false);
     setIsAiStudioOpen(false);
+    setIsAudioModalOpen(false);
     setIsLeaderboardOpen(false);
     document.body.dataset.state = 'playing';
     setRestartTriggerCount((c) => c + 1);
     setGamePhase('playing');
-  }, []);
+    const startBiomeId = resolveRoadBiome(roadMode, 0).id;
+    soundFX.unlockAndEnsureMusic(autoBiomeDj ? startBiomeId : undefined).catch(() => {});
+  }, [roadMode, autoBiomeDj]);
 
   // End-of-Run Defeat Callback (after 3D fall-off & destruction animation finishes)
   const handleGameOver = useCallback(
@@ -425,10 +539,11 @@ export default function App() {
         return;
       }
 
-      if (isGarageOpen || isAiStudioOpen || isLeaderboardOpen) {
+      if (isGarageOpen || isAiStudioOpen || isAudioModalOpen || isLeaderboardOpen) {
         if (code === 'Escape') {
           setIsGarageOpen(false);
           setIsAiStudioOpen(false);
+          setIsAudioModalOpen(false);
           setIsLeaderboardOpen(false);
         }
         return;
@@ -529,6 +644,7 @@ export default function App() {
     gamePhase,
     isGarageOpen,
     isAiStudioOpen,
+    isAudioModalOpen,
     isLeaderboardOpen,
     handleStartRun,
     triggerFlashAction,
@@ -645,6 +761,7 @@ export default function App() {
         carCustom={activeCarCustom}
         customSpriteUrl={customSpriteUrl}
         roadMode={roadMode}
+        skyMode={skyMode}
         steerHold={steerHold}
         accelHold={accelHold}
         brakeHold={brakeHold}
@@ -708,11 +825,29 @@ export default function App() {
               <span className="text-amber-400 font-bold shrink-0">{Math.round(coins)} CR</span>
             </div>
 
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+              <button
+                type="button"
+                data-testid="btn-ai-audio"
+                onClick={() => setIsAudioModalOpen(true)}
+                className="min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-cyan-500/60 text-xs font-semibold text-cyan-200 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5"
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                    audioDeck.musicPlaying
+                      ? 'bg-emerald-400'
+                      : audioDeck.loadedTrackIds.length > 0
+                      ? 'bg-cyan-400'
+                      : 'bg-amber-400'
+                  }`}
+                  aria-hidden="true"
+                />
+                <span>{audioDeck.musicPlaying ? 'AI DJ Live' : 'AI Music'}</span>
+              </button>
               <button
                 type="button"
                 onClick={() => setIsLeaderboardOpen(true)}
-                className="min-h-[40px] px-3 py-1.5 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-slate-700/90 text-xs font-semibold text-slate-100 transition-colors whitespace-nowrap shrink-0"
+                className="min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-slate-700/90 text-xs font-semibold text-slate-100 transition-colors whitespace-nowrap shrink-0"
               >
                 Leaderboard
               </button>
@@ -869,6 +1004,37 @@ export default function App() {
                       aria-hidden="true"
                     />
                     <span>{opt.id === 'tour' ? 'Tour' : opt.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Anime Sky & Moon Atmosphere Selector */}
+            <div
+              className="grid grid-cols-3 sm:grid-cols-6 gap-1"
+              role="group"
+              aria-label="Select Sky Atmosphere"
+            >
+              {SKY_THEME_OPTIONS.map((opt) => {
+                const active = skyMode === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    data-sky-id={opt.id}
+                    onClick={() => handleSelectSkyMode(opt.id)}
+                    className={`min-h-[34px] px-1.5 py-1 rounded-lg text-[10px] font-semibold flex items-center justify-center gap-1 transition-colors whitespace-nowrap ${
+                      active
+                        ? 'bg-slate-800 text-white border border-sky-400/90'
+                        : 'bg-slate-900/70 text-slate-300 hover:bg-slate-800 border border-slate-800/80'
+                    }`}
+                  >
+                    <span
+                      className="w-1.5 h-1.5 rounded-sm shrink-0"
+                      style={{ backgroundColor: opt.dotColor }}
+                      aria-hidden="true"
+                    />
+                    <span>{opt.shortLabel}</span>
                   </button>
                 );
               })}
@@ -1293,6 +1459,41 @@ export default function App() {
               </div>
             </div>
 
+            <div>
+              <p className="text-[10px] font-semibold tracking-wider text-slate-400 uppercase mb-1.5 text-left">
+                Sky &amp; Moon Atmosphere
+              </p>
+              <div
+                className="grid grid-cols-3 gap-1.5"
+                role="group"
+                aria-label="Change Sky Atmosphere"
+              >
+                {SKY_THEME_OPTIONS.map((opt) => {
+                  const active = skyMode === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      data-pause-sky-id={opt.id}
+                      onClick={() => handleSelectSkyMode(opt.id)}
+                      className={`min-h-[34px] px-1.5 py-1 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+                        active
+                          ? 'bg-slate-800 text-white border border-sky-400/90'
+                          : 'bg-slate-900/80 text-slate-300 hover:bg-slate-800 border border-slate-800'
+                      }`}
+                    >
+                      <span
+                        className="w-1.5 h-1.5 rounded-sm shrink-0"
+                        style={{ backgroundColor: opt.dotColor }}
+                        aria-hidden="true"
+                      />
+                      <span>{opt.shortLabel}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             <div className="space-y-2.5 pt-2">
               <button
                 type="button"
@@ -1300,6 +1501,13 @@ export default function App() {
                 className="w-full min-h-[46px] py-2.5 px-5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm whitespace-nowrap"
               >
                 Resume Run
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsAudioModalOpen(true)}
+                className="w-full min-h-[44px] py-2.5 px-5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-cyan-600/60 text-cyan-300 font-semibold text-sm whitespace-nowrap"
+              >
+                AI Music &amp; FX Deck ({audioDeck.activeTrackTitle || 'Configure'})
               </button>
               <button
                 type="button"
@@ -1557,13 +1765,29 @@ export default function App() {
               customSpriteUrl: dataUrl,
             });
           }}
-          onSetCustomBgm={(audioUrl, title) => {
+          onSetCustomBgm={(audioUrl, title, trackId = 'custom') => {
             setCustomBgmTitle(title);
-            if (bgmAudioRef.current) {
-              bgmAudioRef.current.src = audioUrl;
-              bgmAudioRef.current.muted = isMuted;
-              bgmAudioRef.current.play().catch(() => {});
-            }
+            soundFX.setMusicEnabled(true);
+            soundFX.loadAiMusicTrack(trackId, title, audioUrl, true).catch(() => {
+              if (bgmAudioRef.current) {
+                bgmAudioRef.current.src = audioUrl;
+                bgmAudioRef.current.muted = isMuted;
+                bgmAudioRef.current.play().catch(() => {});
+              }
+            });
+          }}
+        />
+      )}
+
+      {isAudioModalOpen && (
+        <AiAudioModal
+          isOpen={isAudioModalOpen}
+          onClose={() => setIsAudioModalOpen(false)}
+          activeBiomeId={activeRoadBiome.id}
+          autoBiomeDj={autoBiomeDj}
+          onToggleAutoBiomeDj={setAutoBiomeDj}
+          onTrackActivated={(_trackId, title) => {
+            setCustomBgmTitle(title);
           }}
         />
       )}

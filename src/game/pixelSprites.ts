@@ -94,6 +94,137 @@ const PIXEL_DIGITS: Record<string, string[]> = {
   '9': ['111', '101', '111', '001', '111'],
 };
 
+export interface TireAnchorNorm {
+  u: number; // 0..1 across 144px sprite width
+  v: number; // 0..1 across 108px sprite height
+  isCameraFacing: boolean;
+}
+
+export interface CarTireAnchors {
+  rearLeft: TireAnchorNorm;
+  rearRight: TireAnchorNorm;
+  frontLeft: TireAnchorNorm;
+  frontRight: TireAnchorNorm;
+  dirSign: -1 | 1;
+  tireWidthScale: number;
+}
+
+const tireAnchorCache = new Map<string, CarTireAnchors>();
+const MAX_TIRE_ANCHOR_CACHE = 256;
+
+function getCarWheelDims(car: CarSpec) {
+  const shape = car.bodyShape || 'coupe';
+  const isKei = shape === 'kei';
+  const isTruck = shape === 'truck';
+  const isRally = shape === 'rally';
+  const isPrototype = shape === 'prototype';
+  const isGt3 = shape === 'gt3';
+  const isWagon = shape === 'wagon';
+  const isInterceptor = shape === 'interceptor';
+  const isMuscle = shape === 'muscle';
+
+  const hw = isKei
+    ? 0.90
+    : isPrototype
+    ? 1.09
+    : isGt3 || isMuscle
+    ? 1.07
+    : isTruck || isWagon
+    ? 1.04
+    : isRally || isInterceptor
+    ? 1.03
+    : 1.02;
+  const zRear = isKei ? -1.75 : isTruck || isWagon ? -2.14 : -2.06;
+  const zFront = isKei ? 1.75 : isPrototype ? 2.18 : 2.10;
+  return {
+    hw,
+    wheelZRear: zRear + 0.68,
+    wheelZFront: zFront - 0.62,
+    isMuscle,
+  };
+}
+
+/**
+ * Returns the exact normalized [0..1] screen-sprite contact patch coordinates of all 4 tires
+ * for the active quantized drift pose, matching getPixelCarCanvas pixel-for-pixel.
+ */
+export function getPixelCarTireAnchors(
+  car: CarSpec,
+  driftAngleNorm: number,
+  custom?: Partial<CarCustomization>
+): CarTireAnchors {
+  const angleBucket = Math.max(-6, Math.min(6, Math.round(driftAngleNorm * 6)));
+  const tireId = custom?.tires || 'stock';
+  const key = `${car.id}_${angleBucket}_${tireId}`;
+  const cached = tireAnchorCache.get(key);
+  if (cached) return cached;
+
+  const { hw, wheelZRear, wheelZFront, isMuscle } = getCarWheelDims(car);
+  const dirSign: -1 | 1 = angleBucket < 0 ? -1 : 1;
+  const absNorm = Math.abs(angleBucket) / 6;
+  const yaw = (angleBucket === 0 ? 0.07 : 0.14) + absNorm * 0.64;
+  const pitch = 0.37;
+  const cosY = Math.cos(yaw);
+  const sinY = Math.sin(yaw);
+  const cosP = Math.cos(pitch);
+  const sinP = Math.sin(pitch);
+
+  const cx = W * 0.5;
+  const cy = H * 0.65;
+  const scale = 24.8;
+
+  const projAnchor = (vx: number, vy: number, vz: number, isCameraFacing: boolean): TireAnchorNorm => {
+    const rx = vx * cosY + vz * sinY;
+    const rz = -vx * sinY + vz * cosY;
+    const py = vy * cosP + rz * sinP;
+    const depth = rz * cosP - vy * sinP;
+    const persp = 1 / (1 + depth * 0.06);
+    const pxRaw = cx + rx * scale * persp;
+    const pyRaw = cy - py * scale * persp;
+    const finalX = dirSign < 0 ? W - 1 - pxRaw : pxRaw;
+    return {
+      u: finalX / W,
+      v: pyRaw / H,
+      isCameraFacing,
+    };
+  };
+
+  // Bottom contact patch (y = 0.02) of inner/outer rear and front tires
+  const rA = projAnchor(-hw + 0.24, 0.02, wheelZRear, false);
+  const rB = projAnchor(hw - 0.10, 0.02, wheelZRear, true);
+  const fA = projAnchor(-hw + 0.24, 0.02, wheelZFront, false);
+  const fB = projAnchor(hw - 0.10, 0.02, wheelZFront, true);
+
+  const rearLeft = rA.u <= rB.u ? rA : rB;
+  const rearRight = rA.u <= rB.u ? rB : rA;
+  const frontLeft = fA.u <= fB.u ? fA : fB;
+  const frontRight = fA.u <= fB.u ? fB : fA;
+
+  const tireWidthScale =
+    tireId === 'drag_slick'
+      ? 1.45
+      : isMuscle
+      ? 1.22
+      : tireId === 'drift_spec'
+      ? 1.18
+      : 1.0;
+
+  const result: CarTireAnchors = {
+    rearLeft,
+    rearRight,
+    frontLeft,
+    frontRight,
+    dirSign,
+    tireWidthScale,
+  };
+  if (tireAnchorCache.size >= MAX_TIRE_ANCHOR_CACHE) {
+    const oldest = tireAnchorCache.keys().next().value;
+    if (oldest !== undefined) tireAnchorCache.delete(oldest);
+  }
+  tireAnchorCache.set(key, result);
+  return result;
+}
+
 /**
  * Generates or retrieves cached 144x108 integer pixel-art sprite for the hero car.
  */

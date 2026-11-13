@@ -33,6 +33,18 @@ import {
   stepTrafficCars,
   compactInPlace,
 } from './rules';
+import { getPixelCarTireAnchors } from './pixelSprites';
+import {
+  AI_SFX_SLOTS,
+  BIOME_MUSIC_PRESETS,
+  computeMusicDspParams,
+  findPeakAudioWindow,
+} from './musicConfig';
+import {
+  ANIME_CLOUD_COUNT,
+  SKY_THEME_OPTIONS,
+  resolveSkyAtmosphere,
+} from './skyArt';
 
 test('CAR_ROSTER has 14 distinct progressive drift cars from T1 to T14', () => {
   assert.equal(CAR_ROSTER.length, 14);
@@ -574,4 +586,140 @@ test('compactInPlace filters elements in-place preserving order and zeroing arra
   compactInPlace(arr, () => false);
   assert.equal(arr.length, 0);
 });
+
+test('getPixelCarTireAnchors computes exact tire contact coordinates and compound width scaling', () => {
+  const car = CAR_ROSTER[0];
+  const rightDrift = getPixelCarTireAnchors(car, 0.75, { tires: 'stock' });
+  const leftDrift = getPixelCarTireAnchors(car, -0.75, { tires: 'stock' });
+  const dragSlicks = getPixelCarTireAnchors(car, 0.75, { tires: 'drag_slick' });
+
+  assert.ok(rightDrift.rearLeft.u > 0 && rightDrift.rearLeft.u < rightDrift.rearRight.u);
+  assert.ok(rightDrift.rearRight.u < 1);
+  assert.ok(rightDrift.rearLeft.v > 0.55 && rightDrift.rearLeft.v < 0.95);
+  assert.ok(rightDrift.frontLeft.u < rightDrift.frontRight.u);
+  assert.equal(rightDrift.dirSign, 1);
+
+  assert.equal(leftDrift.dirSign, -1);
+  assert.ok(leftDrift.rearLeft.u < leftDrift.rearRight.u);
+  // Mirror symmetry: left-drift rearRight should sit symmetrically opposite right-drift rearLeft
+  assert.ok(Math.abs(leftDrift.rearRight.u + rightDrift.rearLeft.u - 1) < 0.03);
+  assert.ok(dragSlicks.tireWidthScale > rightDrift.tireWidthScale);
+});
+
+test('BIOME_MUSIC_PRESETS and AI_SFX_SLOTS cover all 4 biomes and 5 core gameplay FX slots', () => {
+  assert.deepEqual(Object.keys(BIOME_MUSIC_PRESETS).sort(), ['alpine', 'canyon', 'neon', 'sakura']);
+  for (const preset of Object.values(BIOME_MUSIC_PRESETS)) {
+    assert.ok(preset.prompt.length > 30);
+    assert.ok(preset.bpm >= 120);
+  }
+  assert.deepEqual(
+    AI_SFX_SLOTS.map((s) => s.id),
+    ['fever', 'drift_flip', 'overtake', 'milestone', 'crash']
+  );
+});
+
+test('computeMusicDspParams modulates AI music lowpass, bass, and playback rate cleanly across game states', () => {
+  const cruise = computeMusicDspParams({
+    phase: 'playing',
+    speedRatio: 1.0,
+    isDrifting: false,
+    driftFactor: 0,
+    isFever: false,
+    isBraking: false,
+    isNearEdge: false,
+  });
+  const fever = computeMusicDspParams({
+    phase: 'playing',
+    speedRatio: 1.35,
+    isDrifting: true,
+    driftFactor: 0.9,
+    isFever: true,
+    isBraking: false,
+    isNearEdge: true,
+  });
+  const paused = computeMusicDspParams({
+    phase: 'paused',
+    speedRatio: 1.0,
+    isDrifting: false,
+    driftFactor: 0,
+    isFever: false,
+    isBraking: false,
+    isNearEdge: false,
+  });
+  const gameover = computeMusicDspParams({
+    phase: 'gameover',
+    speedRatio: 0.5,
+    isDrifting: false,
+    driftFactor: 0,
+    isFever: false,
+    isBraking: false,
+    isNearEdge: false,
+  });
+
+  assert.ok(fever.lowpassHz > cruise.lowpassHz);
+  assert.ok(fever.bassBoostDb > cruise.bassBoostDb);
+  assert.ok(fever.playbackRate > cruise.playbackRate);
+  assert.ok(paused.lowpassHz < 800, 'Pause applies muffled pit-stop lowpass filter');
+  assert.ok(gameover.playbackRate < 0.9, 'Gameover applies tape-slow pitch drop');
+});
+
+test('findPeakAudioWindow locates loudest transient region inside a decoded audio buffer', () => {
+  const sampleRate = 1000;
+  const totalSec = 6;
+  const samples = new Float32Array(sampleRate * totalSec);
+  // Put quiet ambience from 0..2.5s and a strong transient burst around 3.2s..4.0s
+  for (let i = 0; i < samples.length; i++) {
+    samples[i] = 0.02 * Math.sin(i * 0.1);
+  }
+  for (let i = 3200; i < 4000; i++) {
+    samples[i] = 0.92 * Math.sin(i * 0.4);
+  }
+  const win = findPeakAudioWindow(samples, sampleRate, 1.0);
+  assert.ok(win.startSec >= 2.8 && win.startSec <= 3.35, `Expected peak near 3.2s, got ${win.startSec}s`);
+  assert.ok(win.durationSec >= 0.95 && win.durationSec <= 1.05);
+});
+
+test('SKY_THEME_OPTIONS & resolveSkyAtmosphere support Sun, Sunset, Big Moon, Red Moon, Aurora & sculpted anime clouds', () => {
+  assert.equal(ANIME_CLOUD_COUNT, 5);
+  assert.deepEqual(
+    SKY_THEME_OPTIONS.map((o) => o.id),
+    ['auto', 'sun_day', 'golden_sunset', 'big_moon', 'red_moon', 'aurora_night']
+  );
+
+  const alpineBiome = ROAD_BIOMES.alpine;
+  const sunSky = resolveSkyAtmosphere('sun_day', alpineBiome);
+  assert.equal(sunSky.isNight, false);
+  assert.equal(sunSky.celestialKind, 'sun');
+  assert.equal(sunSky.hasGodRays, true);
+
+  const autoCanyon = resolveSkyAtmosphere('auto', ROAD_BIOMES.canyon);
+  assert.equal(autoCanyon.id, 'golden_sunset');
+  const autoNeon = resolveSkyAtmosphere('auto', ROAD_BIOMES.neon);
+  assert.equal(autoNeon.isNight, true);
+  assert.equal(autoNeon.id, 'big_moon');
+
+  const sunsetSky = resolveSkyAtmosphere('golden_sunset', alpineBiome);
+  assert.equal(sunsetSky.isNight, false);
+  assert.equal(sunsetSky.celestialKind, 'sunset_sun');
+  assert.equal(sunsetSky.hasGodRays, true);
+
+  const bigMoonSky = resolveSkyAtmosphere('big_moon', alpineBiome);
+  assert.equal(bigMoonSky.isNight, true);
+  assert.equal(bigMoonSky.celestialKind, 'big_moon');
+  assert.ok(bigMoonSky.celestialRadius >= 24, 'Big Moon should render as a giant lunar disc');
+  assert.equal(bigMoonSky.hasShootingStars, true);
+
+  const redMoonSky = resolveSkyAtmosphere('red_moon', alpineBiome);
+  assert.equal(redMoonSky.isNight, true);
+  assert.equal(redMoonSky.celestialKind, 'red_moon');
+  assert.ok(redMoonSky.celestialRadius >= 24, 'Red Blood Moon should render as a massive lunar disc');
+  assert.equal(redMoonSky.hasShootingStars, true);
+
+  const auroraSky = resolveSkyAtmosphere('aurora_night', alpineBiome);
+  assert.equal(auroraSky.isNight, true);
+  assert.equal(auroraSky.hasAurora, true);
+  assert.equal(auroraSky.hasShootingStars, true);
+});
+
+
 
