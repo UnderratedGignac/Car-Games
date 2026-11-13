@@ -5,5 +5,9 @@ coverage/
 .DS_Store
 *.log
 *.zip
+*.apk
+android/.gradle/
+android/app/build/
+android/local.properties
 .env*
 !.env.example

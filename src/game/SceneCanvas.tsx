@@ -53,6 +53,7 @@ import {
   renderWorldObject3D,
 } from './world3d';
 import { soundFX } from './audio';
+import { renderRealisticCockpit } from './cockpitOverlay';
 import {
   ANIME_CLOUD_COUNT,
   SkyAtmosphereConfig,
@@ -91,6 +92,7 @@ interface SceneCanvasProps {
   customSpriteUrl?: string;
   roadMode?: RoadSelectionMode;
   skyMode?: SkyThemeId;
+  cameraView?: 'chase' | 'first_person';
   steerHold?: number; // -1 left, 0 neutral, +1 right from UI buttons or steering wheel
   accelHold?: boolean; // Gas pedal hold from UI button
   brakeHold?: boolean; // Brake pedal hold from UI button
@@ -196,6 +198,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
   customSpriteUrl,
   roadMode = 'tour',
   skyMode = 'auto',
+  cameraView = 'chase',
   steerHold = 0,
   accelHold = false,
   brakeHold = false,
@@ -232,6 +235,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
   const skyModeRef = useRef<SkyThemeId>(skyMode);
   skyModeRef.current = skyMode;
+
+  const cameraViewRef = useRef<'chase' | 'first_person'>(cameraView);
+  cameraViewRef.current = cameraView;
 
   const steerHoldRef = useRef<number>(steerHold);
   steerHoldRef.current = steerHold;
@@ -2410,11 +2416,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       const shakeX = (Math.random() - 0.5) * shakeMag;
       const shakeY = (Math.random() - 0.5) * shakeMag;
 
-      const horizonY = cachedHorizonY;
       const isPortrait = pxW < pxH;
       const curSpeedVal = Math.hypot(driftState.vx, driftState.vz);
       const speedRushFactor = Math.max(0, Math.min(1, (curSpeedVal - 20) / 16));
-      const fovScale = pxH * (isPortrait ? 0.74 + speedRushFactor * 0.05 : 0.90 + speedRushFactor * 0.06);
+      const isFirstPerson = (cameraViewRef.current || 'chase') === 'first_person';
+      const fovScale = pxH * (isFirstPerson ? (isPortrait ? 0.88 : 1.05) : (isPortrait ? 0.74 + speedRushFactor * 0.05 : 0.90 + speedRushFactor * 0.06));
+      const horizonY = isFirstPerson ? cachedHorizonY + pxH * 0.04 : cachedHorizonY;
 
       const targetDiag = Math.max(-1, Math.min(1, visualDriftAngle));
       camDiagBias += (targetDiag - camDiagBias) * Math.min(1, 3.8 * dt);
@@ -2425,15 +2432,19 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         : Math.max(speedRushFactor * 0.6, Math.min(0.65, driftState.driftFactor * 0.5));
       camSpeedZoom += (targetZoom - camSpeedZoom) * Math.min(1, 4.0 * dt);
 
-      const camViewAngle = camHeading + camDiagBias * 0.085;
+      const camViewAngle = camHeading + camDiagBias * (isFirstPerson ? 0.045 : 0.085);
       const fwdX = Math.cos(camViewAngle);
       const fwdZ = Math.sin(camViewAngle);
       const rightX = -fwdZ;
       const rightZ = fwdX;
 
-      const camDistBack = (isHighwayMode ? 9.4 : 8.4) + camSpeedZoom * 0.85;
-      const camHeight = isHighwayMode ? 4.35 : 3.85;
-      const camSideSwing = isHighwayMode ? -camDiagBias * 0.65 : -camDiagBias * 1.55;
+      const camDistBack = isFirstPerson
+        ? 0.15
+        : (isHighwayMode ? 9.4 : 8.4) + camSpeedZoom * 0.85;
+      const camHeight = isFirstPerson ? 1.14 : (isHighwayMode ? 4.35 : 3.85);
+      const camSideSwing = isFirstPerson
+        ? -0.22 + camDiagBias * 0.12
+        : (isHighwayMode ? -camDiagBias * 0.65 : -camDiagBias * 1.55);
       const camWorldX = camFocusX - fwdX * camDistBack + rightX * camSideSwing;
       const camWorldY = camFocusY + camHeight;
       const camWorldZ = camFocusZ - fwdZ * camDistBack + rightZ * camSideSwing;
@@ -3423,6 +3434,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       for (let v = 0; v < vehicleCount; v++) {
         const item = vehicleDrawBuf[v];
         if (item.isHero) {
+          if (isFirstPerson && !isFalling && !isTrafficCrash) {
+            continue;
+          }
           const carDrawW = Math.round(5.4 * item.proj.scale);
           const carDrawH = Math.round(carDrawW * (108 / 144));
           const cx = Math.round(item.proj.x);
@@ -3652,7 +3666,52 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         ctx.stroke();
       }
 
-      // N. Impact & Overdrive Screen Flash Overlay
+      // N. Realistic First-Person Cockpit POV Overlay
+      if (isFirstPerson && !isFalling && !isTrafficCrash) {
+        const activePedalMode: 'coast' | 'gas' | 'brake' =
+          phase === 'playing'
+            ? keyDown || brakeHoldRef.current
+              ? 'brake'
+              : keyUp || accelHoldRef.current || isFever
+              ? 'gas'
+              : 'coast'
+            : 'coast';
+        const speedKmh = Math.round(curSpeedVal * 3.6);
+        const maxKmh = Math.max(180, currentCar.baseSpeed * 4.8);
+        const speedRatio = Math.max(0, Math.min(1, speedKmh / Math.max(1, maxKmh)));
+        const gear = speedKmh < 12 ? 1 : speedKmh < 48 ? 2 : speedKmh < 92 ? 3 : speedKmh < 140 ? 4 : speedKmh < 192 ? 5 : 6;
+        const rpmRatio = Math.min(1, Math.max(0.12, (speedRatio * 5.4) % 1 + 0.12));
+        const feverRatio = fever / 100;
+        const liveSteer =
+          steerHoldRef.current !== 0
+            ? steerHoldRef.current
+            : keyLeft
+            ? -1
+            : keyRight
+            ? 1
+            : Math.max(-1, Math.min(1, driftState.vx / Math.max(1, curSpeedVal * 0.4)));
+
+        renderRealisticCockpit({
+          ctx,
+          width: pxW,
+          height: pxH,
+          speedKmh,
+          rpmRatio,
+          gear,
+          feverRatio,
+          isFever,
+          steerAngle: liveSteer,
+          visualDriftAngle,
+          pedalMode: activePedalMode,
+          isHighBeam: isHighBeamPulse,
+          car: currentCar,
+          customization: carCustomRef.current,
+          shakeX,
+          shakeY,
+        });
+      }
+
+      // O. Impact & Overdrive Screen Flash Overlay
       if (screenFlashAlpha > 0.01) {
         ctx.globalAlpha = Math.min(0.85, screenFlashAlpha);
         ctx.fillStyle = screenFlashColor;

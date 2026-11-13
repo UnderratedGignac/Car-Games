@@ -154,6 +154,25 @@ export default function App() {
     } catch {}
   }, []);
 
+  // Camera Perspective (Chase 3P vs Realistic Cockpit 1P)
+  const [cameraView, setCameraView] = useState<'chase' | 'first_person'>(() => {
+    try {
+      const saved = window.localStorage.getItem('neon_redline_camera_v1');
+      if (saved === 'first_person' || saved === 'chase') return saved;
+    } catch {}
+    return 'chase';
+  });
+
+  const toggleCameraView = useCallback(() => {
+    setCameraView((prev) => {
+      const next = prev === 'chase' ? 'first_person' : 'chase';
+      try {
+        window.localStorage.setItem('neon_redline_camera_v1', next);
+      } catch {}
+      return next;
+    });
+  }, []);
+
   // Imperative simulation triggers passed into SceneCanvas
   const [steerHold, setSteerHold] = useState<number>(0);
   const [keySteerVisual, setKeySteerVisual] = useState<number>(0);
@@ -565,6 +584,11 @@ export default function App() {
           setGamePhase('paused');
           return;
         }
+        if (code === 'KeyC') {
+          e.preventDefault();
+          toggleCameraView();
+          return;
+        }
         if (code === 'KeyR') {
           e.preventDefault();
           handleStartRun();
@@ -762,6 +786,7 @@ export default function App() {
         customSpriteUrl={customSpriteUrl}
         roadMode={roadMode}
         skyMode={skyMode}
+        cameraView={cameraView}
         steerHold={steerHold}
         accelHold={accelHold}
         brakeHold={brakeHold}
@@ -1040,6 +1065,38 @@ export default function App() {
               })}
             </div>
 
+            {/* Camera View Switcher (3P Chase vs 1P Cockpit) */}
+            <div className="grid grid-cols-2 gap-1.5" role="group" aria-label="Camera Perspective">
+              <button
+                type="button"
+                onClick={() => {
+                  setCameraView('chase');
+                  try { window.localStorage.setItem('neon_redline_camera_v1', 'chase'); } catch {}
+                }}
+                className={`min-h-[38px] px-2 py-1 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+                  cameraView === 'chase'
+                    ? 'bg-slate-800 text-white border border-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.3)]'
+                    : 'bg-slate-900/70 text-slate-400 hover:bg-slate-800 border border-slate-800/80'
+                }`}
+              >
+                <span>🏎️ 3P Chase Cam</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCameraView('first_person');
+                  try { window.localStorage.setItem('neon_redline_camera_v1', 'first_person'); } catch {}
+                }}
+                className={`min-h-[38px] px-2 py-1 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+                  cameraView === 'first_person'
+                    ? 'bg-slate-800 text-white border border-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.3)]'
+                    : 'bg-slate-900/70 text-slate-400 hover:bg-slate-800 border border-slate-800/80'
+                }`}
+              >
+                <span>👁️ 1P Cockpit POV</span>
+              </button>
+            </div>
+
             {/* Primary Launch CTA */}
             <button
               type="button"
@@ -1142,8 +1199,25 @@ export default function App() {
               </div>
             </div>
 
-            {/* Top-Right Compact Square SVG Utility Buttons (Mute [M], Pause [P], Restart [R]) */}
+            {/* Top-Right Compact Square SVG Utility Buttons (Camera [C], Mute [M], Pause [P], Restart [R]) */}
             <div className="flex items-center gap-1.5 sm:gap-2 pointer-events-auto shrink-0">
+              <button
+                type="button"
+                tabIndex={-1}
+                aria-label={cameraView === 'first_person' ? 'Switch to 3rd Person View [C]' : 'Switch to 1st Person Cockpit View [C]'}
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  toggleCameraView();
+                }}
+                className={`min-h-[40px] px-2.5 sm:min-h-[44px] flex items-center justify-center gap-1 rounded-xl border font-mono font-bold text-xs tracking-wider transition-all ${
+                  cameraView === 'first_person'
+                    ? 'border-cyan-400 bg-cyan-950/80 text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.4)]'
+                    : 'border-slate-800 bg-slate-900/85 text-slate-200 hover:bg-slate-800'
+                }`}
+              >
+                <span>{cameraView === 'first_person' ? '👁️ 1P' : '🏎️ 3P'}</span>
+              </button>
+
               <button
                 type="button"
                 tabIndex={-1}
@@ -1491,6 +1565,42 @@ export default function App() {
                     </button>
                   );
                 })}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-semibold tracking-wider text-slate-400 uppercase mb-1.5 text-left">
+                Camera Perspective
+              </p>
+              <div className="grid grid-cols-2 gap-2" role="group" aria-label="Camera Perspective">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCameraView('chase');
+                    try { window.localStorage.setItem('neon_redline_camera_v1', 'chase'); } catch {}
+                  }}
+                  className={`min-h-[38px] px-2 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+                    cameraView === 'chase'
+                      ? 'bg-slate-800 text-white border border-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.3)]'
+                      : 'bg-slate-900/80 text-slate-400 hover:bg-slate-800 border border-slate-800'
+                  }`}
+                >
+                  <span>🏎️ 3rd Person</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCameraView('first_person');
+                    try { window.localStorage.setItem('neon_redline_camera_v1', 'first_person'); } catch {}
+                  }}
+                  className={`min-h-[38px] px-2 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+                    cameraView === 'first_person'
+                      ? 'bg-slate-800 text-white border border-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.3)]'
+                      : 'bg-slate-900/80 text-slate-400 hover:bg-slate-800 border border-slate-800'
+                  }`}
+                >
+                  <span>👁️ 1st Person POV</span>
+                </button>
               </div>
             </div>
 
