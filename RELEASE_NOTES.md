@@ -4,9 +4,19 @@ Welcome to the first official release of **NEON REDLINE** (formerly Car-Games)! 
 
 ---
 
-## 📱 What's New for Mobile Phones
+## 📱 Direct Downloads for Mobile
 
-### 1. 🏎️ 3D Interactive Three.js Garage Showroom
+- 🤖 **[Download Android APK (neon-redline.apk)](https://github.com/UnderratedGignac/Car-Games/releases/download/v1.0.0-mobile/neon-redline.apk)** (4.69 MB)
+  *Tap on your Android phone to install and test the game as a native mobile app!*
+- 🌐 **[Play Online / PWA](https://underratedgignac.github.io/Car-Games/)**
+  *Open in mobile Safari/Chrome and tap "Add to Home Screen" to install without downloading files.*
+- 📦 **[Download Web Bundle (neon-redline-v1.0.0-mobile.zip)](https://github.com/UnderratedGignac/Car-Games/releases/download/v1.0.0-mobile/neon-redline-v1.0.0-mobile.zip)** (443 KB)
+
+---
+
+## 🏎️ What's New for Mobile Phones
+
+### 1. 🛠️ 3D Interactive Three.js Garage Showroom
 - **360° Touch-Drag Orbit**: Spin any car around all angles with natural rotational inertia.
 - **Pinch-to-Zoom**: 2-finger touch gesture smoothly zooms between panoramic showcase and extreme component detail.
 - **Component Inspection Presets**: One-tap camera focus targeting:
@@ -33,14 +43,8 @@ Welcome to the first official release of **NEON REDLINE** (formerly Car-Games)! 
 
 ---
 
-## 📥 How to Test on Mobile
-
-### Option A: Direct Web / PWA (Instant)
-1. Visit the repository GitHub Pages: `https://underratedgignac.github.io/Car-Games/`
-2. In your mobile browser (Safari / Chrome), tap **Share** or **Menu (⋮)** → **"Add to Home Screen"**.
-3. Launch from your home screen for the full-screen native mobile experience!
-
-### Option B: Download Release ZIP
-1. Download `neon-redline-v1.0.0-mobile.zip` attached below.
-2. Unpack on any device or web server.
-3. Open `index.html` or serve with any static server (`npx serve`, `python -m http.server`, etc.).
+## 📥 How to Install & Test the APK on Android
+1. Download **[`neon-redline.apk`](https://github.com/UnderratedGignac/Car-Games/releases/download/v1.0.0-mobile/neon-redline.apk)** on your Android device.
+2. Tap the downloaded file in your notification bar or Downloads folder.
+3. If prompted with *"Install unknown apps"*, tap **Settings** and enable **"Allow from this source"**.
+4. Tap **Install**, then tap **Open** to play **NEON REDLINE**!
