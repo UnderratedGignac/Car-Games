@@ -1,0 +1,17 @@
+{
+  "name": "NEON REDLINE: 3D Touge & Highway Drift",
+  "short_name": "NeonRedline",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#050811",
+  "theme_color": "#050811",
+  "orientation": "portrait",
+  "description": "High-dopamine mobile 3D arcade drift and highway overtake racer with 360° interactive garage.",
+  "icons": [
+    {
+      "src": "./favicon.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    }
+  ]
+}
