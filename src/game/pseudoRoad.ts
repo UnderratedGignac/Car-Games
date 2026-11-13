@@ -140,16 +140,18 @@ function decorate(track: Track, from: number, to: number) {
       seg.props.push({ kind: 'checkpoint', offset: 0, variant: 0 });
       continue;
     }
-    // roadside scenery
-    if (i % 3 === 0) {
+    // roadside scenery: frequent near props plus a farther layer for depth
+    if (i % 2 === 0) {
       const side = r() < 0.5 ? -1 : 1;
-      seg.props.push({ kind: r() < 0.12 ? 'rock' : 'tree', offset: side * (1.4 + r() * 2.6), variant: Math.floor(r() * 4) });
+      seg.props.push({ kind: r() < 0.12 ? 'rock' : 'tree', offset: side * (1.5 + r() * 1.5), variant: Math.floor(r() * 4) });
+      if (r() < 0.4) {
+        seg.props.push({ kind: 'tree', offset: side * (3.4 + r() * 4), variant: Math.floor(r() * 4) });
+      }
+      if (r() < 0.22) {
+        seg.props.push({ kind: 'tree', offset: -side * (2.1 + r() * 1.4), variant: Math.floor(r() * 4) });
+      }
     }
-    if (r() < 0.35) {
-      const side = r() < 0.5 ? -1 : 1;
-      seg.props.push({ kind: 'tree', offset: side * (3.2 + r() * 4), variant: Math.floor(r() * 4) });
-    }
-    if (i % 16 === 0) {
+    if (i % 14 === 0) {
       seg.props.push({ kind: 'lamp', offset: -1.22, variant: 0 });
       seg.props.push({ kind: 'lamp', offset: 1.22, variant: 0 });
     }
@@ -228,6 +230,35 @@ export function projectPoint(
     x: Math.round(width / 2 + scale * (wx - camX) * width / 2),
     y: Math.round(horizonY - scale * (wy - camY) * height / 2),
     w: Math.round(scale * roadWidth * width / 2),
+  };
+}
+
+/**
+ * Float-precision projection for the high-resolution renderer: identical math
+ * to projectPoint but without integer rounding, so adjacent road polygons share
+ * exact edges (no shimmering light seams) and motion stays smooth at sub-pixel
+ * depths.
+ */
+export function projectPointF(
+  wx: number,
+  wy: number,
+  wz: number,
+  camX: number,
+  camY: number,
+  camZ: number,
+  camDepth: number,
+  width: number,
+  height: number,
+  roadWidth: number,
+  horizonY = height / 2
+): Projected {
+  const dz = Math.max(1, wz - camZ);
+  const scale = camDepth / dz;
+  return {
+    scale,
+    x: width / 2 + (scale * (wx - camX) * width) / 2,
+    y: horizonY - (scale * (wy - camY) * height) / 2,
+    w: (scale * roadWidth * width) / 2,
   };
 }
 
