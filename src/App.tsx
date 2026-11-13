@@ -29,7 +29,6 @@ import { GarageModal } from './components/GarageModal';
 import { LeaderboardEntry, LeaderboardModal } from './components/LeaderboardModal';
 import { ArtGalleryModal } from './components/ArtGalleryModal';
 import { SteeringWheel } from './components/SteeringWheel';
-import { RealisticPedals } from './components/RealisticPedals';
 
 const INITIAL_UPGRADES: Record<string, CarUpgradeLevels> = {
   blue_jdm: { speed: 1, handling: 1, magnet: 1 },
@@ -152,30 +151,9 @@ export default function App() {
     } catch {}
   }, []);
 
-  // Camera Perspective (Chase 3P vs Realistic Cockpit 1P)
-  const [cameraView, setCameraView] = useState<'chase' | 'first_person'>(() => {
-    try {
-      const saved = window.localStorage.getItem('neon_redline_camera_v1');
-      if (saved === 'first_person' || saved === 'chase') return saved;
-    } catch {}
-    return 'chase';
-  });
-
-  const toggleCameraView = useCallback(() => {
-    setCameraView((prev) => {
-      const next = prev === 'chase' ? 'first_person' : 'chase';
-      try {
-        window.localStorage.setItem('neon_redline_camera_v1', next);
-      } catch {}
-      return next;
-    });
-  }, []);
-
   // Imperative simulation triggers passed into SceneCanvas
   const [steerHold, setSteerHold] = useState<number>(0);
   const [keySteerVisual, setKeySteerVisual] = useState<number>(0);
-  const [accelHold, setAccelHold] = useState<boolean>(false);
-  const [brakeHold, setBrakeHold] = useState<boolean>(false);
   const [flipTriggerCount, setFlipTriggerCount] = useState<number>(0);
   const [boostTriggerCount, setBoostTriggerCount] = useState<number>(0);
   const [restartTriggerCount, setRestartTriggerCount] = useState<number>(0);
@@ -272,8 +250,6 @@ export default function App() {
     if (gamePhase !== 'playing') {
       setSteerHold(0);
       setKeySteerVisual(0);
-      setAccelHold(false);
-      setBrakeHold(false);
     }
   }, [gamePhase]);
 
@@ -516,11 +492,6 @@ export default function App() {
           setGamePhase('paused');
           return;
         }
-        if (code === 'KeyC') {
-          e.preventDefault();
-          toggleCameraView();
-          return;
-        }
         if (code === 'KeyR') {
           e.preventDefault();
           handleStartRun();
@@ -528,16 +499,6 @@ export default function App() {
         }
         if (code === 'ArrowLeft' || code === 'KeyA' || code === 'ArrowRight' || code === 'KeyD') {
           syncKeyboardSteerVisual();
-          return;
-        }
-        if (code === 'ArrowUp' || code === 'KeyW') {
-          e.preventDefault();
-          setAccelHold(true);
-          return;
-        }
-        if (code === 'ArrowDown' || code === 'KeyS') {
-          e.preventDefault();
-          setBrakeHold(true);
           return;
         }
         if (code === 'KeyF') {
@@ -572,20 +533,12 @@ export default function App() {
       ) {
         syncKeyboardSteerVisual();
       }
-      if (e.code === 'ArrowUp' || e.code === 'KeyW') {
-        setAccelHold(false);
-      }
-      if (e.code === 'ArrowDown' || e.code === 'KeyS') {
-        setBrakeHold(false);
-      }
     };
 
     const onWindowBlur = () => {
       keysHeldRef.current.clear();
       setSteerHold(0);
       setKeySteerVisual(0);
-      setAccelHold(false);
-      setBrakeHold(false);
     };
 
     window.addEventListener('keydown', onKeyDown);
@@ -692,10 +645,7 @@ export default function App() {
         customSpriteUrl={customSpriteUrl}
         roadMode={roadMode}
         skyMode={skyMode}
-        cameraView={cameraView}
         steerHold={steerHold}
-        accelHold={accelHold}
-        brakeHold={brakeHold}
         flipTriggerCount={flipTriggerCount}
         boostTriggerCount={boostTriggerCount}
         restartTriggerCount={restartTriggerCount}
@@ -960,38 +910,6 @@ export default function App() {
               })}
             </div>
 
-            {/* Camera View Switcher (3P Chase vs 1P Cockpit) */}
-            <div className="grid grid-cols-2 gap-1.5" role="group" aria-label="Camera Perspective">
-              <button
-                type="button"
-                onClick={() => {
-                  setCameraView('chase');
-                  try { window.localStorage.setItem('neon_redline_camera_v1', 'chase'); } catch {}
-                }}
-                className={`min-h-[38px] px-2 py-1 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
-                  cameraView === 'chase'
-                    ? 'bg-slate-800 text-white border border-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.3)]'
-                    : 'bg-slate-900/70 text-slate-400 hover:bg-slate-800 border border-slate-800/80'
-                }`}
-              >
-                <span>🏎️ 3P Chase Cam</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setCameraView('first_person');
-                  try { window.localStorage.setItem('neon_redline_camera_v1', 'first_person'); } catch {}
-                }}
-                className={`min-h-[38px] px-2 py-1 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
-                  cameraView === 'first_person'
-                    ? 'bg-slate-800 text-white border border-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.3)]'
-                    : 'bg-slate-900/70 text-slate-400 hover:bg-slate-800 border border-slate-800/80'
-                }`}
-              >
-                <span>👁️ 1P Cockpit POV</span>
-              </button>
-            </div>
-
             {/* Primary Launch CTA */}
             <button
               type="button"
@@ -1094,25 +1012,8 @@ export default function App() {
               </div>
             </div>
 
-            {/* Top-Right Compact Square SVG Utility Buttons (Camera [C], Mute [M], Pause [P], Restart [R]) */}
+            {/* Top-Right Compact Square SVG Utility Buttons (Mute [M], Restart [R], Pause [P]) */}
             <div className="flex items-center gap-1.5 sm:gap-2 pointer-events-auto shrink-0">
-              <button
-                type="button"
-                tabIndex={-1}
-                aria-label={cameraView === 'first_person' ? 'Switch to 3rd Person View [C]' : 'Switch to 1st Person Cockpit View [C]'}
-                onClick={(e) => {
-                  e.currentTarget.blur();
-                  toggleCameraView();
-                }}
-                className={`min-h-[40px] px-2.5 sm:min-h-[44px] flex items-center justify-center gap-1 rounded-xl border font-mono font-bold text-xs tracking-wider transition-all ${
-                  cameraView === 'first_person'
-                    ? 'border-cyan-400 bg-cyan-950/80 text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.4)]'
-                    : 'border-slate-800 bg-slate-900/85 text-slate-200 hover:bg-slate-800'
-                }`}
-              >
-                <span>{cameraView === 'first_person' ? '👁️ 1P' : '🏎️ 3P'}</span>
-              </button>
-
               <button
                 type="button"
                 tabIndex={-1}
@@ -1241,32 +1142,10 @@ export default function App() {
                       {Math.round(telemetry.distance)}m
                     </span>
                   </div>
-
-                  <div className="flex items-center gap-1.5 min-w-[96px] sm:min-w-[130px]">
-                    <span className="text-[9px] font-mono text-slate-400 shrink-0">
-                      {telemetry.isFever ? 'FEVER' : 'NITRO'}
-                    </span>
-                    <div
-                      className="flex-1 h-2 rounded-full bg-slate-800 overflow-hidden"
-                      data-testid="fever-bar"
-                    >
-                      <div
-                        className={`h-full transition-transform origin-left ${
-                          telemetry.isFever ? 'bg-cyan-400' : 'bg-amber-400'
-                        }`}
-                        style={{
-                          transform: `scaleX(${Math.min(1, Math.max(0, telemetry.fever / 100))})`,
-                        }}
-                      />
-                    </div>
-                    <span className="text-[10px] font-mono tabular-nums text-slate-300 shrink-0">
-                      {Math.round(telemetry.fever)}%
-                    </span>
-                  </div>
                 </div>
 
-                {/* Tactile Cockpit Row: Steering Wheel | Flash + Horn + Nitro | Brake + Gas Pedals */}
-                <div className="flex items-center justify-between gap-1 sm:gap-2">
+                {/* Tactile Cockpit Row: Steering Wheel & Flash + Horn */}
+                <div className="flex items-center justify-between gap-2">
                   {/* Left: Interactive Rotatable Steering Wheel with Center Horn */}
                   <SteeringWheel
                     value={steerHold !== 0 ? steerHold : keySteerVisual}
@@ -1274,8 +1153,8 @@ export default function App() {
                     onHorn={triggerHornAction}
                   />
 
-                  {/* Center: High-Beam Flash [F], Horn [E] & Nitro [Space] */}
-                  <div className="flex items-center gap-1 sm:gap-1.5">
+                  {/* Right: High-Beam Flash [F] & Horn [E] */}
+                  <div className="flex items-center gap-2">
                     <button
                       type="button"
                       data-hud-btn="true"
@@ -1286,16 +1165,16 @@ export default function App() {
                         e.currentTarget.blur();
                         triggerFlashAction();
                       }}
-                      className={`min-h-[52px] min-w-[42px] sm:min-w-[52px] px-1.5 sm:px-2 py-1.5 rounded-xl border flex flex-col items-center justify-center gap-0.5 transition-colors whitespace-nowrap ${
+                      className={`min-h-[52px] min-w-[58px] sm:min-w-[64px] px-2 py-1.5 rounded-xl border flex flex-col items-center justify-center gap-0.5 transition-colors whitespace-nowrap ${
                         flashPulse
                           ? 'bg-cyan-400 border-white text-slate-950'
                           : 'bg-slate-900 border-cyan-500/60 hover:bg-slate-800 text-cyan-300'
                       }`}
                     >
-                      <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" className="w-5 h-5 fill-current" aria-hidden="true">
                         <path d="M5 7c-1.7 0-3 2.2-3 5s1.3 5 3 5h5V7H5zm8 0v2h8V7h-8zm0 4v2h9v-2h-9zm0 4v2h8v-2h-8z" />
                       </svg>
-                      <span className="text-[9px] font-mono font-bold">FLASH</span>
+                      <span className="text-[10px] font-mono font-bold">FLASH</span>
                     </button>
 
                     <button
@@ -1308,45 +1187,18 @@ export default function App() {
                         e.currentTarget.blur();
                         triggerHornAction();
                       }}
-                      className={`min-h-[52px] min-w-[42px] sm:min-w-[50px] px-1.5 sm:px-2 py-1.5 rounded-xl border flex flex-col items-center justify-center gap-0.5 transition-colors whitespace-nowrap ${
+                      className={`min-h-[52px] min-w-[58px] sm:min-w-[64px] px-2 py-1.5 rounded-xl border flex flex-col items-center justify-center gap-0.5 transition-colors whitespace-nowrap ${
                         hornPulse
                           ? 'bg-amber-400 border-white text-slate-950'
                           : 'bg-slate-900 border-amber-500/60 hover:bg-slate-800 text-amber-300'
                       }`}
                     >
-                      <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" className="w-5 h-5 fill-current" aria-hidden="true">
                         <path d="M3 10v4h4l5 5V5L7 10H3zm13.5 2c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
                       </svg>
-                      <span className="text-[9px] font-mono font-bold">HORN</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      data-hud-btn="true"
-                      data-testid="btn-nitro"
-                      tabIndex={-1}
-                      disabled={telemetry.fever < 40 || telemetry.isFever}
-                      onClick={(e) => {
-                        e.currentTarget.blur();
-                        setBoostTriggerCount((c) => c + 1);
-                      }}
-                      className={`min-h-[52px] px-2 sm:px-2.5 py-1.5 rounded-xl border font-display font-bold text-[10px] sm:text-xs whitespace-nowrap ${
-                        telemetry.fever >= 40 && !telemetry.isFever
-                          ? 'bg-cyan-400 border-cyan-200 text-slate-950'
-                          : 'bg-slate-900/90 border-slate-800 text-slate-500 cursor-not-allowed'
-                      }`}
-                    >
-                      NITRO
+                      <span className="text-[10px] font-mono font-bold">HORN</span>
                     </button>
                   </div>
-
-                  {/* Right: Realistic Brushed Billet Aluminum Racing Pedals */}
-                  <RealisticPedals
-                    accelHold={accelHold}
-                    brakeHold={brakeHold}
-                    onAccelChange={setAccelHold}
-                    onBrakeChange={setBrakeHold}
-                  />
                 </div>
               </div>
             )}
@@ -1419,42 +1271,6 @@ export default function App() {
                     </button>
                   );
                 })}
-              </div>
-            </div>
-
-            <div>
-              <p className="text-[10px] font-semibold tracking-wider text-slate-400 uppercase mb-1.5 text-left">
-                Camera Perspective
-              </p>
-              <div className="grid grid-cols-2 gap-2" role="group" aria-label="Camera Perspective">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCameraView('chase');
-                    try { window.localStorage.setItem('neon_redline_camera_v1', 'chase'); } catch {}
-                  }}
-                  className={`min-h-[38px] px-2 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
-                    cameraView === 'chase'
-                      ? 'bg-slate-800 text-white border border-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.3)]'
-                      : 'bg-slate-900/80 text-slate-400 hover:bg-slate-800 border border-slate-800'
-                  }`}
-                >
-                  <span>🏎️ 3rd Person</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCameraView('first_person');
-                    try { window.localStorage.setItem('neon_redline_camera_v1', 'first_person'); } catch {}
-                  }}
-                  className={`min-h-[38px] px-2 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
-                    cameraView === 'first_person'
-                      ? 'bg-slate-800 text-white border border-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.3)]'
-                      : 'bg-slate-900/80 text-slate-400 hover:bg-slate-800 border border-slate-800'
-                  }`}
-                >
-                  <span>👁️ 1st Person POV</span>
-                </button>
               </div>
             </div>
 

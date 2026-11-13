@@ -28,7 +28,6 @@ import {
 } from '../game/rules';
 import { getPixelCarCanvas } from '../game/pixelSprites';
 import { soundFX } from '../game/audio';
-import { Car3DViewer } from './Car3DViewer';
 
 interface GarageModalProps {
   isOpen: boolean;
@@ -64,7 +63,6 @@ export const GarageModal: React.FC<GarageModalProps> = ({
   onClearCustomSprite,
 }) => {
   const [previewCarId, setPreviewCarId] = useState<string>(selectedCarId);
-  const [viewMode, setViewMode] = useState<'3d' | '2d'>('3d');
   const [previewDir, setPreviewDir] = useState<DiagonalDirection>('right');
   const [activeTab, setActiveTab] = useState<GarageTabId>('body');
   const [previewFlashing, setPreviewFlashing] = useState<boolean>(false);
@@ -250,105 +248,69 @@ export const GarageModal: React.FC<GarageModalProps> = ({
       {/* 3. SCROLLABLE MIDDLE BODY */}
       <div className="flex-1 overflow-y-auto px-3 sm:px-5 py-3 min-h-0 space-y-4">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-          {/* Left Column: 3D/2D Showroom & Testing Bay */}
+          {/* Left Column: 2D Pixel Showcase & Testing Bay */}
           <div className="lg:col-span-5 flex flex-col rounded-2xl border border-slate-800 bg-slate-950 p-3 sm:p-4">
             <div className="flex items-center justify-between gap-2 mb-2.5">
               <span className="text-[11px] font-mono text-slate-300 truncate font-semibold">
-                {previewCar.codename}
+                {previewCar.codename} · T{previewCar.tier}
               </span>
               <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded-lg border border-slate-800 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setViewMode('3d')}
-                  className={`min-h-[34px] px-2.5 py-1 text-[11px] font-mono rounded-md transition-colors whitespace-nowrap flex items-center gap-1 ${
-                    viewMode === '3d'
-                      ? 'bg-cyan-500 text-slate-950 font-bold shadow'
-                      : 'text-slate-300 hover:text-white'
+                  onClick={() => setPreviewDir('left')}
+                  className={`min-h-[34px] px-2.5 py-1 text-[11px] font-mono rounded-md transition-colors whitespace-nowrap ${
+                    previewDir === 'left'
+                      ? 'bg-amber-400 text-slate-950 font-bold'
+                      : 'text-slate-400 hover:text-white'
                   }`}
                 >
-                  <span>🏎️ 3D Model</span>
+                  \ Left Drift
                 </button>
                 <button
                   type="button"
-                  onClick={() => setViewMode('2d')}
-                  className={`min-h-[34px] px-2.5 py-1 text-[11px] font-mono rounded-md transition-colors whitespace-nowrap flex items-center gap-1 ${
-                    viewMode === '2d'
-                      ? 'bg-amber-500 text-slate-950 font-bold shadow'
-                      : 'text-slate-300 hover:text-white'
+                  onClick={() => setPreviewDir('right')}
+                  className={`min-h-[34px] px-2.5 py-1 text-[11px] font-mono rounded-md transition-colors whitespace-nowrap ${
+                    previewDir === 'right'
+                      ? 'bg-amber-400 text-slate-950 font-bold'
+                      : 'text-slate-400 hover:text-white'
                   }`}
                 >
-                  <span>👾 2D Pixel</span>
+                  / Right Drift
                 </button>
-                {viewMode === '2d' && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => setPreviewDir('left')}
-                      className={`min-h-[34px] px-2 py-1 text-[11px] font-mono rounded-md transition-colors whitespace-nowrap ${
-                        previewDir === 'left'
-                          ? 'bg-amber-400 text-slate-950 font-bold'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      \ L
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPreviewDir('right')}
-                      className={`min-h-[34px] px-2 py-1 text-[11px] font-mono rounded-md transition-colors whitespace-nowrap ${
-                        previewDir === 'right'
-                          ? 'bg-amber-400 text-slate-950 font-bold'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      / R
-                    </button>
-                  </>
-                )}
               </div>
             </div>
 
-            {/* Turntable Bay: 3D Model or 2D Pixel Canvas */}
-            {viewMode === '3d' ? (
-              <Car3DViewer
-                car={previewCar}
-                appearance={resolved}
-                customization={currentCustom}
-                isFlashing={previewFlashing}
-                isRevving={previewRevving}
-              />
-            ) : (
-              <div
-                className="relative flex items-center justify-center h-48 sm:h-60 rounded-xl overflow-hidden bg-slate-900 border border-slate-800"
-                style={{
-                  backgroundImage: previewFlashing
-                    ? `radial-gradient(circle at ${previewDir === 'right' ? '72% 38%' : '28% 38%'}, ${resolved.headlightBeamHex}77, rgba(15, 23, 42, 0.96) 70%)`
-                    : resolved.underglowHex
-                    ? `radial-gradient(circle at 50% 66%, ${resolved.underglowHex}38, rgba(15, 23, 42, 0.96) 72%)`
-                    : 'radial-gradient(circle at 50% 62%, rgba(251, 191, 36, 0.14), rgba(15, 23, 42, 0.96) 72%)',
-                }}
-              >
-                {previewFlashing && (
-                  <div
-                    aria-hidden="true"
-                    className="absolute inset-0 pointer-events-none"
-                    style={{
-                      background:
-                        previewDir === 'right'
-                          ? `linear-gradient(28deg, transparent 42%, ${resolved.headlightBeamHex}55 78%, ${resolved.headlightBeamHex}99 100%)`
-                          : `linear-gradient(152deg, transparent 42%, ${resolved.headlightBeamHex}55 78%, ${resolved.headlightBeamHex}99 100%)`,
-                    }}
-                  />
-                )}
-                <canvas
-                  ref={spriteCanvasRef}
-                  width={300}
-                  height={220}
-                  style={{ imageRendering: 'pixelated' }}
-                  className="relative z-10 w-64 h-44 sm:w-72 sm:h-52 object-contain"
+            {/* Turntable Bay: 2D Pixel Canvas */}
+            <div
+              className="relative flex items-center justify-center h-48 sm:h-60 rounded-xl overflow-hidden bg-slate-900 border border-slate-800"
+              style={{
+                backgroundImage: previewFlashing
+                  ? `radial-gradient(circle at ${previewDir === 'right' ? '72% 38%' : '28% 38%'}, ${resolved.headlightBeamHex}77, rgba(15, 23, 42, 0.96) 70%)`
+                  : resolved.underglowHex
+                  ? `radial-gradient(circle at 50% 66%, ${resolved.underglowHex}38, rgba(15, 23, 42, 0.96) 72%)`
+                  : 'radial-gradient(circle at 50% 62%, rgba(251, 191, 36, 0.14), rgba(15, 23, 42, 0.96) 72%)',
+              }}
+            >
+              {previewFlashing && (
+                <div
+                  aria-hidden="true"
+                  className="absolute inset-0 pointer-events-none"
+                  style={{
+                    background:
+                      previewDir === 'right'
+                        ? `linear-gradient(28deg, transparent 42%, ${resolved.headlightBeamHex}55 78%, ${resolved.headlightBeamHex}99 100%)`
+                        : `linear-gradient(152deg, transparent 42%, ${resolved.headlightBeamHex}55 78%, ${resolved.headlightBeamHex}99 100%)`,
+                  }}
                 />
-              </div>
-            )}
+              )}
+              <canvas
+                ref={spriteCanvasRef}
+                width={300}
+                height={220}
+                style={{ imageRendering: 'pixelated' }}
+                className="relative z-10 w-64 h-44 sm:w-72 sm:h-52 object-contain"
+              />
+            </div>
 
             {/* Interactive Rig Tester Buttons: Flash / Horn / Rev Flames + Reset */}
             <div className="grid grid-cols-4 gap-1.5 mt-2.5">
