@@ -34,22 +34,22 @@ export const LeaderboardModal: React.FC<LeaderboardModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 pointer-events-auto"
+      className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-6 pointer-events-auto"
       style={{ backgroundColor: 'rgba(5, 8, 17, 0.88)' }}
       role="dialog"
       aria-modal="true"
       aria-label="Global Drift Leaderboard"
     >
       <div
-        className="w-full max-w-2xl max-h-[88vh] overflow-y-auto rounded-2xl border border-slate-800 p-4 sm:p-6 text-slate-100 shadow-2xl"
+        className="w-full max-w-2xl max-h-[90dvh] flex flex-col overflow-hidden rounded-2xl border border-slate-800 text-slate-100 shadow-2xl"
         style={{ backgroundColor: '#0b101e' }}
       >
-        <div className="flex items-center justify-between gap-4 pb-4 border-b border-slate-800">
-          <div>
-            <p className="text-xs font-semibold tracking-wider text-cyan-400">
+        <div className="shrink-0 flex items-center justify-between gap-3 px-4 sm:px-6 py-3.5 border-b border-slate-800">
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold tracking-wider text-cyan-400 truncate">
               CLOUD SQL GLOBAL STANDINGS
             </p>
-            <h2 className="text-xl sm:text-2xl font-bold font-display">
+            <h2 className="text-lg sm:text-2xl font-bold font-display truncate">
               Canyon Slash Leaderboard
             </h2>
           </div>
@@ -58,18 +58,19 @@ export const LeaderboardModal: React.FC<LeaderboardModalProps> = ({
             type="button"
             onClick={onClose}
             aria-label="Close Leaderboard"
-            className="min-h-[44px] px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-semibold transition-colors whitespace-nowrap shrink-0"
+            className="min-h-[40px] px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap shrink-0"
           >
             Close
           </button>
         </div>
 
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-6 space-y-4">
         {/* Account Sync Banner */}
-        <div className="my-4 p-3.5 rounded-xl border border-slate-800 bg-slate-950 flex flex-wrap items-center justify-between gap-3">
+        <div className="p-3.5 rounded-xl border border-slate-800 bg-slate-950 flex flex-wrap items-center justify-between gap-3">
           <div className="text-xs text-slate-300">
             {userEmail ? (
               <span>
-                Signed in as <strong className="text-white">{userEmail}</strong> · Garage & Runs synced
+                Signed in as <strong className="text-white">{userEmail}</strong> · Garage &amp; Runs synced
               </span>
             ) : (
               <span>Sign in with Google to sync your unlocked cars and post global drift scores.</span>
@@ -111,11 +112,11 @@ export const LeaderboardModal: React.FC<LeaderboardModalProps> = ({
               return (
                 <div
                   key={row.id || idx}
-                  className="flex items-center justify-between gap-3 px-4 py-3 text-sm"
+                  className="flex items-center justify-between gap-3 px-3.5 sm:px-4 py-3 text-sm"
                 >
-                  <div className="flex items-center gap-3 min-w-0">
+                  <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
                     <span
-                      className={`w-7 text-center font-mono font-bold tabular-nums ${
+                      className={`w-7 text-center font-mono font-bold tabular-nums shrink-0 ${
                         idx === 0
                           ? 'text-amber-400'
                           : idx === 1
@@ -137,7 +138,7 @@ export const LeaderboardModal: React.FC<LeaderboardModalProps> = ({
                     </div>
                   </div>
 
-                  <div className="text-right font-mono font-bold tabular-nums text-amber-400 shrink-0">
+                  <div className="text-right font-mono font-bold tabular-nums text-amber-400 shrink-0 text-xs sm:text-sm">
                     {Math.round(row.score).toLocaleString()} PTS
                   </div>
                 </div>
@@ -145,6 +146,7 @@ export const LeaderboardModal: React.FC<LeaderboardModalProps> = ({
             })}
           </div>
         )}
+        </div>
       </div>
     </div>
   );

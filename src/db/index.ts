@@ -1,4 +1,4 @@
-import { drizzle } from 'drizzle-orm/node-postgres';
+import { drizzle, NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import * as schema from './schema.ts';
 
@@ -6,7 +6,14 @@ declare global {
   var _postgresPool: Pool | undefined;
 }
 
+export const isDatabaseConfigured = Boolean(
+  process.env.SQL_HOST?.trim() &&
+    process.env.SQL_USER?.trim() &&
+    process.env.SQL_DB_NAME?.trim()
+);
+
 export const createPool = () => {
+  if (!isDatabaseConfigured) return null;
   if (!global._postgresPool) {
     global._postgresPool = new Pool({
       host: process.env.SQL_HOST,
@@ -14,7 +21,7 @@ export const createPool = () => {
       password: process.env.SQL_PASSWORD,
       database: process.env.SQL_DB_NAME,
       max: 10,
-      connectionTimeoutMillis: 15000,
+      connectionTimeoutMillis: 3000,
     });
 
     global._postgresPool.on('error', (err) => {
@@ -26,4 +33,7 @@ export const createPool = () => {
 
 const pool = createPool();
 
-export const db = drizzle(pool, { schema });
+export const db: NodePgDatabase<typeof schema> | null = pool
+  ? drizzle(pool, { schema })
+  : null;
+

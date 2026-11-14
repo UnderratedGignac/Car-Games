@@ -799,14 +799,14 @@ export const ShareCardModal: React.FC<ShareCardModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md pointer-events-auto"
+      className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/85 pointer-events-auto"
       role="dialog"
       aria-modal="true"
       aria-label="High-Score Polaroid Share Card"
     >
       <div
-        className="relative w-full max-w-lg rounded-2xl bg-slate-950/95 border border-cyan-500/50 shadow-[0_0_60px_rgba(6,182,212,0.25)] overflow-hidden flex flex-col items-center p-4 sm:p-5 max-h-[95vh] text-slate-100"
-        style={{ backgroundColor: 'rgba(9, 14, 26, 0.97)' }}
+        className="relative w-full max-w-lg rounded-2xl bg-slate-950/95 border border-cyan-500/50 shadow-[0_0_60px_rgba(6,182,212,0.25)] overflow-hidden flex flex-col max-h-[92dvh] text-slate-100"
+        style={{ backgroundColor: 'rgba(9, 14, 26, 0.98)' }}
       >
         {/* Ambient Top Glow */}
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-64 h-12 bg-cyan-500/20 blur-3xl pointer-events-none" />
@@ -819,15 +819,15 @@ export const ShareCardModal: React.FC<ShareCardModalProps> = ({
           </div>
         )}
 
-        {/* Modal Header */}
-        <div className="w-full flex items-center justify-between pb-3 border-b border-slate-800/80 mb-3">
-          <div className="flex items-center gap-2">
-            <span className="text-xl">📸</span>
-            <div>
-              <h2 className="text-base sm:text-lg font-display font-bold text-white tracking-wide">
+        {/* Modal Header (Pinned) */}
+        <div className="shrink-0 w-full flex items-center justify-between px-4 sm:px-5 pt-3.5 pb-3 border-b border-slate-800/80">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-xl shrink-0">📸</span>
+            <div className="min-w-0">
+              <h2 className="text-base sm:text-lg font-display font-bold text-white tracking-wide truncate">
                 HIGH-SCORE POLAROID
               </h2>
-              <p className="text-[10px] font-mono text-cyan-400">
+              <p className="text-[10px] font-mono text-cyan-400 truncate">
                 SHARE RECORD · CHALLENGE RIVALS
               </p>
             </div>
@@ -835,7 +835,7 @@ export const ShareCardModal: React.FC<ShareCardModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="w-8 h-8 rounded-full bg-slate-900 border border-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors text-sm"
+            className="w-9 h-9 rounded-full bg-slate-900 border border-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors text-sm shrink-0"
             aria-label="Close Share Modal"
           >
             ✕
@@ -851,16 +851,16 @@ export const ShareCardModal: React.FC<ShareCardModalProps> = ({
           aria-hidden="true"
         />
 
-        {/* Polaroid Card Preview */}
-        <div className="relative w-full flex items-center justify-center my-1 select-none overflow-hidden max-h-[58vh]">
+        {/* Scrollable Polaroid Card Preview */}
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-3.5 sm:p-4 flex items-center justify-center select-none">
           {cardDataUrl ? (
             <img
               src={cardDataUrl}
               alt="High-Score Polaroid Card"
-              className="max-h-[56vh] w-auto max-w-full object-contain rounded-xl shadow-2xl border border-cyan-500/40"
+              className="max-h-[44dvh] sm:max-h-[54dvh] w-auto max-w-full object-contain rounded-xl shadow-2xl border border-cyan-500/40"
             />
           ) : (
-            <div className="w-full aspect-[4/5] max-h-[56vh] flex flex-col items-center justify-center bg-slate-900/60 rounded-xl border border-slate-800 animate-pulse">
+            <div className="w-full aspect-[4/5] max-h-[44dvh] sm:max-h-[54dvh] flex flex-col items-center justify-center bg-slate-900/60 rounded-xl border border-slate-800 animate-pulse">
               <span className="text-3xl mb-2">🏎️</span>
               <span className="text-xs font-mono text-cyan-400">
                 {isGenerating ? 'Rendering High-Res Card...' : 'Initializing Preview...'}
@@ -869,13 +869,13 @@ export const ShareCardModal: React.FC<ShareCardModalProps> = ({
           )}
         </div>
 
-        {/* Interactive Action Buttons */}
-        <div className="w-full space-y-2 mt-3 pt-2 border-t border-slate-800/80">
+        {/* Interactive Action Buttons (Pinned Footer) */}
+        <div className="shrink-0 w-full space-y-2 p-3.5 sm:p-4 border-t border-slate-800/80 bg-slate-950">
           {/* Primary Share Action */}
           <button
             type="button"
             onClick={handleShareToFriends}
-            className="w-full min-h-[46px] py-2.5 px-4 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 text-slate-950 font-display font-bold text-sm tracking-wide shadow-[0_0_20px_rgba(6,182,212,0.4)] flex items-center justify-center gap-2 transition-transform active:scale-[0.99]"
+            className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 text-slate-950 font-display font-bold text-sm tracking-wide shadow-[0_0_20px_rgba(6,182,212,0.4)] flex items-center justify-center gap-2 transition-transform active:scale-[0.99]"
           >
             <span>📸</span>
             <span>Share to Friends</span>
@@ -886,15 +886,15 @@ export const ShareCardModal: React.FC<ShareCardModalProps> = ({
             <button
               type="button"
               onClick={handleDownloadCard}
-              className="min-h-[42px] py-2 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-100 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+              className="min-h-[40px] py-2 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-100 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
             >
               <span>💾</span>
-              <span>Download Card</span>
+              <span>Download</span>
             </button>
             <button
               type="button"
               onClick={handleCopyScore}
-              className="min-h-[42px] py-2 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-100 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+              className="min-h-[40px] py-2 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-100 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
             >
               <span>📋</span>
               <span>Copy Score</span>

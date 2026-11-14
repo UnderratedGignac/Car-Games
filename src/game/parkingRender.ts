@@ -31,10 +31,10 @@ function fillQuad(
   lineWidth = 1
 ) {
   ctx.beginPath();
-  ctx.moveTo(Math.round(a.x), Math.round(a.y));
-  ctx.lineTo(Math.round(b.x), Math.round(b.y));
-  ctx.lineTo(Math.round(c.x), Math.round(c.y));
-  ctx.lineTo(Math.round(d.x), Math.round(d.y));
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(b.x, b.y);
+  ctx.lineTo(c.x, c.y);
+  ctx.lineTo(d.x, d.y);
   ctx.closePath();
   ctx.fillStyle = fill;
   ctx.fill();

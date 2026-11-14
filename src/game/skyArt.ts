@@ -693,20 +693,24 @@ export function renderDynamicSkyAtmosphere(params: {
   const { ctx, pxW, horizonY, nowMs, camHeading, sky, sunScreenX, sunScreenY } = params;
   const headingShift = (camHeading + Math.PI / 2) * 16;
 
-  // 1. Diagonal anime Sunbeams / Crepuscular God-Rays
+  // 1. Diagonal anime Sunbeams / Crepuscular God-Rays with smooth vertical fade
   if (sky.hasGodRays) {
     ctx.save();
-    ctx.globalAlpha = sky.celestialKind === 'sunset_sun' ? 0.14 : 0.10;
-    ctx.fillStyle = sky.celestialPrimary;
-    const rays = [-0.55, -0.2, 0.18, 0.52];
+    const rayGrad = ctx.createLinearGradient(sunScreenX, sunScreenY, sunScreenX, horizonY + 14);
+    rayGrad.addColorStop(0.0, sky.celestialPrimary);
+    rayGrad.addColorStop(0.65, sky.celestialInnerGlow);
+    rayGrad.addColorStop(1.0, 'rgba(255, 255, 255, 0)');
+    ctx.globalAlpha = sky.celestialKind === 'sunset_sun' ? 0.22 : 0.16;
+    ctx.fillStyle = rayGrad;
+    const rays = [-0.58, -0.22, 0.16, 0.50];
     for (let i = 0; i < rays.length; i++) {
       const sway = Math.sin(nowMs * 0.00045 + i * 1.7) * 8;
       const spread = rays[i] * pxW * 0.65 + sway;
       ctx.beginPath();
-      ctx.moveTo(sunScreenX - 4, sunScreenY);
-      ctx.lineTo(sunScreenX + 4, sunScreenY);
-      ctx.lineTo(sunScreenX + spread + 28, horizonY + 14);
-      ctx.lineTo(sunScreenX + spread - 12, horizonY + 14);
+      ctx.moveTo(sunScreenX - 5, sunScreenY);
+      ctx.lineTo(sunScreenX + 5, sunScreenY);
+      ctx.lineTo(sunScreenX + spread + 32, horizonY + 14);
+      ctx.lineTo(sunScreenX + spread - 14, horizonY + 14);
       ctx.closePath();
       ctx.fill();
     }
@@ -793,9 +797,16 @@ export function renderDynamicSkyAtmosphere(params: {
     ctx.restore();
   }
 
-  // 4. Soft Horizon Atmospheric Haze
-  ctx.fillStyle = sky.horizonGlowColor;
-  ctx.fillRect(0, Math.max(0, horizonY - 12), pxW, 18);
+  // 4. Smooth Multi-Stop Horizon Atmospheric Haze & Aerial Scattering Band
+  const hazeTop = Math.max(0, horizonY - 22);
+  const hazeBot = horizonY + 14;
+  const hazeGrad = ctx.createLinearGradient(0, hazeTop, 0, hazeBot);
+  hazeGrad.addColorStop(0.0, 'rgba(0, 0, 0, 0)');
+  hazeGrad.addColorStop(0.56, sky.horizonGlowColor);
+  hazeGrad.addColorStop(0.84, sky.celestialGlow);
+  hazeGrad.addColorStop(1.0, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = hazeGrad;
+  ctx.fillRect(0, hazeTop, pxW, hazeBot - hazeTop);
 }
 
 /**
@@ -883,11 +894,11 @@ export function renderMythicalDragonsAndSkyAnomalies(params: {
       const segRad = Math.max(2, Math.round((s === 0 ? 5.5 : s < 4 ? 4.8 : s < 8 ? 3.6 : 2.2) * dragon.scale));
 
       // Trailing fire/plasma spirit embers from the tail
-      if (s >= 9 && Math.random() < 0.6) {
+      if (s >= 9 && Math.sin(nowMs * 0.018 + s * 1.9 + d) > -0.25) {
         ctx.fillStyle = dragon.emberColor;
         ctx.globalAlpha = 0.65;
-        const emberX = segX - dragon.dir * (Math.random() * 14);
-        const emberY = segY + (Math.random() - 0.5) * 8;
+        const emberX = segX - dragon.dir * (4 + ((Math.sin(nowMs * 0.02 + s * 3.1) + 1) * 5));
+        const emberY = segY + Math.cos(nowMs * 0.024 + s * 2.7) * 4;
         ctx.fillRect(Math.round(emberX), Math.round(emberY), 2, 2);
       }
 

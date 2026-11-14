@@ -13,6 +13,7 @@ import {
   DriftPhysicsState,
   GameModeId,
   HIGHWAY_LANE_OFFSET,
+  HIGHWAY_ROAD_WIDTH,
   RoadBiomeConfig,
   RoadBiomeId,
   RoadSelectionMode,
@@ -50,8 +51,16 @@ import {
   computeDamagedStats,
   createMintDamageState,
   getDamageVisualCacheKey,
+  isCarTotaled,
   normalizeCarDamageState,
 } from './damage';
+import {
+  CrashBody3D,
+  createCrashBody3D,
+  resolveTrafficCollisionImpulse,
+  stepCrashBody3D,
+  stepTrafficCrashBody,
+} from './crashPhysics';
 import {
   GhostFrame,
   GhostRun,
@@ -69,11 +78,13 @@ import {
   computeDistanceFogAlpha,
   renderBackgroundVista3D,
   renderBridgeTrussArch3D,
+  renderFinishGate3D,
   renderRealisticRoadsideLandmarks3D,
   renderReflectorBollard3D,
   renderTerrainMesh3D,
   renderWorldObject3D,
 } from './world3d';
+import type { CampaignLevel } from './levels';
 import { soundFX, triggerHaptic } from './audio';
 import { MissionType } from './missions';
 import {
@@ -102,6 +113,12 @@ import {
   renderDynamicSkyAtmosphere,
   resolveSkyAtmosphere,
 } from './skyArt';
+import {
+  clampSwipeAnchor,
+  computeSwipeSteerDelta,
+  resolveCombinedSteering,
+  resolveDrivingPedals,
+} from './controls';
 
 export type GamePhase = 'title' | 'playing' | 'paused' | 'gameover';
 
@@ -164,6 +181,8 @@ interface SceneCanvasProps {
   customSpriteUrl?: string;
   roadMode?: RoadSelectionMode;
   skyMode?: SkyThemeId;
+  activeLevel?: CampaignLevel | null;
+  isModalOpen?: boolean;
   steerHold?: number; // -1 left, 0 neutral, +1 right from UI buttons or steering wheel
   pedalGas?: boolean;
   pedalBrake?: boolean;
@@ -178,6 +197,7 @@ interface SceneCanvasProps {
   hornTriggerCount?: number;
   screenShakeIntensity?: number; // 0.0 (no shake, accessibility safe) to 1.0 (default 1.0)
   screenShakeMultiplier?: number;
+  highFpsMode?: boolean;
   controlScheme?: 'classic' | 'wheel' | 'swipe'; // default 'classic'
   carDamage?: CarDamageState;
   onCarDamageChange?: (nextDamage: CarDamageState) => void;
@@ -224,7 +244,7 @@ interface SmokePuff {
 
 interface DetachedPartDebris {
   active: boolean;
-  partId: CarPartId;
+  partId: CarPartId | 'wheel';
   x: number;
   y: number;
   z: number;
@@ -307,6 +327,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
   customSpriteUrl,
   roadMode = 'tour',
   skyMode = 'auto',
+  activeLevel = null,
+  isModalOpen = false,
   steerHold = 0,
   pedalGas = false,
   pedalBrake = false,
@@ -321,6 +343,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
   hornTriggerCount = 0,
   screenShakeIntensity,
   screenShakeMultiplier = 1.0,
+  highFpsMode = true,
   controlScheme = 'classic',
   carDamage,
   onCarDamageChange,
@@ -335,6 +358,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
   const effectiveShake = screenShakeIntensity !== undefined ? screenShakeIntensity : screenShakeMultiplier;
   const shakeMultiplierRef = useRef<number>(effectiveShake);
   shakeMultiplierRef.current = effectiveShake;
+
+  const highFpsRef = useRef<boolean>(highFpsMode);
+  highFpsRef.current = highFpsMode;
 
   const controlSchemeRef = useRef<'classic' | 'wheel' | 'swipe'>(controlScheme);
   controlSchemeRef.current = controlScheme;
@@ -359,6 +385,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
   const skyModeRef = useRef<SkyThemeId>(skyMode);
   skyModeRef.current = skyMode;
+
+  const levelRef = useRef<CampaignLevel | null>(activeLevel);
+  levelRef.current = activeLevel;
+
+  const isModalOpenRef = useRef<boolean>(isModalOpen);
+  isModalOpenRef.current = isModalOpen;
 
   const steerHoldRef = useRef<number>(steerHold);
   steerHoldRef.current = steerHold;
@@ -402,6 +434,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
   const prevGameMode = useRef(gameMode);
   if (gameMode !== prevGameMode.current) {
     prevGameMode.current = gameMode;
+    pendingResetRef.current = true;
+  }
+
+  const prevLevelIdRef = useRef<string | null>(activeLevel?.id ?? null);
+  if ((activeLevel?.id ?? null) !== prevLevelIdRef.current) {
+    prevLevelIdRef.current = activeLevel?.id ?? null;
     pendingResetRef.current = true;
   }
 
@@ -450,10 +488,11 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       document.createElement('canvas')
     );
 
+    const HD_UI_SCALE = 450 / 340;
     let viewW = window.innerWidth;
     let viewH = window.innerHeight;
-    let pxW = 200;
-    let pxH = 340;
+    let pxW = 320;
+    let pxH = 450;
     let cachedSkyGrad: CanvasGradient | null = null;
     let cachedMeadowGrad: CanvasGradient | null = null;
     let cachedHorizonMistGrad: CanvasGradient | null = null;
@@ -464,7 +503,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       const nextSkyKey = `${biome.id}:${sky.id}:${pxW}`;
       if (cachedSkyKey === nextSkyKey && cachedSkyGrad && cachedMeadowGrad && cachedHorizonMistGrad) return;
       cachedSkyKey = nextSkyKey;
-      cachedSkyGrad = ctx.createLinearGradient(0, 0, 0, cachedHorizonY + 14);
+      cachedSkyGrad = ctx.createLinearGradient(0, 0, 0, cachedHorizonY + Math.round(14 * HD_UI_SCALE));
       cachedSkyGrad.addColorStop(0.0, sky.skyStops[0]);
       cachedSkyGrad.addColorStop(0.55, sky.skyStops[1]);
       cachedSkyGrad.addColorStop(1.0, sky.skyStops[2]);
@@ -474,7 +513,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       cachedMeadowGrad.addColorStop(0.35, biome.valleyStops[1]);
       cachedMeadowGrad.addColorStop(1.0, biome.valleyStops[2]);
 
-      cachedHorizonMistGrad = ctx.createLinearGradient(0, Math.max(0, cachedHorizonY - 6), 0, cachedHorizonY + 22);
+      cachedHorizonMistGrad = ctx.createLinearGradient(
+        0,
+        Math.max(0, cachedHorizonY - Math.round(6 * HD_UI_SCALE)),
+        0,
+        cachedHorizonY + Math.round(22 * HD_UI_SCALE)
+      );
       cachedHorizonMistGrad.addColorStop(0.0, 'rgba(0, 0, 0, 0)');
       cachedHorizonMistGrad.addColorStop(0.35, sky.horizonGlowColor);
       cachedHorizonMistGrad.addColorStop(0.68, biome.valleyStops[0]);
@@ -487,14 +531,18 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       }
       renderCelestialSprite(celestialCanvas, sky);
 
-      // Pre-render multi-layer realistic skyline / canyon mesas / alpine peaks onto horizonCanvas
+      // Pre-render multi-layer realistic skyline / canyon mesas / alpine peaks onto horizonCanvas at HD resolution
+      const logPxW = pxW / HD_UI_SCALE;
+      const logHorizonY = cachedHorizonY / HD_UI_SCALE;
       const overscan = 160;
-      const hw = pxW + overscan * 2;
-      const hh = cachedHorizonY + 14;
-      horizonCanvas.width = hw;
-      horizonCanvas.height = hh;
+      const hw = logPxW + overscan * 2;
+      const hh = logHorizonY + 14;
+      horizonCanvas.width = Math.round(hw * HD_UI_SCALE);
+      horizonCanvas.height = Math.round(hh * HD_UI_SCALE);
       if (horizonCtx) {
-        horizonCtx.clearRect(0, 0, hw, hh);
+        horizonCtx.save();
+        horizonCtx.clearRect(0, 0, horizonCanvas.width, horizonCanvas.height);
+        horizonCtx.scale(HD_UI_SCALE, HD_UI_SCALE);
         if (biome.propStyle === 'tower') {
           const farTower = sky.id === 'red_moon' ? '#2c0a18' : sky.isNight ? biome.mtnFar : '#475569';
           const midTower = sky.id === 'red_moon' ? '#1f0710' : sky.isNight ? '#1e293b' : '#334155';
@@ -509,11 +557,11 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           while (fx < hw) {
             const bw = farW[fi % farW.length];
             const bh = farH[fi % farH.length];
-            const by = cachedHorizonY - bh + 8;
+            const by = logHorizonY - bh + 8;
             horizonCtx.fillStyle = farTower;
             horizonCtx.fillRect(fx, by, bw - 2, bh + 6);
             if (fi % 3 === 0) {
-              horizonCtx.fillRect(fx + Math.floor((bw - 4) * 0.5), by - 8, 2, 8);
+              horizonCtx.fillRect(fx + (bw - 4) * 0.5, by - 8, 2, 8);
             }
             fx += bw - 4;
             fi++;
@@ -521,19 +569,19 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           horizonCtx.globalAlpha = 1.0;
 
           // Subtle suspension bridge silhouette across the bay
-          const brX = Math.round(overscan + pxW * 0.66);
-          const brTopY = Math.round(cachedHorizonY * 0.36);
+          const brX = overscan + logPxW * 0.66;
+          const brTopY = logHorizonY * 0.36;
           horizonCtx.strokeStyle = midTower;
           horizonCtx.lineWidth = 2;
           horizonCtx.beginPath();
-          horizonCtx.moveTo(brX - 38, cachedHorizonY + 4);
+          horizonCtx.moveTo(brX - 38, logHorizonY + 4);
           horizonCtx.lineTo(brX - 38, brTopY);
-          horizonCtx.moveTo(brX + 38, cachedHorizonY + 4);
+          horizonCtx.moveTo(brX + 38, logHorizonY + 4);
           horizonCtx.lineTo(brX + 38, brTopY);
-          horizonCtx.moveTo(brX - 75, cachedHorizonY - 3);
+          horizonCtx.moveTo(brX - 75, logHorizonY - 3);
           horizonCtx.quadraticCurveTo(brX - 55, brTopY + 12, brX - 38, brTopY);
           horizonCtx.quadraticCurveTo(brX, brTopY + 18, brX + 38, brTopY);
-          horizonCtx.quadraticCurveTo(brX + 55, brTopY + 12, brX + 75, cachedHorizonY - 3);
+          horizonCtx.quadraticCurveTo(brX + 55, brTopY + 12, brX + 75, logHorizonY - 3);
           horizonCtx.stroke();
 
           // Depth layer 2: Crisp waterfront architectural high-rises with stepped tops & lit interior windows
@@ -544,21 +592,21 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           while (bx < hw) {
             const bw = bWidths[b % bWidths.length];
             const bh = bHeights[b % bHeights.length];
-            const by = cachedHorizonY - bh + 8;
+            const by = logHorizonY - bh + 8;
             horizonCtx.fillStyle = b % 2 === 0 ? midTower : nearTower;
             horizonCtx.fillRect(bx, by, bw - 2, bh + 6);
             if (b % 4 === 1) {
               horizonCtx.fillRect(bx + 3, by - 4, bw - 8, 4);
             }
-            for (let wy = by + 4; wy < cachedHorizonY + 2; wy += 5) {
+            for (let wy = by + 4; wy < logHorizonY + 2; wy += 5) {
               for (let wx = bx + 3; wx < bx + bw - 5; wx += 4) {
-                if ((wx + wy + b) % 4 !== 0) {
+                if ((Math.floor(wx) + Math.floor(wy) + b) % 4 !== 0) {
                   horizonCtx.fillStyle =
                     sky.id === 'red_moon'
-                      ? (wx + b) % 3 === 0
+                      ? (Math.floor(wx) + b) % 3 === 0
                         ? '#fda4af'
                         : '#fbbf24'
-                      : (wx + b) % 5 === 0
+                      : (Math.floor(wx) + b) % 5 === 0
                       ? '#bae6fd'
                       : '#fef08a';
                   horizonCtx.fillRect(wx, wy, 2, 2);
@@ -574,14 +622,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           horizonCtx.fillStyle = sky.mtnFar;
           horizonCtx.beginPath();
           horizonCtx.moveTo(0, hh);
-          horizonCtx.lineTo(0, Math.round(cachedHorizonY * 0.72));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.10), Math.round(cachedHorizonY * 0.54));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.28), Math.round(cachedHorizonY * 0.54));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.38), Math.round(cachedHorizonY * 0.78));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.58), Math.round(cachedHorizonY * 0.76));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.70), Math.round(cachedHorizonY * 0.48));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.92), Math.round(cachedHorizonY * 0.48));
-          horizonCtx.lineTo(hw, Math.round(cachedHorizonY * 0.72));
+          horizonCtx.lineTo(0, logHorizonY * 0.72);
+          horizonCtx.lineTo(overscan + logPxW * 0.10, logHorizonY * 0.54);
+          horizonCtx.lineTo(overscan + logPxW * 0.28, logHorizonY * 0.54);
+          horizonCtx.lineTo(overscan + logPxW * 0.38, logHorizonY * 0.78);
+          horizonCtx.lineTo(overscan + logPxW * 0.58, logHorizonY * 0.76);
+          horizonCtx.lineTo(overscan + logPxW * 0.70, logHorizonY * 0.48);
+          horizonCtx.lineTo(overscan + logPxW * 0.92, logHorizonY * 0.48);
+          horizonCtx.lineTo(hw, logHorizonY * 0.72);
           horizonCtx.lineTo(hw, hh);
           horizonCtx.closePath();
           horizonCtx.fill();
@@ -591,24 +639,24 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           horizonCtx.fillStyle = sky.mtnNear;
           horizonCtx.beginPath();
           horizonCtx.moveTo(0, hh);
-          horizonCtx.lineTo(0, Math.round(cachedHorizonY * 0.84));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.12), Math.round(cachedHorizonY * 0.68));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.23), Math.round(cachedHorizonY * 0.68));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.34), Math.round(cachedHorizonY * 0.88));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.48), Math.round(cachedHorizonY * 0.76));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.56), Math.round(cachedHorizonY * 0.76));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.64), Math.round(cachedHorizonY * 0.88));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.86), Math.round(cachedHorizonY * 0.62));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 1.02), Math.round(cachedHorizonY * 0.62));
-          horizonCtx.lineTo(hw, Math.round(cachedHorizonY * 0.80));
+          horizonCtx.lineTo(0, logHorizonY * 0.84);
+          horizonCtx.lineTo(overscan + logPxW * 0.12, logHorizonY * 0.68);
+          horizonCtx.lineTo(overscan + logPxW * 0.23, logHorizonY * 0.68);
+          horizonCtx.lineTo(overscan + logPxW * 0.34, logHorizonY * 0.88);
+          horizonCtx.lineTo(overscan + logPxW * 0.48, logHorizonY * 0.76);
+          horizonCtx.lineTo(overscan + logPxW * 0.56, logHorizonY * 0.76);
+          horizonCtx.lineTo(overscan + logPxW * 0.64, logHorizonY * 0.88);
+          horizonCtx.lineTo(overscan + logPxW * 0.86, logHorizonY * 0.62);
+          horizonCtx.lineTo(overscan + logPxW * 1.02, logHorizonY * 0.62);
+          horizonCtx.lineTo(hw, logHorizonY * 0.80);
           horizonCtx.lineTo(hw, hh);
           horizonCtx.closePath();
           horizonCtx.fill();
 
           // Sedimentary rim highlight line along near mesas
           horizonCtx.fillStyle = sky.isNight ? 'rgba(148, 163, 184, 0.25)' : 'rgba(253, 186, 116, 0.42)';
-          horizonCtx.fillRect(Math.round(overscan + pxW * 0.12), Math.round(cachedHorizonY * 0.68), Math.round(pxW * 0.11), 2);
-          horizonCtx.fillRect(Math.round(overscan + pxW * 0.86), Math.round(cachedHorizonY * 0.62), Math.round(pxW * 0.16), 2);
+          horizonCtx.fillRect(overscan + logPxW * 0.12, logHorizonY * 0.68, logPxW * 0.11, 2);
+          horizonCtx.fillRect(overscan + logPxW * 0.86, logHorizonY * 0.62, logPxW * 0.16, 2);
         } else {
           // Depth layer 1: Distant hazy mountain range
           horizonCtx.globalAlpha = 0.68;
@@ -628,8 +676,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           ];
           for (let r = 0; r < ridgePts.length; r++) {
             horizonCtx.lineTo(
-              Math.round(overscan + ridgePts[r][0] * pxW),
-              Math.round(cachedHorizonY * ridgePts[r][1])
+              overscan + ridgePts[r][0] * logPxW,
+              logHorizonY * ridgePts[r][1]
             );
           }
           horizonCtx.lineTo(hw, hh);
@@ -646,8 +694,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               : sky.id === 'aurora_night'
               ? '#cffafe'
               : '#f8fafc';
-          const peakX = Math.round(overscan + 0.84 * pxW);
-          const peakY = Math.round(cachedHorizonY * 0.48);
+          const peakX = overscan + 0.84 * logPxW;
+          const peakY = logHorizonY * 0.48;
           horizonCtx.fillStyle = snowCol;
           horizonCtx.beginPath();
           horizonCtx.moveTo(peakX, peakY);
@@ -659,8 +707,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           horizonCtx.fill();
 
           if (biome.id !== 'sakura') {
-            const leftPeakX = Math.round(overscan + 0.08 * pxW);
-            const leftPeakY = Math.round(cachedHorizonY * 0.56);
+            const leftPeakX = overscan + 0.08 * logPxW;
+            const leftPeakY = logHorizonY * 0.56;
             horizonCtx.beginPath();
             horizonCtx.moveTo(leftPeakX, leftPeakY);
             horizonCtx.lineTo(leftPeakX + 12, leftPeakY + 10);
@@ -673,29 +721,30 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           horizonCtx.fillStyle = sky.mtnNear;
           horizonCtx.beginPath();
           horizonCtx.moveTo(0, hh);
-          horizonCtx.lineTo(0, Math.round(cachedHorizonY * 0.84));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.18), Math.round(cachedHorizonY * 0.66));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.36), Math.round(cachedHorizonY * 0.88));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.54), Math.round(cachedHorizonY * 0.82));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.70), Math.round(cachedHorizonY * 0.89));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.94), Math.round(cachedHorizonY * 0.64));
-          horizonCtx.lineTo(hw, Math.round(cachedHorizonY * 0.82));
+          horizonCtx.lineTo(0, logHorizonY * 0.84);
+          horizonCtx.lineTo(overscan + logPxW * 0.18, logHorizonY * 0.66);
+          horizonCtx.lineTo(overscan + logPxW * 0.36, logHorizonY * 0.88);
+          horizonCtx.lineTo(overscan + logPxW * 0.54, logHorizonY * 0.82);
+          horizonCtx.lineTo(overscan + logPxW * 0.70, logHorizonY * 0.89);
+          horizonCtx.lineTo(overscan + logPxW * 0.94, logHorizonY * 0.64);
+          horizonCtx.lineTo(hw, logHorizonY * 0.82);
           horizonCtx.lineTo(hw, hh);
           horizonCtx.closePath();
           horizonCtx.fill();
         }
+        horizonCtx.restore();
       }
     };
 
     const resize = () => {
       viewW = window.innerWidth;
       viewH = window.innerHeight;
-      // Direct low-res 340px pixel-art canvas: GPU compositor handles nearest-neighbor scaling natively!
-      pxH = 340;
-      pxW = Math.max(170, Math.round(pxH * (viewW / Math.max(1, viewH))));
+      pxH = 450;
+      pxW = Math.max(280, Math.round(pxH * (viewW / Math.max(1, viewH))));
       displayCanvas.width = pxW;
       displayCanvas.height = pxH;
-      ctx.imageSmoothingEnabled = false;
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'medium';
 
       cachedHorizonY = Math.round(pxH * 0.35);
       cachedSkyGrad = null;
@@ -728,6 +777,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let camDiagBias = 0.45; // smooth lateral & yaw chase swing following drift direction
     let camSpeedZoom = 0;
     let visualDriftAngle = 0; // -1..+1 controls pixel-art car yaw silhouette
+    let heroRollRad = 0;
+    let heroPitchY = 0;
+    let levelFinished = false;
 
     // Gameplay metrics
     let score = 0;
@@ -748,8 +800,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let nearMissTimer = 0;
     let activeDir: DiagonalDirection = 'right';
     let wheelSpinPhase = 0;
+    let visualFrontSteer = 0;
 
-    // Breach / Fall-off & Traffic Crash state
+    // Breach / Fall-off & Traffic Crash rigid-body state
     let isFalling = false;
     let fallTimer = 0;
     let fallVelX = 0;
@@ -762,6 +815,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let groundImpacted = false;
     let groundRestTimer = 0;
     let crashGroundY = VALLEY_FLOOR_Y;
+    let crashBody: CrashBody3D = createCrashBody3D();
 
     // 2-Lane Highway Traffic Mode & Dopamine Rush state
     let trafficCars: TrafficCarState[] = [];
@@ -942,7 +996,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     }));
 
     const spawnDetachedPart = (
-      partId: CarPartId,
+      partId: CarPartId | 'wheel',
       x: number,
       y: number,
       z: number,
@@ -961,6 +1015,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           ? -4.8
           : partId === 'right_door'
           ? 4.8
+          : partId === 'wheel'
+          ? sideBias * (4.2 + Math.random() * 4.5)
           : sideBias * (2.2 + Math.random() * 4.5);
       slot.active = true;
       slot.partId = partId;
@@ -968,14 +1024,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       slot.y = y + 0.55;
       slot.z = z + (Math.random() - 0.5) * 0.5;
       slot.vx = vxBase * 0.55 + sideImpulse + Math.cos(angleSpread) * 2.5;
-      slot.vy = 5.4 + Math.random() * 5.2;
+      slot.vy = (partId === 'wheel' ? 6.2 : 5.4) + Math.random() * 5.2;
       slot.vz = vzBase * 0.55 + (partId === 'front_bumper' ? -3.0 : partId === 'rear_bumper' || partId === 'spoiler' ? 2.5 : (Math.random() - 0.5) * 3.0);
       slot.rot = (Math.random() - 0.5) * 0.8;
-      slot.vRot = (Math.random() > 0.5 ? 1 : -1) * (5.5 + Math.random() * 7.5);
+      slot.vRot = (Math.random() > 0.5 ? 1 : -1) * (partId === 'wheel' ? 12 + Math.random() * 8 : 5.5 + Math.random() * 7.5);
       slot.floorY = floorY;
       slot.color = color;
       slot.accentColor = accentColor;
-      slot.life = 2.6;
+      slot.life = 2.8;
     };
 
     const pushSmokePuff = (puff: SmokePuff) => {
@@ -999,8 +1055,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       life: number
     ) => {
       if (callouts.length >= MAX_CALLOUTS) return;
-      ctx.font = 'bold 8px "Chakra Petch", monospace';
-      const halfW = Math.ceil(ctx.measureText(text).width * 0.5) + 4;
+      ctx.font = `bold ${Math.round(8 * HD_UI_SCALE)}px "Chakra Petch", monospace`;
+      const halfW = Math.ceil(ctx.measureText(text).width * 0.5) + Math.round(4 * HD_UI_SCALE);
       callouts.push({ x, y, z, text, color, life, maxLife: life, halfW });
     };
 
@@ -1072,6 +1128,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       isHero: boolean;
       proj: Projected3D;
       traffic?: TrafficCarState;
+      trafficRelYaw?: number;
       parked?: ParkedObstacleCar;
       isGhost?: boolean;
       ghostFrame?: GhostFrame;
@@ -1082,6 +1139,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       isHero: false,
       proj: makeEmptyProj(),
       traffic: undefined,
+      trafficRelYaw: undefined,
       parked: undefined,
       isGhost: false,
       ghostFrame: undefined,
@@ -1169,12 +1227,20 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     }
 
     function resetSimulation() {
-      seed = Math.floor(Math.random() * 1000) + 17;
-      const isHighway = gameModeRef.current === 'highway_traffic';
-      const isParking = gameModeRef.current === 'parking';
+      const curLevel = levelRef.current;
+      seed = curLevel ? curLevel.seed : Math.floor(Math.random() * 1000) + 17;
+      const effectiveMode: GameModeId = curLevel ? curLevel.mode : gameModeRef.current;
+      const isHighway = effectiveMode === 'highway_traffic';
+      const isParking = effectiveMode === 'parking';
+      const trackOpts = curLevel
+        ? { curveMultiplier: curLevel.curveMultiplier, widthMultiplier: curLevel.widthMultiplier }
+        : undefined;
 
       score = 0;
       distance = 0;
+      levelFinished = false;
+      heroRollRad = 0;
+      heroPitchY = 0;
       recordedGhostFrameCount = 0;
       ghostRecordTimer = 0;
       runElapsedSec = 0;
@@ -1192,9 +1258,10 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       fever = 0;
       isFever = false;
       feverTimer = 0;
-      nearMissText = '';
-      nearMissTimer = 0;
+      nearMissText = curLevel ? `STAGE ${curLevel.number}: ${curLevel.title.toUpperCase()}` : '';
+      nearMissTimer = curLevel ? 1.8 : 0;
       activeDir = 'right';
+      visualFrontSteer = 0;
       isFalling = false;
       fallTimer = 0;
       fallVelX = 0;
@@ -1207,6 +1274,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       groundImpacted = false;
       groundRestTimer = 0;
       crashGroundY = VALLEY_FLOOR_Y;
+      crashBody = createCrashBody3D();
       trafficCars = [];
       nextTrafficId = 1;
       trafficSpawnCursor = 62;
@@ -1250,8 +1318,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         activeGhost = null;
       } else {
         track = isHighway
-          ? generateHighwayTrack(75, STEP_DIST, seed)
-          : generateSCurveTrack(65, STEP_DIST, seed);
+          ? generateHighwayTrack(75, STEP_DIST, seed, trackOpts)
+          : generateSCurveTrack(65, STEP_DIST, seed, trackOpts);
         const startPt = track[0];
         const spawnOffset = isHighway ? HIGHWAY_LANE_OFFSET : 0;
         driftState = createInitialDriftState(
@@ -1268,17 +1336,20 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         camHeading = startPt.heading;
         visualDriftAngle = isHighway ? 0.0 : 0.25;
 
-        const savedGhost = loadBestGhostRun(gameModeRef.current);
-        activeGhost = savedGhost || generateDevRivalGhost(gameModeRef.current);
+        const savedGhost = loadBestGhostRun(effectiveMode);
+        activeGhost = savedGhost || generateDevRivalGhost(effectiveMode);
 
         if (isHighway) {
+          const baseDiff = curLevel
+            ? Math.min(1, Math.max(0, (curLevel.trafficDensity - 0.6) * 0.85))
+            : 0;
           const batch = generateTrafficBatch({
             startS: 58,
             endS: 270,
             nextIdStart: nextTrafficId,
             seed,
             existingCars: trafficCars,
-            difficultyProgress: 0,
+            difficultyProgress: baseDiff,
           });
           trafficCars = batch.cars;
           nextTrafficId = batch.nextId;
@@ -1290,7 +1361,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       cameraTrauma = 0;
       screenFlashAlpha = 0;
       highBeamTimer = 0;
-      const startBiome = resolveRoadBiome(roadModeRef.current, 0);
+      const startBiome = resolveRoadBiome(curLevel ? curLevel.biome : roadModeRef.current, 0);
       lastBiomeId = startBiome.id;
 
       skidHead = 0;
@@ -1399,7 +1470,6 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let keyUp = false;
     let keyDown = false;
     let keyHandbrake = false;
-    const activePointers = new Map<number, number>();
     const pointerStartX = new Map<number, number>();
     const pointerCurrentX = new Map<number, number>();
     let pointerSteer = 0;
@@ -1417,13 +1487,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         pointerCurrentX.forEach((curX, id) => {
           const startX = pointerStartX.get(id) ?? curX;
           const deltaX = curX - startX;
-          if (Math.abs(deltaX) > 10) {
-            // Dragging finger left/right maps to smooth steering hold -1 to +1
-            const dragRatio = Math.max(-1, Math.min(1, deltaX / 75));
-            totalSteer += dragRatio;
+          const swipeSteer = computeSwipeSteerDelta(deltaX, 68, 5);
+          if (swipeSteer !== 0) {
+            totalSteer += swipeSteer;
           } else {
-            // Tapping left half steers left (-1) and right half steers right (+1)
-            totalSteer += curX < window.innerWidth * 0.5 ? -1 : 1;
+            // Brief tap or finger parked within deadzone: gentle left/right half steering
+            totalSteer += curX < window.innerWidth * 0.5 ? -0.82 : 0.82;
           }
           count++;
         });
@@ -1440,10 +1509,18 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
     const onPointerDown = (e: PointerEvent) => {
       if (phaseRef.current !== 'playing') return;
-      // Ignore clicks on top/bottom HUD buttons
+      // Ignore interactions originating inside HUD buttons, steering wheel, or cockpit dock
       const target = e.target as HTMLElement | null;
-      if (target && target.closest('button[data-hud-btn="true"]')) return;
-      activePointers.set(e.pointerId, e.clientX);
+      if (
+        target &&
+        target.closest('[data-hud-btn="true"], [data-cockpit-dock="true"], button, [role="button"], input, select, a')
+      ) {
+        return;
+      }
+      // In Wheel mode, keep lower dock margin immune to accidental mis-taps near pedals/wheel
+      if (controlSchemeRef.current === 'wheel' && e.clientY > window.innerHeight * 0.72) {
+        return;
+      }
       pointerStartX.set(e.pointerId, e.clientX);
       pointerCurrentX.set(e.pointerId, e.clientX);
       recalcPointerSteer();
@@ -1451,12 +1528,15 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
     const onPointerMove = (e: PointerEvent) => {
       if (!pointerCurrentX.has(e.pointerId)) return;
+      if (controlSchemeRef.current === 'swipe') {
+        const prevStart = pointerStartX.get(e.pointerId) ?? e.clientX;
+        pointerStartX.set(e.pointerId, clampSwipeAnchor(prevStart, e.clientX, 86));
+      }
       pointerCurrentX.set(e.pointerId, e.clientX);
       recalcPointerSteer();
     };
 
     const onPointerUp = (e: PointerEvent) => {
-      activePointers.delete(e.pointerId);
       pointerStartX.delete(e.pointerId);
       pointerCurrentX.delete(e.pointerId);
       recalcPointerSteer();
@@ -1499,7 +1579,6 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       keyUp = false;
       keyDown = false;
       keyHandbrake = false;
-      activePointers.clear();
       pointerStartX.clear();
       pointerCurrentX.clear();
       pointerSteer = 0;
@@ -1571,10 +1650,10 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       lineWidth = 1
     ) {
       ctx.beginPath();
-      ctx.moveTo(Math.round(a.x), Math.round(a.y));
-      ctx.lineTo(Math.round(b.x), Math.round(b.y));
-      ctx.lineTo(Math.round(c.x), Math.round(c.y));
-      ctx.lineTo(Math.round(d.x), Math.round(d.y));
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.lineTo(c.x, c.y);
+      ctx.lineTo(d.x, d.y);
       ctx.closePath();
       ctx.fillStyle = fillStyle;
       ctx.fill();
@@ -1612,15 +1691,49 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
     // 4. Main Simulation & Pixel-Art Rendering Loop
     let animId = 0;
+    let idleTimerId: number | null = null;
     let lastTime = performance.now();
+    let pausedFrameDrawn = false;
 
+    const scheduleNextFrame = (delayMs = 0) => {
+      if (delayMs > 0) {
+        idleTimerId = window.setTimeout(() => {
+          idleTimerId = null;
+          animId = requestAnimationFrame(loop);
+        }, delayMs);
+      } else {
+        animId = requestAnimationFrame(loop);
+      }
+    };
+
+    let lastFrameDrawMs = 0;
     function loop() {
       const now = performance.now();
+      const phase = phaseRef.current;
+      // On 120Hz+ ProMotion screens, cap frame cadence near ~60fps when High FPS Mode is off
+      if (phase === 'playing' && !highFpsRef.current && lastFrameDrawMs > 0 && now - lastFrameDrawMs < 11.5) {
+        scheduleNextFrame(0);
+        return;
+      }
+      lastFrameDrawMs = now;
       const rawDt = (now - lastTime) / 1000;
       lastTime = now;
       const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
 
-      const phase = phaseRef.current;
+      if (phase === 'paused') {
+        if (pausedFrameDrawn && !pendingResetRef.current) {
+          scheduleNextFrame(180);
+          return;
+        }
+        pausedFrameDrawn = true;
+      } else {
+        pausedFrameDrawn = false;
+      }
+
+      if (isModalOpenRef.current && phase !== 'playing') {
+        scheduleNextFrame(180);
+        return;
+      }
       const currentCar = carRef.current;
       const currentUpgrades = upgradesRef.current;
       const currentCustom = carCustomRef.current;
@@ -1714,8 +1827,15 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         }
       }
 
-      const isHighwayMode = gameModeRef.current === 'highway_traffic';
-      const isParkingMode = gameModeRef.current === 'parking';
+      const curLevel = levelRef.current;
+      const effectiveMode: GameModeId = curLevel ? curLevel.mode : gameModeRef.current;
+      const isHighwayMode = effectiveMode === 'highway_traffic';
+      const isParkingMode = effectiveMode === 'parking';
+      const effectiveRoadMode: RoadSelectionMode = curLevel ? curLevel.biome : roadModeRef.current;
+      const effectiveSkyMode: SkyThemeId = curLevel ? curLevel.sky : skyModeRef.current;
+      const activeTrackOpts = curLevel
+        ? { curveMultiplier: curLevel.curveMultiplier, widthMultiplier: curLevel.widthMultiplier }
+        : undefined;
 
       if (phase !== 'playing') {
         soundFX.stopEngineSound();
@@ -1799,7 +1919,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
           const lastPt = track[track.length - 1];
           if (lastPt && driftState.z - lastPt.z < 155) {
-            const ext = extendHighwayTrack(track, 20, STEP_DIST, seed);
+            const ext = extendHighwayTrack(track, 20, STEP_DIST, seed, activeTrackOpts);
             for (let e = 0; e < ext.length; e++) track.push(ext[e]);
             while (track.length > 90 && track[0].z > driftState.z + 32) {
               track.shift();
@@ -1834,6 +1954,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           visualDriftAngle += (targetPose - visualDriftAngle) * Math.min(1, 6 * dt);
           activeDir = visualDriftAngle >= 0 ? 'right' : 'left';
           wheelSpinPhase += dt * 16;
+          heroRollRad += (-visualDriftAngle * 0.042 - heroRollRad) * Math.min(1, 8 * dt);
+          heroPitchY += (0 - heroPitchY) * Math.min(1, 8 * dt);
 
           if (Math.abs(visualDriftAngle) > 0.22) {
             tireEmitMode = 'drift';
@@ -1843,7 +1965,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           // Extend endless road for continuous title flyover
           const lastPt = track[track.length - 1];
           if (lastPt && driftState.z - lastPt.z < 145) {
-            const ext = extendSCurveTrack(track, 20, STEP_DIST, seed);
+            const ext = extendSCurveTrack(track, 20, STEP_DIST, seed, activeTrackOpts);
             for (let e = 0; e < ext.length; e++) track.push(ext[e]);
             while (track.length > 85 && track[0].z > driftState.z + 30) {
               track.shift();
@@ -1885,13 +2007,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
         if (tapImpulseTimer > 0) tapImpulseTimer = Math.max(0, tapImpulseTimer - dt);
 
-        // Combine Steering Inputs (Keyboard, Touch Hold, HUD Hold, Quick Tap)
-        let steerInput = 0;
-        if (keyLeft) steerInput -= 1;
-        if (keyRight) steerInput += 1;
-        if (steerInput === 0 && pointerSteer !== 0) steerInput = pointerSteer;
-        if (steerInput === 0 && steerHoldRef.current !== 0) steerInput = steerHoldRef.current;
-        if (steerInput === 0 && tapImpulseTimer > 0) steerInput = tapImpulseDir;
+        // Combine Steering Inputs (Priority: Keyboard > HUD Wheel/Buttons > Canvas Touch/Swipe > Tap Impulse)
+        const steerInput = resolveCombinedSteering({
+          keyLeft,
+          keyRight,
+          hudSteer: steerHoldRef.current,
+          pointerSteer,
+          tapImpulse: tapImpulseTimer > 0 ? tapImpulseDir : 0,
+        });
 
         if (isParkingMode && parkingState && parkingStages.length > 0 && simDt > 0) {
           const curStage = parkingStages[parkingStageIdx];
@@ -1979,6 +2102,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             const stepMove = Math.hypot(parkingState.vx, parkingState.vz) * simDt;
             distance += stepMove;
             wheelSpinPhase += (parkingState.speed >= 0 ? 1 : -1) * stepMove * 0.75;
+            visualFrontSteer = Math.max(-1, Math.min(1, parkingState.steerAngle / 0.60));
 
             if (hitRes.newlyClearedGates > 0) {
               score += 250 * hitRes.newlyClearedGates;
@@ -2199,14 +2323,23 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             if (overtakeChainTimer === 0) overtakeChain = 0;
           }
 
-          // Progressive speed scale + Gas/Brake pedal + Slipstream rush boost
+          // Progressive speed scale + Gas/Brake/Handbrake pedals + Slipstream rush boost
           const speedBoost =
             (isFever ? 1.28 : 1.0) +
             (slipstreamBoostTimer > 0 ? 0.18 : slipstreamCharge * 0.14) +
             Math.min(0.25, distance * 0.00025);
-          const brakeInput = keyDown || pedalBrakeRef.current ? 1 : 0;
-          const accelInput = brakeInput > 0 ? 0 : 1;
-          const effectiveHandbrake = Boolean(keyHandbrake || pedalHandbrakeRef.current);
+          const resolvedPedals = resolveDrivingPedals({
+            mode: isHighwayMode ? 'highway_traffic' : 'drift',
+            keyUp,
+            keyDown,
+            pedalGas: pedalGasRef.current,
+            pedalBrake: pedalBrakeRef.current,
+            keyHandbrake,
+            pedalHandbrake: pedalHandbrakeRef.current,
+          });
+          const brakeInput = resolvedPedals.brakeInput;
+          const accelInput = resolvedPedals.gasInput;
+          const effectiveHandbrake = resolvedPedals.handbrake;
 
           if (isHighwayMode) {
             driftState = stepHighwayPhysics(
@@ -2229,8 +2362,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               driftState,
               {
                 steerInput,
-                throttle: brakeInput > 0 ? 0.58 : accelInput > 0 ? 1.26 : 1.0,
-                handbrake: keyHandbrake,
+                throttle: resolvedPedals.throttle,
+                handbrake: effectiveHandbrake,
                 roadTangentAngle: roadTangent,
               },
               {
@@ -2379,7 +2512,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             }
           }
 
-          const curBiome = resolveRoadBiome(roadModeRef.current, distance);
+          const curBiome = resolveRoadBiome(effectiveRoadMode, distance);
           if (curBiome.id !== lastBiomeId) {
             lastBiomeId = curBiome.id;
             nearMissText = `ENTERING ${curBiome.name.toUpperCase()}`;
@@ -2402,6 +2535,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               curBiome.badgeColor,
               1.4
             );
+          }
+
+          // Campaign Level Finish Line Completion Check
+          if (curLevel && !levelFinished && distance >= curLevel.targetDistance) {
+            levelFinished = true;
+            soundFX.playFeverBurst();
+            triggerHaptic('fever');
+            finalizeGameOver(`Stage ${curLevel.number} Complete!`, true);
           }
 
           const roadCheck = evaluateCarOnSCurveRoad(
@@ -2431,23 +2572,51 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             visualDriftAngle = 0;
           }
           activeDir = visualDriftAngle >= 0 ? 'right' : 'left';
+          const targetFrontSteer = Math.max(-1, Math.min(1, steerInput));
+          visualFrontSteer += (targetFrontSteer - visualFrontSteer) * Math.min(1, 16 * simDt);
+          if (Math.abs(visualFrontSteer) < 0.02 && targetFrontSteer === 0) {
+            visualFrontSteer = 0;
+          }
+
+          // Live cornering suspension roll & throttle/brake squat
+          const targetRoll = Math.max(-0.055, Math.min(0.055, -visualDriftAngle * 0.046 - steerInput * 0.016));
+          const targetPitch = brakeInput > 0 ? 1.8 : accelInput > 0 ? -1.0 : 0;
+          heroRollRad += (targetRoll - heroRollRad) * Math.min(1, 10 * simDt);
+          heroPitchY += (targetPitch - heroPitchY) * Math.min(1, 9 * simDt);
 
           // Check Road / Guardrail Bounds
           if (!roadCheck.onRoad) {
             {
-              // STAGE 1: BREACHED GUARDRAIL -> Shatter Steel Rail, Bend Side Panels & Launch Into Valley Drop (NO Explosion)
+              // STAGE 1: BREACHED GUARDRAIL -> Shatter Steel Rail, Spin & Launch Into 3D Valley Tumble
               isFalling = true;
               fallTimer = 0;
               groundImpacted = false;
               groundRestTimer = 0;
               breachedSliceIdx = roadCheck.closestPoint ? roadCheck.closestPoint.index : -1;
               breachedSide = roadCheck.signedPerpOffset >= 0 ? 1 : -1;
-              crashRoll = breachedSide * 0.22;
-              fallVelX = driftState.vx * 0.84 + breachedSide * 3.8;
-              fallVelZ = driftState.vz * 0.84;
-              fallVelY = 3.2; // Brief launch over broken steel rail before rapid gravity drop
-              hitstopTimer = 0.07;
-              cameraTrauma = 0.88;
+              crashRoll = breachedSide * 0.24;
+              const launchSpeed = Math.hypot(driftState.vx, driftState.vz);
+              fallVelX = driftState.vx * 0.86 + breachedSide * 4.4;
+              fallVelZ = driftState.vz * 0.86;
+              fallVelY = 3.8 + Math.min(2.6, launchSpeed * 0.09);
+              crashBody = createCrashBody3D({
+                x: driftState.x,
+                y: driftState.y,
+                z: driftState.z,
+                vx: fallVelX,
+                vy: fallVelY,
+                vz: fallVelZ,
+                yaw: 0,
+                yawVel: breachedSide * (3.1 + Math.min(3.8, launchSpeed * 0.14)),
+                roll: crashRoll,
+                rollVel: breachedSide * 2.7,
+                pitch: -0.14,
+                pitchVel: 1.5,
+                bounceCount: 0,
+                airborne: true,
+              });
+              hitstopTimer = 0.075;
+              cameraTrauma = 0.92;
               screenFlashAlpha = 0.25;
               screenFlashColor = '#e2e8f0';
               soundFX.playFallAndDestroy();
@@ -2457,17 +2626,17 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               const railDmg = applyImpactToCarDamage({
                 damage: activeDamageState,
                 impactZone: breachedSide < 0 ? 'left' : 'right',
-                severity: 0.48,
+                severity: 0.56,
                 sideBias: breachedSide,
               });
               activeDamageState = railDmg.nextDamage;
               onCarDamageChangeRef.current?.(activeDamageState);
+              const anchorStart = roadCheck.closestPoint;
+              const curBiomeStart = resolveRoadBiome(roadModeRef.current, distance).id;
+              const latStart = anchorStart ? roadCheck.signedPerpOffset : breachedSide * 10;
+              const initFloorY = sampleTerrainElevation(latStart, driftState.z, curBiomeStart) + 0.15;
               if (railDmg.newlyDetached.length > 0) {
                 soundFX.playPartDetach(railDmg.newlyDetached.length);
-                const anchorStart = roadCheck.closestPoint;
-                const curBiomeStart = resolveRoadBiome(roadModeRef.current, distance).id;
-                const latStart = anchorStart ? roadCheck.signedPerpOffset : breachedSide * 10;
-                const initFloorY = sampleTerrainElevation(latStart, driftState.z, curBiomeStart) + 0.15;
                 for (let dp = 0; dp < railDmg.newlyDetached.length; dp++) {
                   spawnDetachedPart(
                     railDmg.newlyDetached[dp],
@@ -2482,6 +2651,20 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                     breachedSide
                   );
                 }
+              }
+              if (launchSpeed >= 18) {
+                spawnDetachedPart(
+                  'wheel',
+                  driftState.x,
+                  driftState.y,
+                  driftState.z,
+                  fallVelX,
+                  fallVelZ,
+                  initFloorY,
+                  currentAppearance.primaryColor,
+                  currentAppearance.rimHex,
+                  breachedSide
+                );
               }
 
               pushCallout(driftState.x, driftState.y + 1.6, driftState.z, 'GUARDRAIL BREACH!', '#fbbf24', 0.85);
@@ -2920,8 +3103,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             const lastPt = track[track.length - 1];
             if (lastPt && driftState.z - lastPt.z < 155) {
               const extSlices = isHighwayMode
-                ? extendHighwayTrack(track, 20, STEP_DIST, seed)
-                : extendSCurveTrack(track, 20, STEP_DIST, seed);
+                ? extendHighwayTrack(track, 20, STEP_DIST, seed, activeTrackOpts)
+                : extendSCurveTrack(track, 20, STEP_DIST, seed, activeTrackOpts);
               for (let s = 0; s < extSlices.length; s++) track.push(extSlices[s]);
               while (track.length > 90 && track[0].z > driftState.z + 32) {
                 track.shift();
@@ -3013,6 +3196,43 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 ((driftState.x - cp.x) * cp.tx + (driftState.z - cp.z) * cp.tz);
 
               stepTrafficCars(trafficCars, simDt);
+              const curRoadHalfW = roadCheck.halfWidth || 4.9;
+              for (let ti = 0; ti < trafficCars.length; ti++) {
+                const tc = trafficCars[ti];
+                if (tc.crashed) {
+                  const tcRes = stepTrafficCrashBody(tc, curRoadHalfW, simDt);
+                  if (tcRes.hitRail || tcRes.bouncedGround) {
+                    const tcSample = sampleTrackAtS(track, tc.s, STEP_DIST);
+                    if (tcSample) {
+                      const wx = tcSample.x + tcSample.nx * tc.lateralOffset;
+                      const wy = tcSample.y + (tc.crashY ?? 0) + 0.35;
+                      const wz = tcSample.z + tcSample.nz * tc.lateralOffset;
+                      for (let sp = 0; sp < 8; sp++) {
+                        const ang = Math.random() * Math.PI * 2;
+                        const spd = 3 + Math.random() * 8;
+                        pushDebrisChunk({
+                          x: wx,
+                          y: wy,
+                          z: wz,
+                          vx: Math.cos(ang) * spd,
+                          vy: 2.5 + Math.random() * 4.5,
+                          vz: Math.sin(ang) * spd,
+                          size: 0.22 + Math.random() * 0.16,
+                          gravity: 22,
+                          rot: Math.random() * 6,
+                          vRot: (Math.random() - 0.5) * 18,
+                          life: 0.45,
+                          color: sp % 2 === 0 ? '#fef08a' : '#fb923c',
+                        });
+                      }
+                      soundFX.playGroundSlam(0.38);
+                    }
+                  }
+                } else {
+                  if (tc.crashRoll) tc.crashRoll *= Math.exp(-5.0 * simDt);
+                  if (tc.crashYaw) tc.crashYaw *= Math.exp(-5.0 * simDt);
+                }
+              }
 
               const trafficEval = evaluateTrafficInteraction({
                 playerS,
@@ -3022,28 +3242,58 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
               if (trafficEval.collidedCar) {
                 const hit = trafficEval.collidedCar;
-                {
-                  isTrafficCrash = true;
-                  trafficCrashTimer = 0;
-                  crashReason = hit.isOncoming ? 'Head-On Collision' : 'Traffic Impact';
-                  crashGroundY = driftState.y + 0.04;
-                  const sideBias = roadCheck.signedPerpOffset >= 0 ? 1 : -1;
-                  crashRoll = sideBias * (hit.isOncoming ? 0.34 : 0.24);
-                  hitstopTimer = 0.085;
-                  cameraTrauma = 1.0;
-                  screenFlashAlpha = 0.32;
-                  screenFlashColor = '#f8fafc';
-                  soundFX.playTrafficCrunch(hit.isOncoming ? 1.25 : 0.95);
-                  triggerHaptic('heavy');
+                const playerSpeedForward = driftState.vx * cp.tx + driftState.vz * cp.tz;
+                const playerLateralVel = driftState.vx * cp.nx + driftState.vz * cp.nz;
+                const playerMass =
+                  currentCar.bodyShape === 'semi' || currentCar.bodyShape === 'truck' ? 2.15 : 1.32;
+                const impulse = resolveTrafficCollisionImpulse({
+                  playerSpeedForward,
+                  playerLateralVel,
+                  playerLateralOffset: roadCheck.signedPerpOffset,
+                  playerMass,
+                  car: hit,
+                });
 
-                  const tDmg = applyImpactToCarDamage({
-                    damage: activeDamageState,
-                    impactZone: 'front',
-                    severity: hit.isOncoming ? 1.28 : 0.95,
-                    sideBias,
-                  });
-                  activeDamageState = tDmg.nextDamage;
-                  onCarDamageChangeRef.current?.(activeDamageState);
+                const tDmg = applyImpactToCarDamage({
+                  damage: activeDamageState,
+                  impactZone: impulse.isFatalCrash ? 'front' : impulse.sideBias < 0 ? 'right' : 'left',
+                  severity: impulse.impactSeverity,
+                  sideBias: impulse.sideBias,
+                });
+                activeDamageState = tDmg.nextDamage;
+                onCarDamageChangeRef.current?.(activeDamageState);
+
+                const fatalCrash = impulse.isFatalCrash || isCarTotaled(activeDamageState);
+                if (!fatalCrash) {
+                  // Glancing sideswipe: deflect both cars laterally, scrape doors, cut combo, keep racing!
+                  hit.scrapeCooldown = 0.55;
+                  hit.crashRoll = -impulse.sideBias * 0.22;
+                  hit.crashYaw = -impulse.sideBias * 0.24;
+                  hit.yieldingToSide = impulse.sideBias < 0 ? 1 : -1;
+                  hit.yieldTimer = 1.4;
+                  hit.targetLateralOffset = Math.max(
+                    -4.1,
+                    Math.min(4.1, hit.lateralOffset + impulse.trafficCrashVelLat * 0.18)
+                  );
+
+                  const nextFwd = Math.max(8, impulse.playerBounceVz);
+                  driftState.vx = nextFwd * cp.tx + impulse.playerBounceVx * cp.nx;
+                  driftState.vz = nextFwd * cp.tz + impulse.playerBounceVx * cp.nz;
+                  cameraTrauma = Math.min(1, cameraTrauma + 0.52);
+                  heroRollRad += impulse.sideBias * 0.22;
+                  combo = Math.max(1, Math.floor(combo * 0.5));
+                  soundFX.playTrafficCrunch(0.55);
+                  triggerHaptic('medium');
+                  nearMissText = 'SIDESWIPE!';
+                  nearMissTimer = 0.85;
+                  pushCallout(
+                    driftState.x,
+                    driftState.y + 1.85,
+                    driftState.z,
+                    'SIDESWIPE!',
+                    '#fb923c',
+                    0.75
+                  );
                   if (tDmg.newlyDetached.length > 0) {
                     soundFX.playPartDetach(tDmg.newlyDetached.length);
                     for (let dp = 0; dp < tDmg.newlyDetached.length; dp++) {
@@ -3052,14 +3302,107 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                         driftState.x,
                         driftState.y,
                         driftState.z,
-                        driftState.vx * 0.35,
-                        driftState.vz * 0.35,
+                        driftState.vx * 0.45,
+                        driftState.vz * 0.45,
+                        driftState.y + 0.04,
+                        currentAppearance.primaryColor,
+                        currentCar.accentColor,
+                        impulse.sideBias
+                      );
+                    }
+                  }
+                  for (let k = 0; k < 16; k++) {
+                    const ang = Math.random() * Math.PI * 2;
+                    const spd = 4 + Math.random() * 9;
+                    pushDebrisChunk({
+                      x: driftState.x - impulse.sideBias * 0.65,
+                      y: driftState.y + 0.42,
+                      z: driftState.z,
+                      vx: Math.cos(ang) * spd,
+                      vy: 2.5 + Math.random() * 5,
+                      vz: Math.sin(ang) * spd,
+                      size: 0.2 + Math.random() * 0.18,
+                      gravity: 22,
+                      rot: Math.random() * 6,
+                      vRot: (Math.random() - 0.5) * 16,
+                      life: 0.48,
+                      color: k % 2 === 0 ? '#fef08a' : '#fb923c',
+                    });
+                  }
+                } else {
+                  isTrafficCrash = true;
+                  trafficCrashTimer = 0;
+                  crashReason = hit.isOncoming ? 'Head-On Collision' : 'Traffic Impact';
+                  crashGroundY = driftState.y + 0.04;
+                  crashRoll = impulse.sideBias * (hit.isOncoming ? 0.34 : 0.24);
+                  hitstopTimer = 0.085;
+                  cameraTrauma = 1.0;
+                  screenFlashAlpha = 0.32;
+                  screenFlashColor = '#f8fafc';
+                  soundFX.playTrafficCrunch(hit.isOncoming ? 1.25 : 0.95);
+                  triggerHaptic('heavy');
+
+                  hit.crashed = true;
+                  hit.crashVs = impulse.trafficCrashSpeedS;
+                  hit.crashVelLat = impulse.trafficCrashVelLat;
+                  hit.crashVy = impulse.trafficCrashVy;
+                  hit.crashY = 0.12;
+                  hit.crashYaw = 0;
+                  hit.crashYawVel = impulse.trafficYawVel;
+                  hit.crashRoll = 0;
+                  hit.crashRollVel = impulse.trafficRollVel;
+
+                  const heroPostVx = impulse.playerBounceVz * cp.tx + impulse.playerBounceVx * cp.nx;
+                  const heroPostVz = impulse.playerBounceVz * cp.tz + impulse.playerBounceVx * cp.nz;
+                  driftState.vx = heroPostVx;
+                  driftState.vz = heroPostVz;
+                  crashBody = createCrashBody3D({
+                    x: driftState.x,
+                    y: driftState.y,
+                    z: driftState.z,
+                    vx: heroPostVx,
+                    vy: impulse.playerBounceVy,
+                    vz: heroPostVz,
+                    yaw: 0,
+                    yawVel: impulse.playerYawVel,
+                    roll: 0,
+                    rollVel: impulse.playerRollVel,
+                    pitch: -0.22,
+                    pitchVel: 1.9,
+                    bounceCount: 0,
+                    airborne: true,
+                  });
+
+                  if (tDmg.newlyDetached.length > 0) {
+                    soundFX.playPartDetach(tDmg.newlyDetached.length);
+                    for (let dp = 0; dp < tDmg.newlyDetached.length; dp++) {
+                      spawnDetachedPart(
+                        tDmg.newlyDetached[dp],
+                        driftState.x,
+                        driftState.y,
+                        driftState.z,
+                        heroPostVx * 0.45,
+                        heroPostVz * 0.45,
                         crashGroundY,
                         currentAppearance.primaryColor,
                         currentCar.accentColor,
-                        sideBias
+                        impulse.sideBias
                       );
                     }
+                  }
+                  if (impulse.impactSeverity >= 0.85) {
+                    spawnDetachedPart(
+                      'wheel',
+                      driftState.x,
+                      driftState.y,
+                      driftState.z,
+                      heroPostVx * 0.45,
+                      heroPostVz * 0.45,
+                      crashGroundY,
+                      currentAppearance.primaryColor,
+                      currentAppearance.rimHex,
+                      impulse.sideBias
+                    );
                   }
 
                   pushShockwave({
@@ -3251,13 +3594,16 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
                 compactInPlace(trafficCars, (c) => c.s > playerS - 26);
                 if (trafficSpawnCursor < playerS + 250) {
+                  const diffProg = curLevel
+                    ? Math.min(1, Math.max(0, (curLevel.trafficDensity - 0.55) * 0.75 + (distance / curLevel.targetDistance) * 0.35))
+                    : Math.min(1, distance / 1800);
                   const batch = generateTrafficBatch({
                     startS: trafficSpawnCursor,
                     endS: playerS + 290,
                     nextIdStart: nextTrafficId,
                     seed,
                     existingCars: trafficCars,
-                    difficultyProgress: Math.min(1, distance / 1800),
+                    difficultyProgress: diffProg,
                   });
                   for (let b = 0; b < batch.cars.length; b++) trafficCars.push(batch.cars[b]);
                   nextTrafficId = batch.nextId;
@@ -3270,36 +3616,32 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         // End of Drift/Highway branch; Parking branch handled above.
 
         if (isFalling && simDt > 0) {
-          // STAGE 2 & 3: Realistic Gravity Drop -> Heavy Ground Slam -> Suspension Bounce & Skid (Zero Explosions)
+          // STAGE 2 & 3: 3D Rigid-Body Valley Tumble -> Sloped Terrain Bounce & Skid
           fallTimer += simDt;
-          fallVelY -= 29.0 * simDt;
-          driftState.x += fallVelX * simDt;
-          driftState.y += fallVelY * simDt;
-          driftState.z += fallVelZ * simDt;
-
           const anchorNow = findClosestTrackAnchor(driftState.z);
           const curBiomeNow = resolveRoadBiome(roadModeRef.current, distance);
           const latOffsetNow = anchorNow
             ? (driftState.x - anchorNow.x) * anchorNow.nx + (driftState.z - anchorNow.z) * anchorNow.nz
             : breachedSide * 10;
           crashGroundY = sampleTerrainElevation(latOffsetNow, driftState.z, curBiomeNow.id) + 0.18;
+          const groundSlopeX =
+            (sampleTerrainElevation(latOffsetNow + 0.6, driftState.z, curBiomeNow.id) -
+              sampleTerrainElevation(latOffsetNow - 0.6, driftState.z, curBiomeNow.id)) /
+            1.2;
 
-          if (!groundImpacted) {
-            crashRoll += breachedSide * simDt * 1.45;
-            fallRotation = Math.sin(fallTimer * 5.5) * 0.25 + crashRoll * 0.55;
+          const stepRes = stepCrashBody3D(crashBody, crashGroundY, groundSlopeX, simDt);
+          driftState.x = crashBody.x;
+          driftState.y = crashBody.y;
+          driftState.z = crashBody.z;
+          fallVelX = crashBody.vx;
+          fallVelY = crashBody.vy;
+          fallVelZ = crashBody.vz;
+          fallRotation = Math.max(-0.68, Math.min(0.68, crashBody.roll));
 
-            if (driftState.y <= crashGroundY) {
-              driftState.y = crashGroundY;
+          if (stepRes.impactedGround) {
+            if (crashBody.bounceCount === 1) {
               groundImpacted = true;
               groundRestTimer = 0;
-
-              // Heavy ground bounce & skid friction
-              fallVelY = Math.max(3.6, Math.abs(fallVelY) * 0.22);
-              fallVelX *= 0.44;
-              fallVelZ *= 0.44;
-              crashRoll = breachedSide * 0.34;
-              fallRotation = crashRoll;
-
               hitstopTimer = 0.065;
               cameraTrauma = 1.0;
               screenFlashAlpha = 0.28;
@@ -3332,8 +3674,19 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   );
                 }
               }
+              spawnDetachedPart(
+                'wheel',
+                driftState.x,
+                driftState.y,
+                driftState.z,
+                fallVelX,
+                fallVelZ,
+                crashGroundY,
+                currentAppearance.primaryColor,
+                currentAppearance.rimHex,
+                -breachedSide
+              );
 
-              // Earthy dust shockwave ring on ground impact
               const dustRingCol = curBiomeNow.id === 'canyon' ? '#ea580c' : '#d6d3d1';
               pushShockwave({
                 x: driftState.x,
@@ -3347,7 +3700,6 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               });
               pushCallout(driftState.x, driftState.y + 2.2, driftState.z, 'GROUND IMPACT!', '#f8fafc', 0.9);
 
-              // Gravel, dirt clods, bent scrap & crisp white metallic sparks
               const groundPalette = [
                 currentAppearance.primaryColor,
                 currentCar.accentColor,
@@ -3378,7 +3730,6 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 });
               }
 
-              // Billowing earthy impact dust + white coolant steam puffs
               for (let i = 0; i < 20; i++) {
                 pushSmokePuff({
                   x: driftState.x + (Math.random() - 0.5) * 2.4,
@@ -3394,23 +3745,67 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   tint: i % 3 === 0 ? 'steam' : 'dust',
                 });
               }
-            }
-          } else {
-            groundRestTimer += simDt;
-            // Skid friction along terrain floor & damped suspension settle bounce
-            const drag = Math.exp(-3.4 * simDt);
-            fallVelX *= drag;
-            fallVelZ *= drag;
-            if (driftState.y <= crashGroundY) {
-              driftState.y = crashGroundY;
-              if (fallVelY < -1.8) {
-                fallVelY = Math.abs(fallVelY) * 0.25;
-                soundFX.playGroundSlam(0.45);
-              } else {
-                fallVelY = 0;
+            } else {
+              cameraTrauma = Math.min(1, cameraTrauma + 0.45);
+              soundFX.playGroundSlam(0.55);
+              for (let i = 0; i < 10; i++) {
+                const ang = Math.random() * Math.PI * 2;
+                const spd = 3 + Math.random() * 7;
+                pushDebrisChunk({
+                  x: driftState.x,
+                  y: crashGroundY + 0.25,
+                  z: driftState.z,
+                  vx: Math.cos(ang) * spd,
+                  vy: 2.5 + Math.random() * 5,
+                  vz: Math.sin(ang) * spd,
+                  size: 0.24 + Math.random() * 0.18,
+                  gravity: 24,
+                  rot: Math.random() * 6,
+                  vRot: (Math.random() - 0.5) * 14,
+                  life: 0.65,
+                  color: i % 2 === 0 ? '#fef08a' : '#78716c',
+                });
               }
             }
-            // Radiator steam rising from buckled hood while resting wrecked on ground
+          }
+
+          if (!crashBody.airborne) {
+            const slideSpd = Math.hypot(crashBody.vx, crashBody.vz);
+            if (slideSpd > 2.5) {
+              const yawRad = driftState.heading + crashBody.yaw;
+              const rx = -Math.sin(yawRad) * 0.72;
+              const rz = Math.cos(yawRad) * 0.72;
+              pushSkidMark(
+                driftState.x - rx,
+                driftState.z - rz,
+                driftState.x + rx,
+                driftState.z + rz,
+                crashGroundY + 0.04,
+                true,
+                1.25,
+                0.72,
+                '#292524',
+                breachedSide >= 0 ? 1 : -1
+              );
+              if (Math.random() < 0.6) {
+                pushSmokePuff({
+                  x: driftState.x + (Math.random() - 0.5) * 1.2,
+                  y: crashGroundY + 0.35,
+                  z: driftState.z + (Math.random() - 0.5) * 1.2,
+                  vx: (Math.random() - 0.5) * 2.5,
+                  vy: 1.4 + Math.random() * 2.4,
+                  vz: (Math.random() - 0.5) * 2.5,
+                  radius: 0.55,
+                  maxRadius: 2.1,
+                  life: 0.72,
+                  maxLife: 0.72,
+                  tint: 'dust',
+                });
+              }
+            }
+          }
+
+          if (groundImpacted) {
             if (Math.random() < 0.45) {
               pushSmokePuff({
                 x: driftState.x + (Math.random() - 0.5) * 0.8,
@@ -3426,35 +3821,167 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 tint: 'steam',
               });
             }
-            if (groundRestTimer >= 0.95) {
-              finalizeGameOver('Guardrail Breached');
+            if (stepRes.justSettled || Math.hypot(crashBody.vx, crashBody.vz) < 4.5 || fallTimer > 2.0) {
+              groundRestTimer += simDt;
+              if (groundRestTimer >= 0.72) {
+                finalizeGameOver('Guardrail Breached');
+              }
             }
+          } else if (fallTimer >= 3.0) {
+            finalizeGameOver('Guardrail Breached');
           }
         } else if (isTrafficCrash && simDt > 0) {
           trafficCrashTimer += simDt;
-          const skidDrag = Math.exp(-4.2 * simDt);
-          driftState.vx *= skidDrag;
-          driftState.vz *= skidDrag;
-          driftState.x += driftState.vx * 0.35 * simDt;
-          driftState.z += driftState.vz * 0.35 * simDt;
-          fallRotation += (crashRoll - fallRotation) * Math.min(1, 10 * simDt);
-          if (Math.random() < 0.55) {
-            pushSmokePuff({
-              x: driftState.x + (Math.random() - 0.5) * 0.8,
-              y: driftState.y + 0.45,
-              z: driftState.z + (Math.random() - 0.5) * 0.8,
-              vx: (Math.random() - 0.5) * 1.8,
-              vy: 2.1 + Math.random() * 2.4,
-              vz: (Math.random() - 0.5) * 1.8,
-              radius: 0.40,
-              maxRadius: 1.55,
-              life: 0.56,
-              maxLife: 0.56,
-              tint: Math.random() > 0.3 ? 'steam' : 'dark',
-            });
+          // Keep knocked traffic cars tumbling & bouncing off rails during crash slow-mo
+          if (isHighwayMode) {
+            for (let ti = 0; ti < trafficCars.length; ti++) {
+              const tc = trafficCars[ti];
+              if (tc.crashed) {
+                const tcRes = stepTrafficCrashBody(tc, HIGHWAY_ROAD_WIDTH * 0.5, simDt);
+                if (tcRes.hitRail || tcRes.bouncedGround) {
+                  const tcSample = sampleTrackAtS(track, tc.s, STEP_DIST);
+                  if (tcSample) {
+                    const wx = tcSample.x + tcSample.nx * tc.lateralOffset;
+                    const wy = tcSample.y + (tc.crashY ?? 0) + 0.35;
+                    const wz = tcSample.z + tcSample.nz * tc.lateralOffset;
+                    for (let sp = 0; sp < 7; sp++) {
+                      const ang = Math.random() * Math.PI * 2;
+                      const spd = 3 + Math.random() * 8;
+                      pushDebrisChunk({
+                        x: wx,
+                        y: wy,
+                        z: wz,
+                        vx: Math.cos(ang) * spd,
+                        vy: 2.5 + Math.random() * 4.5,
+                        vz: Math.sin(ang) * spd,
+                        size: 0.22 + Math.random() * 0.16,
+                        gravity: 22,
+                        rot: Math.random() * 6,
+                        vRot: (Math.random() - 0.5) * 18,
+                        life: 0.45,
+                        color: sp % 2 === 0 ? '#fef08a' : '#fb923c',
+                      });
+                    }
+                    soundFX.playGroundSlam(0.35);
+                  }
+                }
+              }
+            }
           }
-          if (trafficCrashTimer >= 1.05) {
-            finalizeGameOver(crashReason);
+
+          const roadCheckNow = evaluateCarOnSCurveRoad(driftState.x, driftState.z, track, 6);
+          const cpNow = roadCheckNow.closestPoint;
+          const latOff = roadCheckNow.signedPerpOffset;
+          const hw = roadCheckNow.halfWidth || 4.9;
+          if (cpNow) {
+            crashGroundY = cpNow.y + 0.04;
+            if (Math.abs(latOff) > hw + 0.35) {
+              // Impact blasted hero car straight through the bridge guardrail into the canyon/valley!
+              isFalling = true;
+              isTrafficCrash = false;
+              fallTimer = 0;
+              groundImpacted = false;
+              groundRestTimer = 0;
+              breachedSide = latOff >= 0 ? 1 : -1;
+              breachedSliceIdx = cpNow.index;
+              soundFX.playFallAndDestroy();
+              pushCallout(driftState.x, driftState.y + 1.8, driftState.z, 'GUARDRAIL BREACH!', '#fbbf24', 0.85);
+            } else if (Math.abs(latOff) > hw - 0.55) {
+              // Bounce hero car inward off highway steel guardrail with sparks
+              const sign = latOff >= 0 ? 1 : -1;
+              const latVel = crashBody.vx * cpNow.nx + crashBody.vz * cpNow.nz;
+              if (latVel * sign > 0) {
+                crashBody.vx -= cpNow.nx * latVel * 1.48;
+                crashBody.vz -= cpNow.nz * latVel * 1.48;
+                crashBody.yawVel = -crashBody.yawVel * 0.65;
+                cameraTrauma = Math.min(1, cameraTrauma + 0.35);
+                soundFX.playGuardrailSpark();
+                for (let sp = 0; sp < 8; sp++) {
+                  const ang = Math.random() * Math.PI * 2;
+                  const spd = 3 + Math.random() * 8;
+                  pushDebrisChunk({
+                    x: driftState.x,
+                    y: driftState.y + 0.4,
+                    z: driftState.z,
+                    vx: Math.cos(ang) * spd,
+                    vy: 2.5 + Math.random() * 4.5,
+                    vz: Math.sin(ang) * spd,
+                    size: 0.2 + Math.random() * 0.16,
+                    gravity: 22,
+                    rot: Math.random() * 6,
+                    vRot: (Math.random() - 0.5) * 16,
+                    life: 0.45,
+                    color: sp % 2 === 0 ? '#fef08a' : '#fb923c',
+                  });
+                }
+              }
+            }
+          }
+
+          if (isTrafficCrash) {
+            const tStep = stepCrashBody3D(crashBody, crashGroundY, 0, simDt);
+            driftState.x = crashBody.x;
+            driftState.y = crashBody.y;
+            driftState.z = crashBody.z;
+            driftState.vx = crashBody.vx;
+            driftState.vz = crashBody.vz;
+            fallRotation = Math.max(-0.55, Math.min(0.55, crashBody.roll));
+            if (tStep.impactedGround) {
+              soundFX.playGroundSlam(0.45);
+              for (let sp = 0; sp < 10; sp++) {
+                const ang = Math.random() * Math.PI * 2;
+                const spd = 3 + Math.random() * 8;
+                pushDebrisChunk({
+                  x: driftState.x,
+                  y: crashGroundY + 0.2,
+                  z: driftState.z,
+                  vx: Math.cos(ang) * spd,
+                  vy: 2 + Math.random() * 4.5,
+                  vz: Math.sin(ang) * spd,
+                  size: 0.2 + Math.random() * 0.16,
+                  gravity: 22,
+                  rot: Math.random() * 6,
+                  vRot: (Math.random() - 0.5) * 16,
+                  life: 0.48,
+                  color: sp % 2 === 0 ? '#fef08a' : '#94a3b8',
+                });
+              }
+            }
+            if (!crashBody.airborne && Math.hypot(crashBody.vx, crashBody.vz) > 3.0) {
+              const yawRad = driftState.heading + crashBody.yaw;
+              const rx = -Math.sin(yawRad) * 0.72;
+              const rz = Math.cos(yawRad) * 0.72;
+              pushSkidMark(
+                driftState.x - rx,
+                driftState.z - rz,
+                driftState.x + rx,
+                driftState.z + rz,
+                crashGroundY + 0.03,
+                true,
+                1.2,
+                0.78,
+                '#11141c',
+                1
+              );
+            }
+            if (Math.random() < 0.55) {
+              pushSmokePuff({
+                x: driftState.x + (Math.random() - 0.5) * 0.8,
+                y: driftState.y + 0.45,
+                z: driftState.z + (Math.random() - 0.5) * 0.8,
+                vx: (Math.random() - 0.5) * 1.8,
+                vy: 2.1 + Math.random() * 2.4,
+                vz: (Math.random() - 0.5) * 1.8,
+                radius: 0.40,
+                maxRadius: 1.55,
+                life: 0.56,
+                maxLife: 0.56,
+                tint: Math.random() > 0.3 ? 'steam' : 'dark',
+              });
+            }
+            if (trafficCrashTimer >= 1.25) {
+              finalizeGameOver(crashReason);
+            }
           }
         }
 
@@ -3525,7 +4052,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             lastHudMsg = nearMissText;
             lastHudOvertakes = overtakes;
             lastHudNearMisses = nearMisses;
-            const activeBiome = resolveRoadBiome(roadModeRef.current, distance);
+            const activeBiome = resolveRoadBiome(effectiveRoadMode, distance);
             const curSt = isParkingMode && parkingStages.length > 0 ? parkingStages[parkingStageIdx] : null;
             const baySt = curSt && parkingState ? evaluateParkingBayStatus(parkingState, curSt) : null;
             const prox = curSt && parkingState ? evaluateParkingProximity(parkingState, curSt) : null;
@@ -3602,17 +4129,17 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       // ============================================================
       // 5. RENDER PIXEL-ART WORLD DIRECTLY ONTO GPU-SCALED CANVAS
       // ============================================================
-      const rawBiome = resolveRoadBiome(roadModeRef.current, distance);
-      const sky = resolveSkyAtmosphere(skyModeRef.current, rawBiome);
+      const rawBiome = resolveRoadBiome(effectiveRoadMode, distance);
+      const sky = resolveSkyAtmosphere(effectiveSkyMode, rawBiome);
       Object.assign(biome, rawBiome);
       biome.isNight = sky.isNight;
       ensureBiomeLayers(biome, sky);
 
       cameraTrauma = Math.max(0, cameraTrauma - dt * 2.1);
       if (screenFlashAlpha > 0) screenFlashAlpha = Math.max(0, screenFlashAlpha - dt * 2.4);
-      const shakeMag = cameraTrauma * cameraTrauma * 9 * (shakeMultiplierRef.current ?? 1.0);
-      const shakeX = (Math.random() - 0.5) * shakeMag;
-      const shakeY = (Math.random() - 0.5) * shakeMag;
+      const shakeMag = cameraTrauma * cameraTrauma * 9 * HD_UI_SCALE * (shakeMultiplierRef.current ?? 1.0);
+      const shakeX = (Math.sin(now * 0.043) * 0.65 + Math.cos(now * 0.071) * 0.35) * shakeMag;
+      const shakeY = (Math.cos(now * 0.051) * 0.65 + Math.sin(now * 0.063) * 0.35) * shakeMag;
 
       const isPortrait = pxW < pxH;
       const curSpeedVal = Math.hypot(driftState.vx, driftState.vz);
@@ -3635,8 +4162,17 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       const rightX = -fwdZ;
       const rightZ = fwdX;
 
-      const camDistBack = isParkingMode ? 12.4 : (isHighwayMode ? 9.4 : 8.4) + camSpeedZoom * 0.85;
-      const camHeight = isParkingMode ? 5.05 : isHighwayMode ? 4.35 : 3.85;
+      const baseDistBack = isParkingMode ? 12.4 : (isHighwayMode ? 9.4 : 8.4) + camSpeedZoom * 0.85;
+      const camDistBack = phase === 'title' && !isParkingMode ? baseDistBack + 2.0 : baseDistBack;
+      const camHeight = isParkingMode
+        ? 5.05
+        : phase === 'title'
+        ? isHighwayMode
+          ? 2.35
+          : 2.15
+        : isHighwayMode
+        ? 4.35
+        : 3.85;
       const camSideSwing = isParkingMode ? 0 : isHighwayMode ? -camDiagBias * 0.65 : -camDiagBias * 1.55;
       const camWorldX = camFocusX - fwdX * camDistBack + rightX * camSideSwing;
       const camWorldY = camFocusY + camHeight;
@@ -3662,12 +4198,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         tireEmitMode !== 'none' &&
         projectInto(driftState.x, driftState.y, driftState.z, pScratchTmp)
       ) {
-        const carDrawW = Math.round(5.4 * pScratchTmp.scale);
-        const carDrawH = Math.round(carDrawW * (108 / 144));
-        const drawCx = Math.round(pScratchTmp.x);
-        const drawCy = Math.round(pScratchTmp.y - carDrawH * 0.34);
-        const spriteLeft = Math.round(drawCx - carDrawW * 0.5);
-        const spriteTop = Math.round(drawCy - carDrawH * 0.5);
+        const carDrawW = 5.4 * pScratchTmp.scale;
+        const carDrawH = carDrawW * 0.75;
+        const drawCx = pScratchTmp.x;
+        const drawCy = pScratchTmp.y - carDrawH * 0.34;
+        const spriteLeft = drawCx - carDrawW * 0.5;
+        const spriteTop = drawCy - carDrawH * 0.5;
 
         const anchors = getPixelCarTireAnchors(currentCar, visualDriftAngle, currentCustom);
         const tireY = driftState.y + 0.025;
@@ -3885,26 +4421,30 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
       // A. Anime Sky Gradient, Dynamic Stars/Aurora/God-Rays & Offscreen Celestial Sun/Moon
       ctx.fillStyle = cachedSkyGrad || sky.skyStops[1];
-      ctx.fillRect(0, 0, pxW, horizonY + 14);
+      ctx.fillRect(0, 0, pxW, horizonY + Math.round(14 * HD_UI_SCALE));
 
-      const sunX = Math.round(pxW * sky.celestialXRatio - (camHeading + Math.PI / 2) * 18);
-      const sunY = Math.round(horizonY * sky.celestialYRatio);
+      const logPxW = pxW / HD_UI_SCALE;
+      const logHorizonY = horizonY / HD_UI_SCALE;
+      const sunLogX = logPxW * sky.celestialXRatio - (camHeading + Math.PI / 2) * 18;
+      const sunLogY = logHorizonY * sky.celestialYRatio;
 
+      ctx.save();
+      ctx.scale(HD_UI_SCALE, HD_UI_SCALE);
       renderDynamicSkyAtmosphere({
         ctx,
-        pxW,
-        horizonY,
+        pxW: logPxW,
+        horizonY: logHorizonY,
         nowMs: now,
         camHeading,
         sky,
-        sunScreenX: sunX,
-        sunScreenY: sunY,
+        sunScreenX: sunLogX,
+        sunScreenY: sunLogY,
       });
 
       ctx.drawImage(
         celestialCanvas,
-        Math.round(sunX - celestialCanvas.width * 0.5),
-        Math.round(sunY - celestialCanvas.height * 0.5)
+        sunLogX - celestialCanvas.width * 0.5,
+        sunLogY - celestialCanvas.height * 0.5
       );
 
       // B. Pre-Rendered 4-Layer Cel-Shaded Shinkai Anime Clouds
@@ -3917,22 +4457,23 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         breezePxPerMs: number
       ) => {
         const cc = cloudCanvases[idx];
-        const span = pxW + cc.width + 24;
-        const rawX = baseFrac * pxW + now * breezePxPerMs - cloudDrift * parallax;
+        const span = logPxW + cc.width + 24;
+        const rawX = baseFrac * logPxW + now * breezePxPerMs - cloudDrift * parallax;
         const wrappedX = (((rawX + cc.width * 0.5 + 12) % span) + span) % span - cc.width - 12;
-        ctx.drawImage(cc, Math.round(wrappedX), Math.round(horizonY * yFrac - cc.height * 0.65));
+        ctx.drawImage(cc, wrappedX, logHorizonY * yFrac - cc.height * 0.65);
       };
       drawAnimeCloud(4, 0.20, 0.30, 0.24, 0.0022);
       drawAnimeCloud(3, 0.56, 0.25, 0.28, 0.0031);
       drawAnimeCloud(0, 0.14, 0.64, 0.42, 0.0018);
       drawAnimeCloud(1, 0.88, 0.58, 0.44, 0.0015);
       drawAnimeCloud(2, 0.46, 0.78, 0.32, 0.0026);
+      ctx.restore();
 
       // C. Distant atmospheric horizon silhouette (soft depth backdrop behind 3D vistas)
-      const mtnShift = (camHeading + Math.PI / 2) * 44;
-      const clampedShift = Math.max(-155, Math.min(155, Math.round(mtnShift * 0.55)));
+      const mtnShift = (camHeading + Math.PI / 2) * 44 * HD_UI_SCALE;
+      const clampedShift = Math.max(-155 * HD_UI_SCALE, Math.min(155 * HD_UI_SCALE, mtnShift * 0.55));
       ctx.globalAlpha = 0.34;
-      ctx.drawImage(horizonCanvas, -160 - clampedShift, 0);
+      ctx.drawImage(horizonCanvas, -Math.round(160 * HD_UI_SCALE) - clampedShift, 0);
       ctx.globalAlpha = 1.0;
 
       // D. Collect Visible Road Slices into pre-allocated pool & sort far-to-near in place
@@ -4049,7 +4590,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       // Soft atmospheric horizon mist blending sky backdrop seamlessly into distant terrain
       if (cachedHorizonMistGrad) {
         ctx.fillStyle = cachedHorizonMistGrad;
-        ctx.fillRect(0, Math.max(0, horizonY - 6), pxW, 28);
+        ctx.fillRect(0, Math.max(0, horizonY - Math.round(6 * HD_UI_SCALE)), pxW, Math.round(28 * HD_UI_SCALE));
       }
 
       // F. Parking Plaza Proving Ground OR Continuous Elevated Viaduct Overpass
@@ -4113,19 +4654,56 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         const asphaltColor = Math.floor(far.pt.index / 2) % 2 === 0 ? biome.asphaltEven : biome.asphaltOdd;
         drawQuadPts(far.pL, far.pR, near.pR, near.pL, asphaltColor);
 
+        // Outer Paved Shoulder Apron Trim (subtle dark asphalt border outside lane lines, zero alloc)
+        if (isNearMid) {
+          const shoulderTint = biome.isNight ? 'rgba(2, 6, 23, 0.24)' : 'rgba(15, 23, 42, 0.16)';
+          pScratch0.x = far.pL.x + (far.pR.x - far.pL.x) * 0.045;
+          pScratch0.y = far.pL.y + (far.pR.y - far.pL.y) * 0.045;
+          pScratch1.x = near.pL.x + (near.pR.x - near.pL.x) * 0.045;
+          pScratch1.y = near.pL.y + (near.pR.y - near.pL.y) * 0.045;
+          drawQuadPts(far.pL, pScratch0, pScratch1, near.pL, shoulderTint);
+
+          pScratch0.x = far.pR.x - (far.pR.x - far.pL.x) * 0.045;
+          pScratch0.y = far.pR.y - (far.pR.y - far.pL.y) * 0.045;
+          pScratch1.x = near.pR.x - (near.pR.x - near.pL.x) * 0.045;
+          pScratch1.y = near.pR.y - (near.pR.y - near.pL.y) * 0.045;
+          drawQuadPts(pScratch0, far.pR, near.pR, pScratch1, shoulderTint);
+        }
+
+        // Specular Wet-Night / Golden-Hour Center Reflection Sheen (zero allocations using scratch pts)
+        if ((biome.isNight || sky.id === 'golden_sunset') && far.rawZ < 92) {
+          const sheenCol =
+            sky.id === 'red_moon'
+              ? 'rgba(248, 113, 113, 0.075)'
+              : sky.id === 'golden_sunset'
+              ? 'rgba(251, 146, 60, 0.085)'
+              : biome.id === 'neon'
+              ? 'rgba(34, 211, 238, 0.095)'
+              : 'rgba(125, 211, 252, 0.07)';
+          pScratch0.x = far.pL.x + (far.pR.x - far.pL.x) * 0.34;
+          pScratch0.y = far.pL.y + (far.pR.y - far.pL.y) * 0.34;
+          pScratch1.x = far.pL.x + (far.pR.x - far.pL.x) * 0.66;
+          pScratch1.y = far.pL.y + (far.pR.y - far.pL.y) * 0.66;
+          pScratch2.x = near.pL.x + (near.pR.x - near.pL.x) * 0.66;
+          pScratch2.y = near.pL.y + (near.pR.y - near.pL.y) * 0.66;
+          pScratch3.x = near.pL.x + (near.pR.x - near.pL.x) * 0.34;
+          pScratch3.y = near.pL.y + (near.pR.y - near.pL.y) * 0.34;
+          drawQuadPts(pScratch0, pScratch1, pScratch2, pScratch3, sheenCol);
+        }
+
         if (isNearMid && far.pt.index % 4 === 0) {
           ctx.strokeStyle = 'rgba(15, 23, 42, 0.28)';
-          ctx.lineWidth = 1;
+          ctx.lineWidth = Math.max(1, 0.08 * near.cM.scale);
           ctx.beginPath();
-          ctx.moveTo(Math.round(far.pL.x), Math.round(far.pL.y));
-          ctx.lineTo(Math.round(far.pR.x), Math.round(far.pR.y));
+          ctx.moveTo(far.pL.x, far.pL.y);
+          ctx.lineTo(far.pR.x, far.pR.y);
           ctx.stroke();
         }
 
         // Subtle dual tire-wear grooves per lane (batched single beginPath)
         if (isNearMid) {
           ctx.strokeStyle = 'rgba(15, 20, 30, 0.16)';
-          ctx.lineWidth = Math.max(1, Math.round(0.18 * near.cM.scale));
+          ctx.lineWidth = Math.max(1, 0.18 * near.cM.scale);
           const dfx = far.pR.x - far.pL.x;
           const dfy = far.pR.y - far.pL.y;
           const dnx = near.pR.x - near.pL.x;
@@ -4133,13 +4711,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           ctx.beginPath();
           if (isHighwayMode) {
             for (const gs of [0.20, 0.30, 0.70, 0.80]) {
-              ctx.moveTo(Math.round(far.pL.x + dfx * gs), Math.round(far.pL.y + dfy * gs));
-              ctx.lineTo(Math.round(near.pL.x + dnx * gs), Math.round(near.pL.y + dny * gs));
+              ctx.moveTo(far.pL.x + dfx * gs, far.pL.y + dfy * gs);
+              ctx.lineTo(near.pL.x + dnx * gs, near.pL.y + dny * gs);
             }
           } else {
             for (const gs of [0.38, 0.62]) {
-              ctx.moveTo(Math.round(far.pL.x + dfx * gs), Math.round(far.pL.y + dfy * gs));
-              ctx.lineTo(Math.round(near.pL.x + dnx * gs), Math.round(near.pL.y + dny * gs));
+              ctx.moveTo(far.pL.x + dfx * gs, far.pL.y + dfy * gs);
+              ctx.lineTo(near.pL.x + dnx * gs, near.pL.y + dny * gs);
             }
           }
           ctx.stroke();
@@ -4147,18 +4725,18 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
         // Batched outer edge stripes in a single path!
         ctx.strokeStyle = biome.edgeStripe;
-        ctx.lineWidth = Math.max(1, Math.round(0.14 * near.cM.scale));
+        ctx.lineWidth = Math.max(1.2, 0.14 * near.cM.scale);
         ctx.beginPath();
-        ctx.moveTo(Math.round(far.pL.x), Math.round(far.pL.y));
-        ctx.lineTo(Math.round(near.pL.x), Math.round(near.pL.y));
-        ctx.moveTo(Math.round(far.pR.x), Math.round(far.pR.y));
-        ctx.lineTo(Math.round(near.pR.x), Math.round(near.pR.y));
+        ctx.moveTo(far.pL.x, far.pL.y);
+        ctx.lineTo(near.pL.x, near.pL.y);
+        ctx.moveTo(far.pR.x, far.pR.y);
+        ctx.lineTo(near.pR.x, near.pR.y);
         ctx.stroke();
 
         if (far.pt.index % 3 === 0 && far.rawZ < 75) {
           ctx.fillStyle = biome.isNight ? '#22d3ee' : '#fef9c3';
-          const studSz = Math.max(1, Math.round(0.12 * far.cM.scale));
-          ctx.fillRect(Math.round(far.cM.x - studSz * 0.5), Math.round(far.cM.y - studSz * 0.5), studSz, studSz);
+          const studSz = Math.max(1.5, 0.12 * far.cM.scale);
+          ctx.fillRect(far.cM.x - studSz * 0.5, far.cM.y - studSz * 0.5, studSz, studSz);
         }
 
         // Center divider: Double Yellow Solid Highway Lines batched in 1 path!
@@ -4168,41 +4746,41 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           const dnx = near.pR.x - near.pL.x;
           const dny = near.pR.y - near.pL.y;
           ctx.strokeStyle = '#facc15';
-          ctx.lineWidth = Math.max(1, Math.round(0.11 * near.cM.scale));
+          ctx.lineWidth = Math.max(1.2, 0.11 * near.cM.scale);
           ctx.beginPath();
-          ctx.moveTo(Math.round(far.pL.x + dfx * 0.483), Math.round(far.pL.y + dfy * 0.483));
-          ctx.lineTo(Math.round(near.pL.x + dnx * 0.483), Math.round(near.pL.y + dny * 0.483));
-          ctx.moveTo(Math.round(far.pL.x + dfx * 0.517), Math.round(far.pL.y + dfy * 0.517));
-          ctx.lineTo(Math.round(near.pL.x + dnx * 0.517), Math.round(near.pL.y + dny * 0.517));
+          ctx.moveTo(far.pL.x + dfx * 0.483, far.pL.y + dfy * 0.483);
+          ctx.lineTo(near.pL.x + dnx * 0.483, near.pL.y + dny * 0.483);
+          ctx.moveTo(far.pL.x + dfx * 0.517, far.pL.y + dfy * 0.517);
+          ctx.lineTo(near.pL.x + dnx * 0.517, near.pL.y + dny * 0.517);
           ctx.stroke();
 
           if (far.pt.index % 8 === 0 && far.rawZ > 4 && far.rawZ < 90) {
-            const arrowR = Math.max(2, Math.round(0.42 * far.cM.scale));
+            const arrowR = Math.max(2, 0.42 * far.cM.scale);
             const lx = far.pL.x + dfx * 0.25;
             const ly = far.pL.y + dfy * 0.25;
             ctx.strokeStyle = 'rgba(251, 113, 133, 0.55)';
-            ctx.lineWidth = Math.max(1, Math.round(0.10 * far.cM.scale));
+            ctx.lineWidth = Math.max(1, 0.10 * far.cM.scale);
             ctx.beginPath();
-            ctx.moveTo(Math.round(lx - arrowR), Math.round(ly - arrowR * 0.45));
-            ctx.lineTo(Math.round(lx), Math.round(ly + arrowR * 0.45));
-            ctx.lineTo(Math.round(lx + arrowR), Math.round(ly - arrowR * 0.45));
+            ctx.moveTo(lx - arrowR, ly - arrowR * 0.45);
+            ctx.lineTo(lx, ly + arrowR * 0.45);
+            ctx.lineTo(lx + arrowR, ly - arrowR * 0.45);
             ctx.stroke();
 
             const rx = far.pL.x + dfx * 0.75;
             const ry = far.pL.y + dfy * 0.75;
             ctx.strokeStyle = 'rgba(226, 232, 240, 0.45)';
             ctx.beginPath();
-            ctx.moveTo(Math.round(rx - arrowR), Math.round(ry + arrowR * 0.45));
-            ctx.lineTo(Math.round(rx), Math.round(ry - arrowR * 0.45));
-            ctx.lineTo(Math.round(rx + arrowR), Math.round(ry + arrowR * 0.45));
+            ctx.moveTo(rx - arrowR, ry + arrowR * 0.45);
+            ctx.lineTo(rx, ry - arrowR * 0.45);
+            ctx.lineTo(rx + arrowR, ry + arrowR * 0.45);
             ctx.stroke();
           }
         } else if (far.pt.index % 2 === 0) {
           ctx.strokeStyle = biome.centerLine;
-          ctx.lineWidth = Math.max(1, Math.round(0.10 * near.cM.scale));
+          ctx.lineWidth = Math.max(1.2, 0.10 * near.cM.scale);
           ctx.beginPath();
-          ctx.moveTo(Math.round(far.cM.x), Math.round(far.cM.y));
-          ctx.lineTo(Math.round(near.cM.x), Math.round(near.cM.y));
+          ctx.moveTo(far.cM.x, far.cM.y);
+          ctx.lineTo(near.cM.x, near.cM.y);
           ctx.stroke();
         }
 
@@ -4213,10 +4791,10 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           const gNearX = near.pL.x + (near.pR.x - near.pL.x) * (0.5 + grooveOff);
           const gNearY = near.pL.y + (near.pR.y - near.pL.y) * (0.5 + grooveOff);
           ctx.strokeStyle = 'rgba(15, 20, 30, 0.34)';
-          ctx.lineWidth = Math.max(1, Math.round(0.22 * near.cM.scale));
+          ctx.lineWidth = Math.max(1.2, 0.22 * near.cM.scale);
           ctx.beginPath();
-          ctx.moveTo(Math.round(gFarX), Math.round(gFarY));
-          ctx.lineTo(Math.round(gNearX), Math.round(gNearY));
+          ctx.moveTo(gFarX, gFarY);
+          ctx.lineTo(gNearX, gNearY);
           ctx.stroke();
         }
 
@@ -4259,69 +4837,117 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           drawQuadPts(far.gL, near.gL, near.pL, far.pL, biome.railLight, strokeWalls, 1);
           drawQuadPts(far.gR, near.gR, near.pR, far.pR, biome.railDark, strokeWalls, 1);
 
-          if (far.rawZ < 48) {
+          if (far.rawZ < 70) {
             ctx.strokeStyle = biome.railSpec;
-            ctx.lineWidth = Math.max(1, Math.round(0.08 * near.cM.scale));
+            ctx.lineWidth = Math.max(1, 0.09 * near.cM.scale);
             ctx.beginPath();
-            ctx.moveTo(Math.round(far.gL.x), Math.round(far.gL.y));
-            ctx.lineTo(Math.round(near.gL.x), Math.round(near.gL.y));
-            ctx.moveTo(Math.round(far.gR.x), Math.round(far.gR.y));
-            ctx.lineTo(Math.round(near.gR.x), Math.round(near.gR.y));
+            ctx.moveTo(far.gL.x, far.gL.y);
+            ctx.lineTo(near.gL.x, near.gL.y);
+            ctx.moveTo(far.gR.x, far.gR.y);
+            ctx.lineTo(near.gR.x, near.gR.y);
             ctx.stroke();
+
+            // Mid W-beam corrugation crease for authentic 3D steel guardrail profile
+            if (far.rawZ < 44) {
+              ctx.strokeStyle = 'rgba(15, 23, 42, 0.42)';
+              ctx.lineWidth = Math.max(1, 0.06 * near.cM.scale);
+              ctx.beginPath();
+              ctx.moveTo((far.gL.x + far.pL.x) * 0.5, (far.gL.y + far.pL.y) * 0.5);
+              ctx.lineTo((near.gL.x + near.pL.x) * 0.5, (near.gL.y + near.pL.y) * 0.5);
+              ctx.moveTo((far.gR.x + far.pR.x) * 0.5, (far.gR.y + far.pR.y) * 0.5);
+              ctx.lineTo((near.gR.x + near.pR.x) * 0.5, (near.gR.y + near.pR.y) * 0.5);
+              ctx.stroke();
+            }
           }
 
           if (far.rawZ < 44) {
             ctx.strokeStyle = '#334155';
-            ctx.lineWidth = Math.max(1, Math.round(0.11 * far.cM.scale));
+            ctx.lineWidth = Math.max(1, 0.11 * far.cM.scale);
             ctx.beginPath();
-            ctx.moveTo(Math.round(far.pL.x), Math.round(far.pL.y));
-            ctx.lineTo(Math.round(far.gL.x), Math.round(far.gL.y));
-            ctx.moveTo(Math.round(far.pR.x), Math.round(far.pR.y));
-            ctx.lineTo(Math.round(far.gR.x), Math.round(far.gR.y));
+            ctx.moveTo(far.pL.x, far.pL.y);
+            ctx.lineTo(far.gL.x, far.gL.y);
+            ctx.moveTo(far.pR.x, far.pR.y);
+            ctx.lineTo(far.gR.x, far.gR.y);
             ctx.stroke();
+
+            if (far.pt.index % 2 === 0) {
+              const stud = Math.max(1.5, 0.09 * far.cM.scale);
+              ctx.fillStyle = biome.isNight ? '#38bdf8' : '#fef08a';
+              ctx.fillRect(far.gL.x - stud * 0.5, (far.gL.y + far.pL.y) * 0.5 - stud * 0.5, stud, stud);
+              ctx.fillStyle = biome.isNight ? '#fb7185' : '#fef08a';
+              ctx.fillRect(far.gR.x - stud * 0.5, (far.gR.y + far.pR.y) * 0.5 - stud * 0.5, stud, stud);
+            }
           }
 
           if (Math.abs(far.pt.curvature) > 0.014 && far.pt.index % 3 === 0) {
             const outerPost = far.pt.curvature > 0 ? far.gL : far.gR;
-            const signW = Math.max(4, Math.round(0.95 * far.cM.scale));
-            const signH = Math.max(4, Math.round(0.85 * far.cM.scale));
-            const sx = Math.round(outerPost.x - signW * 0.5);
-            const sy = Math.round(outerPost.y - signH - Math.max(2, Math.round(0.35 * far.cM.scale)));
+            const signW = Math.max(4, 0.95 * far.cM.scale);
+            const signH = Math.max(4, 0.85 * far.cM.scale);
+            const sx = outerPost.x - signW * 0.5;
+            const sy = outerPost.y - signH - Math.max(2, 0.35 * far.cM.scale);
             ctx.fillStyle = '#334155';
-            ctx.fillRect(Math.round(outerPost.x) - 1, sy + signH, 2, Math.max(2, Math.round(outerPost.y - (sy + signH))));
+            ctx.fillRect(outerPost.x - 1, sy + signH, 2, Math.max(2, outerPost.y - (sy + signH)));
             ctx.fillStyle = '#090d16';
             ctx.fillRect(sx - 1, sy - 1, signW + 2, signH + 2);
             ctx.fillStyle = '#facc15';
             ctx.fillRect(sx, sy, signW, signH);
             if (signW >= 5 && signH >= 5) {
               ctx.strokeStyle = '#090d16';
-              ctx.lineWidth = Math.max(1, Math.round(signW * 0.16));
-              const midY = sy + Math.round(signH * 0.5);
-              const tipX = far.pt.curvature > 0 ? sx + Math.round(signW * 0.72) : sx + Math.round(signW * 0.28);
-              const backX = far.pt.curvature > 0 ? sx + Math.round(signW * 0.28) : sx + Math.round(signW * 0.72);
+              ctx.lineWidth = Math.max(1, signW * 0.16);
+              const midY = sy + signH * 0.5;
+              const tipX = far.pt.curvature > 0 ? sx + signW * 0.72 : sx + signW * 0.28;
+              const backX = far.pt.curvature > 0 ? sx + signW * 0.28 : sx + signW * 0.72;
               ctx.beginPath();
-              ctx.moveTo(backX, sy + Math.round(signH * 0.22));
+              ctx.moveTo(backX, sy + signH * 0.22);
               ctx.lineTo(tipX, midY);
-              ctx.lineTo(backX, sy + Math.round(signH * 0.78));
+              ctx.lineTo(backX, sy + signH * 0.78);
               ctx.stroke();
             }
           }
         }
 
-        // 5c. Roadside Highway Streetlamps
+        // 5c. Roadside Highway Streetlamps + Night Road Pool Glow
         if (far.pt.index % 6 === 0 && far.rawZ > 8.5 && far.rawZ < 115) {
           const isLeftLamp = far.pt.index % 12 === 0;
           const postBase = isLeftLamp ? far.gL : far.gR;
           const roadCenterX = far.cM.x;
-          const poleH = Math.max(8, Math.round(3.4 * far.cM.scale));
-          const armReach = Math.max(3, Math.round(1.15 * far.cM.scale)) * (isLeftLamp ? 1 : -1);
-          const pxBase = Math.round(postBase.x);
-          const pyBase = Math.round(postBase.y);
+          const poleH = Math.max(8, 3.4 * far.cM.scale);
+          const armReach = Math.max(3, 1.15 * far.cM.scale) * (isLeftLamp ? 1 : -1);
+          const pxBase = postBase.x;
+          const pyBase = postBase.y;
           const pyTop = pyBase - poleH;
-          const bulbX = Math.round(pxBase + (roadCenterX > pxBase ? Math.abs(armReach) : -Math.abs(armReach)));
+          const bulbX = pxBase + (roadCenterX > pxBase ? Math.abs(armReach) : -Math.abs(armReach));
+
+          if (biome.isNight && far.rawZ < 68) {
+            ctx.fillStyle = biome.lampColor;
+            ctx.globalAlpha = roadFog * 0.095;
+            ctx.beginPath();
+            ctx.ellipse(
+              far.cM.x + (isLeftLamp ? -0.25 : 0.25) * (far.pR.x - far.pL.x),
+              far.cM.y,
+              Math.max(4, far.cM.scale * 2.2),
+              Math.max(1.5, far.cM.scale * 0.58),
+              0,
+              0,
+              Math.PI * 2
+            );
+            ctx.fill();
+
+            // Soft atmospheric volumetric light cone beneath streetlamp fixture
+            const coneSpread = Math.max(4, far.cM.scale * 1.45);
+            const coneCenterX = far.cM.x + (isLeftLamp ? -0.22 : 0.22) * (far.pR.x - far.pL.x);
+            ctx.globalAlpha = roadFog * 0.045;
+            ctx.beginPath();
+            ctx.moveTo(bulbX, pyTop + 1);
+            ctx.lineTo(coneCenterX - coneSpread, far.cM.y);
+            ctx.lineTo(coneCenterX + coneSpread, far.cM.y);
+            ctx.closePath();
+            ctx.fill();
+            ctx.globalAlpha = roadFog;
+          }
 
           ctx.strokeStyle = '#475569';
-          ctx.lineWidth = Math.max(1, Math.round(0.14 * far.cM.scale));
+          ctx.lineWidth = Math.max(1, 0.14 * far.cM.scale);
           ctx.beginPath();
           ctx.moveTo(pxBase, pyBase);
           ctx.lineTo(pxBase, pyTop);
@@ -4329,27 +4955,27 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           ctx.stroke();
 
           ctx.fillStyle = biome.lampColor;
-          ctx.globalAlpha = roadFog * (biome.isNight ? 0.30 : 0.14);
+          ctx.globalAlpha = roadFog * (biome.isNight ? 0.34 : 0.14);
           ctx.beginPath();
-          ctx.arc(bulbX, pyTop + 1, Math.min(7, Math.max(2, Math.round(0.45 * far.cM.scale))), 0, Math.PI * 2);
+          ctx.arc(bulbX, pyTop + 1, Math.min(11, Math.max(2, 0.45 * far.cM.scale)), 0, Math.PI * 2);
           ctx.fill();
           ctx.globalAlpha = roadFog;
           ctx.fillStyle = '#ffffff';
-          ctx.fillRect(bulbX - 1, pyTop, Math.max(2, Math.round(0.22 * far.cM.scale)), 2);
+          ctx.fillRect(bulbX - 1.2, pyTop, Math.max(2, 0.22 * far.cM.scale), Math.max(2, 0.14 * far.cM.scale));
         }
 
         // 5d. Overhead Highway Steel Gantries with Illuminated Biome Signboard!
         if (far.pt.index >= 10 && far.pt.index % 26 === 14 && far.rawZ > 7 && far.rawZ < 118) {
-          const gantryH = Math.max(10, Math.round(3.6 * far.cM.scale));
-          const leftX = Math.round(far.gL.x);
-          const leftY = Math.round(far.gL.y);
-          const rightX_g = Math.round(far.gR.x);
-          const rightY_g = Math.round(far.gR.y);
+          const gantryH = Math.max(10, 3.6 * far.cM.scale);
+          const leftX = far.gL.x;
+          const leftY = far.gL.y;
+          const rightX_g = far.gR.x;
+          const rightY_g = far.gR.y;
           const topYL = leftY - gantryH;
           const topYR = rightY_g - gantryH;
 
           ctx.strokeStyle = '#1e293b';
-          ctx.lineWidth = Math.max(2, Math.round(0.22 * far.cM.scale));
+          ctx.lineWidth = Math.max(2, 0.22 * far.cM.scale);
           ctx.beginPath();
           ctx.moveTo(leftX, leftY);
           ctx.lineTo(leftX, topYL);
@@ -4358,28 +4984,28 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           ctx.stroke();
 
           ctx.strokeStyle = '#94a3b8';
-          ctx.lineWidth = Math.max(1, Math.round(0.11 * far.cM.scale));
+          ctx.lineWidth = Math.max(1, 0.11 * far.cM.scale);
           ctx.beginPath();
           ctx.moveTo(leftX, topYL);
           ctx.lineTo(rightX_g, topYR);
           ctx.stroke();
 
-          const midGX = Math.round((leftX + rightX_g) * 0.5);
-          const midGY = Math.round((topYL + topYR) * 0.5);
-          const signW = Math.max(12, Math.round(Math.abs(rightX_g - leftX) * 0.48));
-          const signH = Math.max(5, Math.round(0.95 * far.cM.scale));
+          const midGX = (leftX + rightX_g) * 0.5;
+          const midGY = (topYL + topYR) * 0.5;
+          const signW = Math.max(12, Math.abs(rightX_g - leftX) * 0.48);
+          const signH = Math.max(5, 0.95 * far.cM.scale);
           ctx.fillStyle = '#090d16';
-          ctx.fillRect(midGX - Math.round(signW * 0.5) - 1, midGY - Math.round(signH * 0.5) - 1, signW + 2, signH + 2);
+          ctx.fillRect(midGX - signW * 0.5 - 1, midGY - signH * 0.5 - 1, signW + 2, signH + 2);
           ctx.fillStyle = '#0f172a';
-          ctx.fillRect(midGX - Math.round(signW * 0.5), midGY - Math.round(signH * 0.5), signW, signH);
+          ctx.fillRect(midGX - signW * 0.5, midGY - signH * 0.5, signW, signH);
           ctx.fillStyle = biome.gantryAccent;
-          ctx.fillRect(midGX - Math.round(signW * 0.5), midGY - Math.round(signH * 0.5), signW, Math.max(1, Math.round(signH * 0.22)));
+          ctx.fillRect(midGX - signW * 0.5, midGY - signH * 0.5, signW, Math.max(1.5, signH * 0.22));
 
-          if (signW >= 26) {
+          if (signW >= 34) {
             ctx.textAlign = 'center';
-            ctx.font = `bold ${Math.max(5, Math.round(signH * 0.56))}px "Chakra Petch", monospace`;
+            ctx.font = `bold ${Math.max(6, Math.round(signH * 0.56))}px "Chakra Petch", monospace`;
             ctx.fillStyle = '#f8fafc';
-            ctx.fillText(biome.gantrySign, midGX, midGY + Math.round(signH * 0.28));
+            ctx.fillText(biome.gantrySign, midGX, midGY + signH * 0.28);
           }
         }
 
@@ -4388,6 +5014,23 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         renderBridgeTrussArch3D({ ctx, far, biome, projectInto });
         renderRealisticRoadsideLandmarks3D({ ctx, far, biome, projectInto, nowMs: now });
         ctx.globalAlpha = 1.0;
+      }
+
+      // 5f. Checkered Campaign Finish Gate Banner
+      if (curLevel) {
+        const targetIdx = Math.round(curLevel.targetDistance / STEP_DIST);
+        for (let i = 0; i < visibleCount; i++) {
+          if (slicePool[i].pt.index === targetIdx) {
+            renderFinishGate3D({
+              ctx,
+              pt: slicePool[i].pt,
+              rawZ: slicePool[i].rawZ,
+              projectInto,
+              nowMs: now,
+            });
+            break;
+          }
+        }
       }
       }
       ctx.globalAlpha = 1.0;
@@ -4497,13 +5140,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             const csy = Math.round(pScratchTmp.y);
 
             ctx.save();
-            ctx.shadowBlur = Math.min(18, Math.round(10 * (scale / 18)));
-            ctx.shadowColor = '#00f0ff';
-
-            // Outer cyan aura
+            // Outer cyan aura (fast concentric glow rings, zero CPU shadowBlur)
+            ctx.fillStyle = 'rgba(0, 240, 255, 0.14)';
+            ctx.beginPath();
+            ctx.arc(csx, csy, Math.round(canW * 1.9), 0, Math.PI * 2);
+            ctx.fill();
             ctx.fillStyle = 'rgba(6, 182, 212, 0.28)';
             ctx.beginPath();
-            ctx.arc(csx, csy, Math.round(canW * 1.4), 0, Math.PI * 2);
+            ctx.arc(csx, csy, Math.round(canW * 1.35), 0, Math.PI * 2);
             ctx.fill();
 
             // Cylinder body
@@ -4539,8 +5183,6 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             // Rotating star rune on canister face
             const runeAngle = (now * 0.005 + pt.index * 0.8) % (Math.PI * 2);
             const runeR = Math.max(2, Math.round(canW * 0.35));
-            ctx.shadowBlur = 4;
-            ctx.shadowColor = '#ffffff';
             ctx.strokeStyle = '#ffffff';
             ctx.lineWidth = Math.max(1, Math.round(scale * 0.05));
             ctx.beginPath();
@@ -4569,13 +5211,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         if (!projectInto(p.x, p.y, p.z, pScratchTmp)) return;
         const age = 1 - p.life / p.maxLife;
         const curRad = p.radius + (p.maxRadius - p.radius) * age;
-        const pr = Math.max(2, Math.round(curRad * pScratchTmp.scale));
-        const sx = Math.round(pScratchTmp.x);
-        const sy = Math.round(pScratchTmp.y);
-        const alpha = Math.min(0.84, (p.life / p.maxLife) * 0.94);
+        const pr = Math.min(34, Math.max(2, curRad * 0.72 * pScratchTmp.scale));
+        const sx = pScratchTmp.x;
+        const sy = pScratchTmp.y;
+        const baseAlpha = Math.min(0.46, (p.life / p.maxLife) * 0.54) * (1 - age * 0.25);
 
-        ctx.globalAlpha = alpha;
-        ctx.fillStyle =
+        const outerColor =
           p.tint === 'cyan'
             ? '#0891b2'
             : p.tint === 'aqua'
@@ -4591,12 +5232,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             : p.tint === 'dark'
             ? '#1e293b'
             : '#cbd5e1';
-        ctx.beginPath();
-        ctx.arc(sx, sy + 1, pr, 0, Math.PI * 2);
-        ctx.arc(sx - Math.round(pr * 0.45), sy + 2, Math.max(1, Math.round(pr * 0.65)), 0, Math.PI * 2);
-        ctx.fill();
 
-        ctx.fillStyle =
+        const innerColor =
           p.tint === 'cyan'
             ? '#cffafe'
             : p.tint === 'aqua'
@@ -4612,9 +5249,30 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             : p.tint === 'dark'
             ? '#475569'
             : '#ffffff';
+
+        // Subtle ground shadow curl tint underneath smoke plume
+        ctx.globalAlpha = baseAlpha * 0.22;
+        ctx.fillStyle = '#0f172a';
         ctx.beginPath();
-        ctx.arc(sx - Math.round(pr * 0.12), sy - Math.round(pr * 0.18), Math.max(1, Math.round(pr * 0.78)), 0, Math.PI * 2);
-        ctx.arc(sx + Math.round(pr * 0.35), sy - Math.round(pr * 0.05), Math.max(1, Math.round(pr * 0.56)), 0, Math.PI * 2);
+        ctx.ellipse(sx, sy + pr * 0.65, pr * 1.15, Math.max(1.2, pr * 0.38), 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Outer soft 3-lobe cel-shaded halo puff
+        ctx.globalAlpha = baseAlpha * 0.46;
+        ctx.fillStyle = outerColor;
+        ctx.beginPath();
+        ctx.arc(sx, sy + 1, pr * 1.18, 0, Math.PI * 2);
+        ctx.arc(sx - pr * 0.46, sy + 1.5, Math.max(1.5, pr * 0.78), 0, Math.PI * 2);
+        ctx.arc(sx + pr * 0.42, sy + 0.5, Math.max(1.4, pr * 0.68), 0, Math.PI * 2);
+        ctx.fill();
+
+        // Inner crisp cel-highlight puff curl
+        ctx.globalAlpha = baseAlpha * 0.82;
+        ctx.fillStyle = innerColor;
+        ctx.beginPath();
+        ctx.arc(sx - pr * 0.14, sy - pr * 0.18, Math.max(1.5, pr * 0.68), 0, Math.PI * 2);
+        ctx.arc(sx + pr * 0.32, sy - pr * 0.08, Math.max(1.2, pr * 0.48), 0, Math.PI * 2);
+        ctx.arc(sx - pr * 0.42, sy - pr * 0.04, Math.max(1.0, pr * 0.36), 0, Math.PI * 2);
         ctx.fill();
       };
 
@@ -4685,13 +5343,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           const sample = sampleTrackAtS(track, tc.s, STEP_DIST);
           if (!sample) continue;
           const wx = sample.x + sample.nx * tc.lateralOffset;
-          const wy = sample.y;
+          const wy = sample.y + (tc.crashY ?? 0);
           const wz = sample.z + sample.nz * tc.lateralOffset;
           const rawZ = (wx - camWorldX) * fwdX + (wz - camWorldZ) * fwdZ;
           if (rawZ < 1.5 || rawZ > 145) continue;
 
           // Oncoming cars cast crisp two-tier headlight beams onto the highway asphalt ahead of them!
-          if (tc.isOncoming && rawZ < 110) {
+          if (tc.isOncoming && !tc.crashed && rawZ < 110) {
             const frontSample = sampleTrackAtS(track, tc.s - tc.halfLength * 0.9, STEP_DIST);
             const midSample = sampleTrackAtS(track, tc.s - tc.halfLength - 4.8, STEP_DIST);
             const tipSample = sampleTrackAtS(track, tc.s - tc.halfLength - 9.8, STEP_DIST);
@@ -4727,6 +5385,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             slot.ghostFrame = undefined;
             slot.parked = undefined;
             slot.traffic = tc;
+            slot.trafficRelYaw = (tc.isOncoming ? sample.heading + Math.PI : sample.heading) + (tc.crashYaw ?? 0);
             vehicleCount++;
           }
         }
@@ -4746,8 +5405,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         }
       }
 
-      // Sample and project Holographic Rival Ghost into 3D world space
-      if (!isParkingMode && activeGhost && vehicleCount < vehicleDrawBuf.length) {
+      // Sample and project Holographic Rival Ghost into 3D world space (during active play)
+      if (phase === 'playing' && !isParkingMode && activeGhost && vehicleCount < vehicleDrawBuf.length) {
         const curGhost = sampleGhostPosition(activeGhost, runElapsedSec, ghostSampleScratch);
         if (curGhost) {
           const gSample = sampleTrackAtS(track, curGhost.distance, STEP_DIST);
@@ -4819,30 +5478,87 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       for (let v = 0; v < vehicleCount; v++) {
         const item = vehicleDrawBuf[v];
         if (item.isHero) {
-          const carDrawW = Math.round(5.4 * item.proj.scale);
-          const carDrawH = Math.round(carDrawW * (108 / 144));
-          const cx = Math.round(item.proj.x);
-          const cy = Math.round(item.proj.y - carDrawH * 0.34);
+          const carDrawW = 5.4 * item.proj.scale;
+          const carDrawH = carDrawW * 0.75;
+          const cx = item.proj.x;
+          const cy = item.proj.y - carDrawH * 0.34 + heroPitchY * HD_UI_SCALE;
+          const activePedalMode: 'coast' | 'gas' | 'brake' =
+            phase === 'playing'
+              ? keyDown || pedalBrakeRef.current || (isParkingMode && Boolean(pedalHandbrakeRef.current || keyHandbrake))
+                ? 'brake'
+                : !isParkingMode || keyUp || pedalGasRef.current
+                ? 'gas'
+                : 'coast'
+              : 'coast';
+
+          // Grounded Chassis Contact Shadow + Altitude Airborne Crash Shadow + Underglow
+          if (isFalling || isTrafficCrash) {
+            if (projectInto(driftState.x, crashGroundY, driftState.z, pScratchTmp)) {
+              const alt = Math.max(0, driftState.y - crashGroundY);
+              const altScale = Math.max(0.32, 1 - alt * 0.08);
+              const shW = 5.4 * pScratchTmp.scale * 0.42 * altScale;
+              const shH = shW * 0.26;
+              ctx.save();
+              ctx.globalAlpha = Math.max(0.14, 0.46 * altScale);
+              ctx.fillStyle = '#020617';
+              ctx.beginPath();
+              ctx.ellipse(pScratchTmp.x, pScratchTmp.y, shW, shH, 0, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.restore();
+            }
+          } else {
+            ctx.save();
+            const shadowCy = item.proj.y + carDrawH * 0.02;
+            const shadowRx = carDrawW * 0.42;
+            const shadowRy = carDrawH * 0.14;
+            ctx.globalAlpha = 0.44;
+            ctx.fillStyle = '#020617';
+            ctx.beginPath();
+            ctx.ellipse(cx, shadowCy, shadowRx, shadowRy, heroRollRad * 0.6, 0, Math.PI * 2);
+            ctx.fill();
+
+            if (cachedAppearance.underglowHex) {
+              ctx.globalAlpha = isFever ? 0.38 : 0.24;
+              ctx.fillStyle = cachedAppearance.underglowHex;
+              ctx.beginPath();
+              ctx.ellipse(cx, shadowCy, shadowRx * 1.18, shadowRy * 1.25, heroRollRad * 0.6, 0, Math.PI * 2);
+              ctx.fill();
+            }
+
+            // Twin red taillight / brake-light ground reflection bounce
+            const brakeIntensity = activePedalMode === 'brake' ? 0.34 : biome.isNight ? 0.20 : 0.09;
+            ctx.globalAlpha = brakeIntensity;
+            ctx.fillStyle = currentCar.tailGlowColor || '#ef4444';
+            ctx.beginPath();
+            ctx.ellipse(cx - carDrawW * 0.16, shadowCy + shadowRy * 0.65, shadowRx * 0.34, shadowRy * 0.72, 0, 0, Math.PI * 2);
+            ctx.ellipse(cx + carDrawW * 0.16, shadowCy + shadowRy * 0.65, shadowRx * 0.34, shadowRy * 0.72, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Fever / Slipstream twin cyan-amber aero slipstream ground streak
+            if (isFever || slipstreamBoostTimer > 0) {
+              ctx.globalAlpha = 0.28;
+              ctx.fillStyle = isFever ? '#22d3ee' : '#fbbf24';
+              ctx.beginPath();
+              ctx.ellipse(cx, shadowCy + shadowRy * 1.15, shadowRx * 0.92, shadowRy * 0.65, 0, 0, Math.PI * 2);
+              ctx.fill();
+            }
+            ctx.restore();
+          }
 
           if (customImgEl && customImgEl.complete) {
             ctx.save();
             ctx.translate(cx, cy);
             if (isFalling || isTrafficCrash) ctx.rotate(fallRotation);
+            else ctx.rotate(heroRollRad);
             if (visualDriftAngle < 0) ctx.scale(-1, 1);
             ctx.drawImage(customImgEl, -carDrawW * 0.5, -carDrawH * 0.5, carDrawW, carDrawH);
             ctx.restore();
           } else {
-            const activePedalMode: 'coast' | 'gas' | 'brake' =
-              phase === 'playing'
-                ? keyDown || pedalBrakeRef.current || (isParkingMode && Boolean(pedalHandbrakeRef.current || keyHandbrake))
-                  ? 'brake'
-                  : !isParkingMode || keyUp || pedalGasRef.current
-                  ? 'gas'
-                  : 'coast'
-                : 'coast';
             const heroYawOverride =
               isParkingMode && parkingState
-                ? Math.round(normalizeAngle(parkingState.heading - camViewAngle) * 28) / 28
+                ? Math.round(normalizeAngle(parkingState.heading - camViewAngle) * 32) / 32
+                : isFalling || isTrafficCrash
+                ? Math.round(normalizeAngle(driftState.heading + crashBody.yaw - camViewAngle) * 32) / 32
                 : undefined;
             const spriteCanvas = getPixelCarCanvas(
               currentCar,
@@ -4855,31 +5571,26 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               isHighBeamPulse,
               heroYawOverride,
               0.37,
-              activeDamageState
+              activeDamageState,
+              visualFrontSteer
             );
+            ctx.save();
+            ctx.translate(cx, cy);
             if (isFalling || isTrafficCrash) {
-              ctx.save();
-              ctx.translate(cx, cy);
               ctx.rotate(fallRotation);
-              ctx.drawImage(spriteCanvas, -carDrawW * 0.5, -carDrawH * 0.5, carDrawW, carDrawH);
-              ctx.restore();
             } else {
-              ctx.drawImage(
-                spriteCanvas,
-                Math.round(cx - carDrawW * 0.5),
-                Math.round(cy - carDrawH * 0.5),
-                carDrawW,
-                carDrawH
-              );
+              ctx.rotate(heroRollRad);
             }
+            ctx.drawImage(spriteCanvas, -carDrawW * 0.5, -carDrawH * 0.5, carDrawW, carDrawH);
+            ctx.restore();
           }
         } else if (item.parked) {
           const pc = item.parked;
           const sizeScale = pc.kind === 'box_truck' ? 5.9 : pc.kind === 'van' ? 5.4 : 5.1;
-          const drawW = Math.max(8, Math.round(sizeScale * item.proj.scale));
-          const drawH = Math.max(6, Math.round(drawW * (84 / 112)));
-          const tx = Math.round(item.proj.x);
-          const ty = Math.round(item.proj.y - drawH * 0.34);
+          const drawW = Math.max(10, sizeScale * item.proj.scale);
+          const drawH = Math.max(7.5, drawW * 0.75);
+          const tx = item.proj.x;
+          const ty = item.proj.y - drawH * 0.34;
           const yawRelCam = normalizeAngle(pc.heading - camViewAngle);
           const trSprite = getTrafficVehicleCanvas(
             pc.kind,
@@ -4891,14 +5602,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           );
           const nearFade = Math.min(1, Math.max(0, (item.rawZ - 3.8) / 1.4));
           ctx.globalAlpha = nearFade;
-          ctx.drawImage(trSprite, tx - Math.round(drawW * 0.5), ty - Math.round(drawH * 0.5), drawW, drawH);
+          ctx.drawImage(trSprite, tx - drawW * 0.5, ty - drawH * 0.5, drawW, drawH);
           ctx.globalAlpha = 1.0;
         } else if (item.isGhost && item.ghostFrame) {
           const gf = item.ghostFrame;
-          const ghostDrawW = Math.max(8, Math.round(5.4 * item.proj.scale));
-          const ghostDrawH = Math.round(ghostDrawW * (108 / 144));
-          const gcx = Math.round(item.proj.x);
-          const gcy = Math.round(item.proj.y - ghostDrawH * 0.34);
+          const ghostDrawW = Math.max(10, 5.4 * item.proj.scale);
+          const ghostDrawH = ghostDrawW * 0.75;
+          const gcx = item.proj.x;
+          const gcy = item.proj.y - ghostDrawH * 0.34;
 
           const baseGhostSpec =
             CAR_ROSTER.find((c) => c.id === item.ghostCarId) || CAR_ROSTER[0];
@@ -4910,77 +5621,112 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           };
 
           ctx.save();
-          // Shimmering translucent holographic visual: ctx.globalAlpha = 0.42
-          const shimmer = 0.38 + Math.sin(now * 0.012) * 0.08;
-          ctx.globalAlpha = shimmer;
-          // Glowing neon cyan rim lighting
-          ctx.shadowBlur = 12;
-          ctx.shadowColor = ghostColor;
+          // Shimmering translucent holographic visual
+          const shimmer = 0.40 + Math.sin(now * 0.012) * 0.08;
+          ctx.globalAlpha = shimmer * 0.35;
+          ctx.fillStyle = ghostColor;
+          ctx.beginPath();
+          ctx.ellipse(gcx, gcy + ghostDrawH * 0.24, ghostDrawW * 0.46, ghostDrawH * 0.18, 0, 0, Math.PI * 2);
+          ctx.fill();
 
+          ctx.globalAlpha = shimmer;
+          const ghostRelAngle = Math.max(-1, Math.min(1, normalizeAngle(gf.angle - camHeading) / 0.74));
           const ghostSprite = getPixelCarCanvas(
             ghostCarSpec,
-            0,
+            ghostRelAngle,
             false,
             false,
-            now * 0.02
+            Math.floor(now * 0.015) % 4
           );
 
           ctx.drawImage(
             ghostSprite,
-            Math.round(gcx - ghostDrawW * 0.5),
-            Math.round(gcy - ghostDrawH * 0.5),
+            gcx - ghostDrawW * 0.5,
+            gcy - ghostDrawH * 0.5,
             ghostDrawW,
             ghostDrawH
           );
 
           // Holographic scanlines effect
-          ctx.shadowBlur = 0;
           ctx.globalAlpha = 0.16;
           ctx.fillStyle = ghostColor;
-          const topY = Math.round(gcy - ghostDrawH * 0.5);
-          const botY = Math.round(gcy + ghostDrawH * 0.5);
+          const topY = gcy - ghostDrawH * 0.5;
+          const botY = gcy + ghostDrawH * 0.5;
           const scanShift = Math.floor(now * 0.025) % 4;
-          for (let sy = topY + scanShift; sy < botY; sy += 4) {
-            ctx.fillRect(Math.round(gcx - ghostDrawW * 0.5), sy, ghostDrawW, 1);
+          for (let sy = topY + scanShift; sy < botY; sy += 5) {
+            ctx.fillRect(gcx - ghostDrawW * 0.5, sy, ghostDrawW, 1.2);
           }
 
           // Floating holographic tag above rival ghost
           if (item.rawZ < 85) {
-            ctx.globalAlpha = 0.78;
-            ctx.font = 'bold 9px monospace';
+            ctx.globalAlpha = 0.88;
+            ctx.font = `bold ${Math.round(8.5 * HD_UI_SCALE)}px monospace`;
             ctx.textAlign = 'center';
-            ctx.fillStyle = ghostColor;
-            ctx.shadowBlur = 6;
-            ctx.shadowColor = ghostColor;
             const tag = wasGhostAhead && distance >= gf.distance ? 'RIVAL (PASSED)' : 'GHOST RIVAL';
-            ctx.fillText(tag, gcx, Math.round(gcy - ghostDrawH * 0.55));
+            ctx.fillStyle = '#090d16';
+            ctx.fillText(tag, gcx + 1.2, gcy - ghostDrawH * 0.55 + 1.2);
+            ctx.fillStyle = ghostColor;
+            ctx.fillText(tag, gcx, gcy - ghostDrawH * 0.55);
           }
 
           ctx.restore();
         } else if (item.traffic) {
           const tc = item.traffic;
           const sizeScale = tc.kind === 'box_truck' ? 5.9 : tc.kind === 'van' ? 5.4 : 5.1;
-          const drawW = Math.max(8, Math.round(sizeScale * item.proj.scale));
-          const drawH = Math.max(6, Math.round(drawW * (84 / 112)));
-          const tx = Math.round(item.proj.x);
-          const ty = Math.round(item.proj.y - drawH * 0.34);
+          const drawW = Math.max(10, sizeScale * item.proj.scale);
+          const drawH = Math.max(7.5, drawW * 0.75);
+          const tx = item.proj.x;
+          const ty = item.proj.y - drawH * 0.34;
           const viewNorm = Math.max(-1, Math.min(1, (item.proj.x - pxW * 0.5) / Math.max(40, pxW * 0.42)));
+          // Subtle grounded contact shadow & rear taillight asphalt glow on nearby traffic
+          if (item.rawZ < 72) {
+            const crashLiftPx = (tc.crashY ?? 0) * item.proj.scale;
+            const shY = item.proj.y + crashLiftPx + drawH * 0.02;
+            const shScale = Math.max(0.42, 1 - (tc.crashY ?? 0) * 0.12);
+            ctx.save();
+            ctx.globalAlpha = 0.36 * shScale;
+            ctx.fillStyle = '#020617';
+            ctx.beginPath();
+            ctx.ellipse(tx, shY, drawW * 0.38 * shScale, drawH * 0.12 * shScale, 0, 0, Math.PI * 2);
+            ctx.fill();
+            if (!tc.isOncoming && !tc.crashed) {
+              ctx.globalAlpha = biome.isNight ? 0.22 : 0.08;
+              ctx.fillStyle = '#ef4444';
+              ctx.beginPath();
+              ctx.ellipse(tx, shY + drawH * 0.05, drawW * 0.32, drawH * 0.08, 0, 0, Math.PI * 2);
+              ctx.fill();
+            }
+            ctx.restore();
+          }
+          const customYawRad =
+            (tc.crashed || Math.abs(tc.crashYaw ?? 0) > 0.02) && item.trafficRelYaw !== undefined
+              ? normalizeAngle(item.trafficRelYaw - camViewAngle)
+              : undefined;
           const trSprite = getTrafficVehicleCanvas(
             tc.kind,
             tc.color,
             tc.isOncoming,
             viewNorm,
-            biome.isNight
+            biome.isNight,
+            customYawRad
           );
-          ctx.drawImage(trSprite, tx - Math.round(drawW * 0.5), ty - Math.round(drawH * 0.5), drawW, drawH);
+          if (tc.crashRoll && Math.abs(tc.crashRoll) > 0.01) {
+            ctx.save();
+            ctx.translate(tx, ty);
+            ctx.rotate(Math.max(-0.65, Math.min(0.65, tc.crashRoll)));
+            ctx.drawImage(trSprite, -drawW * 0.5, -drawH * 0.5, drawW, drawH);
+            ctx.restore();
+          } else {
+            ctx.drawImage(trSprite, tx - drawW * 0.5, ty - drawH * 0.5, drawW, drawH);
+          }
 
           // Blinking amber turn-signal hazard indicator when yielding out of player's lane!
-          if (tc.yieldingToSide && Math.floor(now / 140) % 2 === 0) {
-            const sigX = tx + tc.yieldingToSide * Math.round(drawW * 0.25);
-            const sigY = ty + Math.round(drawH * 0.08);
-            const sigSize = Math.max(2, Math.round(drawW * 0.08));
+          if (!tc.crashed && tc.yieldingToSide && Math.floor(now / 140) % 2 === 0) {
+            const sigX = tx + tc.yieldingToSide * drawW * 0.25;
+            const sigY = ty + drawH * 0.08;
+            const sigSize = Math.max(2.5, drawW * 0.08);
             ctx.fillStyle = '#fbbf24';
-            ctx.fillRect(sigX - Math.floor(sigSize / 2), sigY - Math.floor(sigSize / 2), sigSize, sigSize);
+            ctx.fillRect(sigX - sigSize * 0.5, sigY - sigSize * 0.5, sigSize, sigSize);
           }
         }
       }
@@ -5108,6 +5854,19 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           ctx.fillRect(-w * 0.5, -h * 0.5, w, h);
           ctx.fillStyle = '#e0f2fe';
           ctx.fillRect(-w * 0.3, -h * 0.3, w * 0.5, 1);
+        } else if (dp.partId === 'wheel') {
+          const r = Math.min(13, Math.max(3.5, Math.round(0.32 * sc)));
+          ctx.fillStyle = '#090d16';
+          ctx.beginPath();
+          ctx.arc(0, 0, r, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = dp.accentColor || '#cbd5e1';
+          ctx.beginPath();
+          ctx.arc(0, 0, Math.max(1.8, r * 0.56), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#1e293b';
+          ctx.fillRect(-r * 0.45, -1, r * 0.9, 2);
+          ctx.fillRect(-1, -r * 0.45, 2, r * 0.9);
         } else {
           // Left / Right door
           const w = Math.min(25, Math.max(5, Math.round(0.60 * sc)));
@@ -5129,15 +5888,15 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         for (let i = 0; i < ambientParticles.length; i++) {
           const ap = ambientParticles[i];
           if (biome.ambientParticle === 'petal') {
-            ap.sx += (ap.vx + Math.sin(now * 0.003 + ap.phase) * 14) * dt;
-            ap.sy += ap.vy * dt;
+            ap.sx += (ap.vx + Math.sin(now * 0.003 + ap.phase) * 14) * HD_UI_SCALE * dt;
+            ap.sy += ap.vy * HD_UI_SCALE * dt;
           } else if (biome.ambientParticle === 'neon_orb') {
-            ap.sx += Math.sin(now * 0.002 + ap.phase) * 8 * dt;
-            ap.sy -= ap.vy * 0.65 * dt;
+            ap.sx += Math.sin(now * 0.002 + ap.phase) * 8 * HD_UI_SCALE * dt;
+            ap.sy -= ap.vy * 0.65 * HD_UI_SCALE * dt;
           } else {
             // Canyon rising embers
-            ap.sx += Math.sin(now * 0.004 + ap.phase) * 12 * dt;
-            ap.sy -= ap.vy * 0.9 * dt;
+            ap.sx += Math.sin(now * 0.004 + ap.phase) * 12 * HD_UI_SCALE * dt;
+            ap.sy -= ap.vy * 0.9 * HD_UI_SCALE * dt;
           }
           if (ap.sx < -4) ap.sx = pxW + 2;
           if (ap.sx > pxW + 4) ap.sx = -2;
@@ -5154,14 +5913,15 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 ? 'rgba(34, 211, 238, 0.7)'
                 : 'rgba(244, 114, 182, 0.7)'
               : 'rgba(251, 146, 60, 0.75)';
-          ctx.fillRect(Math.round(ap.sx), Math.round(ap.sy), ap.size, Math.max(1, ap.size - 1));
+          const pSz = ap.size * HD_UI_SCALE;
+          ctx.fillRect(ap.sx, ap.sy, pSz, Math.max(1.5, pSz * 0.75));
         }
       }
 
-      // L. Crisp Floating Pixel Callouts (precomputed halfW & O(1) swap-remove)
+      // L. Crisp Floating Callouts (precomputed halfW & O(1) swap-remove)
       if (callouts.length > 0) {
         ctx.textAlign = 'center';
-        ctx.font = 'bold 8px "Chakra Petch", monospace';
+        ctx.font = `bold ${Math.round(8.5 * HD_UI_SCALE)}px "Chakra Petch", monospace`;
         for (let i = callouts.length - 1; i >= 0; i--) {
           const ft = callouts[i];
           ft.life -= dt;
@@ -5173,10 +5933,10 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           const progress = 1 - ft.life / ft.maxLife;
           if (!projectInto(ft.x, ft.y + progress * 1.6, ft.z, pScratchTmp)) continue;
           const halfW = ft.halfW;
-          const tx = Math.max(halfW, Math.min(pxW - halfW, Math.round(pScratchTmp.x)));
-          const ty = Math.max(44, Math.min(pxH - 86, Math.round(pScratchTmp.y)));
+          const tx = Math.max(halfW, Math.min(pxW - halfW, pScratchTmp.x));
+          const ty = Math.max(44 * HD_UI_SCALE, Math.min(pxH - 86 * HD_UI_SCALE, pScratchTmp.y));
           ctx.fillStyle = '#090d16';
-          ctx.fillText(ft.text, tx + 1, ty + 1);
+          ctx.fillText(ft.text, tx + 1.5, ty + 1.5);
           ctx.fillStyle = ft.color;
           ctx.fillText(ft.text, tx, ty);
         }
@@ -5195,19 +5955,19 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         const riseY = ftp.y + progress * 1.5;
         if (!projectInto(ftp.x, riseY, ftp.z, pScratchTmp)) continue;
 
-        const tx = Math.round(pScratchTmp.x);
-        const ty = Math.round(pScratchTmp.y);
-        if (tx < -40 || tx > pxW + 40 || ty < -20 || ty > pxH + 20) continue;
+        const tx = pScratchTmp.x;
+        const ty = pScratchTmp.y;
+        if (tx < -60 || tx > pxW + 60 || ty < -30 || ty > pxH + 30) continue;
 
         const alpha = Math.max(0, Math.min(1, ftp.life / (ftp.maxLife * 0.4)));
         ctx.save();
         ctx.globalAlpha = alpha;
-        ctx.font = 'bold 9px "Chakra Petch", monospace';
+        ctx.font = `bold ${Math.round(9 * HD_UI_SCALE)}px "Chakra Petch", monospace`;
         ctx.textAlign = 'center';
 
         // Drop shadow outline for crisp readability
         ctx.fillStyle = '#090d16';
-        ctx.fillText(ftp.text, tx + 1, ty + 1);
+        ctx.fillText(ftp.text, tx + 1.5, ty + 1.5);
 
         // Golden reward text
         ctx.fillStyle = ftp.color;
@@ -5228,9 +5988,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           const ts = sampleTrackAtS(track, draftTarget.s - draftTarget.halfLength, STEP_DIST);
           if (ts) {
             ctx.strokeStyle = `rgba(34, 211, 238, ${(0.35 + slipstreamCharge * 0.45).toFixed(2)})`;
-            ctx.lineWidth = 1;
-            ctx.setLineDash([4, 4]);
-            ctx.lineDashOffset = -(now * 0.06);
+            ctx.lineWidth = Math.max(1.2, HD_UI_SCALE);
+            ctx.setLineDash([6, 6]);
+            ctx.lineDashOffset = -(now * 0.08);
             for (const side of [-0.75, 0.75]) {
               if (
                 projectInto(
@@ -5241,8 +6001,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 )
               ) {
                 ctx.beginPath();
-                ctx.moveTo(Math.round(pScratchTmp2.x), Math.round(pScratchTmp2.y));
-                ctx.lineTo(Math.round(pScratchTmp.x + side * 12), Math.round(pScratchTmp.y - 6));
+                ctx.moveTo(pScratchTmp2.x, pScratchTmp2.y);
+                ctx.lineTo(pScratchTmp.x + side * 12 * HD_UI_SCALE, pScratchTmp.y - 6 * HD_UI_SCALE);
                 ctx.stroke();
               }
             }
@@ -5261,17 +6021,17 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           ? 'rgba(56, 189, 248, 0.55)'
           : 'rgba(255, 255, 255, 0.36)';
         ctx.strokeStyle = rushColor;
-        ctx.lineWidth = 1;
+        ctx.lineWidth = Math.max(1.2, 1.05 * HD_UI_SCALE);
         const streakCount = isFever ? 14 : slipstreamBoostTimer > 0 ? 10 : 7;
         const vpX = pxW * 0.5;
         const vpY = horizonY * 0.92;
         ctx.beginPath();
         for (let s = 0; s < streakCount; s++) {
           const ang = (s / streakCount) * Math.PI * 2 + (s % 2 === 0 ? 0.14 : -0.14);
-          const rStart = 54 + ((now * 0.28 + s * 29) % 48);
-          const rEnd = rStart + (isFever ? 24 : 16);
-          ctx.moveTo(Math.round(vpX + Math.cos(ang) * rStart), Math.round(vpY + Math.sin(ang) * rStart * 1.15));
-          ctx.lineTo(Math.round(vpX + Math.cos(ang) * rEnd), Math.round(vpY + Math.sin(ang) * rEnd * 1.15));
+          const rStart = (54 + ((now * 0.28 + s * 29) % 48)) * HD_UI_SCALE;
+          const rEnd = rStart + (isFever ? 24 : 16) * HD_UI_SCALE;
+          ctx.moveTo(vpX + Math.cos(ang) * rStart, vpY + Math.sin(ang) * rStart * 1.15);
+          ctx.lineTo(vpX + Math.cos(ang) * rEnd, vpY + Math.sin(ang) * rEnd * 1.15);
         }
         ctx.stroke();
       }
@@ -5312,13 +6072,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         ctx.globalAlpha = 1.0;
       }
 
-      animId = requestAnimationFrame(loop);
+      scheduleNextFrame(phase === 'gameover' ? 120 : 0);
     }
 
     animId = requestAnimationFrame(loop);
 
     return () => {
       cancelAnimationFrame(animId);
+      if (idleTimerId !== null) window.clearTimeout(idleTimerId);
       soundFX.stopEngineSound();
       window.removeEventListener('resize', resize);
       window.removeEventListener('pointerdown', onPointerDown);
@@ -5335,7 +6096,6 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     <canvas
       ref={canvasRef}
       className="fixed inset-0 w-full h-full block select-none touch-none"
-      style={{ imageRendering: 'pixelated' }}
       data-testid="drift-2d-canvas"
     />
   );

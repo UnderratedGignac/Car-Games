@@ -3059,17 +3059,25 @@ export interface SCurvePoint {
   canisterZ?: number;
 }
 
+export interface TrackGenerationOptions {
+  curveMultiplier?: number;
+  widthMultiplier?: number;
+}
+
 function buildTrackPointsFrom(
   startIndex: number,
   startX: number,
   startZ: number,
   count: number,
   stepDistance: number,
-  seed: number
+  seed: number,
+  options?: TrackGenerationOptions
 ): SCurvePoint[] {
   const points: SCurvePoint[] = [];
   let curX = startX;
   let curZ = startZ;
+  const curveMult = options?.curveMultiplier ?? 1;
+  const widthMult = options?.widthMultiplier ?? 1;
 
   for (let i = 0; i < count; i++) {
     const idx = startIndex + i;
@@ -3082,16 +3090,16 @@ function buildTrackPointsFrom(
       const ramp = Math.min(1, (idx - 12) / 14);
       const t = (idx - 12) * 0.115;
       // Superposition of two harmonic waves creates organic sweeping S-curves and hairpins
-      const w1 = Math.sin(t * 0.85 + seed * 0.13) * 0.62;
-      const w2 = Math.sin(t * 0.37 + seed * 0.71) * 0.28;
+      const w1 = Math.sin(t * 0.85 + seed * 0.13) * 0.62 * curveMult;
+      const w2 = Math.sin(t * 0.37 + seed * 0.71) * 0.28 * curveMult;
       angleOffset = ramp * (w1 + w2);
       // Clamp maximum angle from -Z to +/- 54 degrees (~0.94 rad) so road always advances forward
       angleOffset = Math.max(-0.94, Math.min(0.94, angleOffset));
 
       // Approximate derivative for banking & curvature
       const dt = 0.115;
-      const w1p = Math.cos(t * 0.85 + seed * 0.13) * 0.62 * 0.85 * dt;
-      const w2p = Math.cos(t * 0.37 + seed * 0.71) * 0.28 * 0.37 * dt;
+      const w1p = Math.cos(t * 0.85 + seed * 0.13) * 0.62 * curveMult * 0.85 * dt;
+      const w2p = Math.cos(t * 0.37 + seed * 0.71) * 0.28 * curveMult * 0.37 * dt;
       curvature = ramp * (w1p + w2p);
     }
 
@@ -3103,7 +3111,8 @@ function buildTrackPointsFrom(
     const nz = tx;
 
     const difficulty = Math.min(1, Math.max(0, (idx - 12) / 140));
-    const width = idx < 14 ? 8.8 : Number((8.4 - difficulty * 2.2).toFixed(2));
+    const baseWidth = idx < 14 ? 8.8 : 8.4 - difficulty * 2.2;
+    const width = Number((baseWidth * widthMult).toFixed(2));
     const elevRamp = Math.min(1, Math.max(0, (idx - 6) / 10));
     const yElevation = Number(
       (
@@ -3163,24 +3172,26 @@ function buildTrackPointsFrom(
 export function generateSCurveTrack(
   sampleCount: number,
   stepDistance = 2.6,
-  seed = 42
+  seed = 42,
+  options?: TrackGenerationOptions
 ): SCurvePoint[] {
-  return buildTrackPointsFrom(0, 0, 0, sampleCount, stepDistance, seed);
+  return buildTrackPointsFrom(0, 0, 0, sampleCount, stepDistance, seed, options);
 }
 
 export function extendSCurveTrack(
   existingTrack: SCurvePoint[],
   count: number,
   stepDistance = 2.6,
-  seed = 42
+  seed = 42,
+  options?: TrackGenerationOptions
 ): SCurvePoint[] {
   if (existingTrack.length === 0) {
-    return generateSCurveTrack(count, stepDistance, seed);
+    return generateSCurveTrack(count, stepDistance, seed, options);
   }
   const last = existingTrack[existingTrack.length - 1];
   const nextX = last.x + last.tx * stepDistance;
   const nextZ = last.z + last.tz * stepDistance;
-  return buildTrackPointsFrom(last.index + 1, nextX, nextZ, count, stepDistance, seed);
+  return buildTrackPointsFrom(last.index + 1, nextX, nextZ, count, stepDistance, seed, options);
 }
 
 /**
@@ -3473,6 +3484,16 @@ export interface TrafficCarState {
   nearMissed: boolean;
   halfWidth: number;
   halfLength: number;
+  crashed?: boolean;
+  scrapeCooldown?: number;
+  crashVs?: number;
+  crashVelLat?: number;
+  crashVy?: number;
+  crashY?: number;
+  crashYaw?: number;
+  crashYawVel?: number;
+  crashRoll?: number;
+  crashRollVel?: number;
 }
 
 export const HIGHWAY_ROAD_WIDTH = 9.8;
@@ -3541,11 +3562,14 @@ function buildHighwayPointsFrom(
   startZ: number,
   count: number,
   stepDistance: number,
-  seed: number
+  seed: number,
+  options?: TrackGenerationOptions
 ): SCurvePoint[] {
   const points: SCurvePoint[] = [];
   let curX = startX;
   let curZ = startZ;
+  const curveMult = options?.curveMultiplier ?? 1;
+  const widthMult = options?.widthMultiplier ?? 1;
 
   for (let i = 0; i < count; i++) {
     const idx = startIndex + i;
@@ -3555,13 +3579,13 @@ function buildHighwayPointsFrom(
     if (idx >= 12) {
       const ramp = Math.min(1, (idx - 12) / 16);
       const t = (idx - 12) * 0.072;
-      const w1 = Math.sin(t * 0.72 + seed * 0.13) * 0.28;
-      const w2 = Math.sin(t * 0.31 + seed * 0.71) * 0.13;
+      const w1 = Math.sin(t * 0.72 + seed * 0.13) * 0.28 * curveMult;
+      const w2 = Math.sin(t * 0.31 + seed * 0.71) * 0.13 * curveMult;
       angleOffset = Math.max(-0.42, Math.min(0.42, ramp * (w1 + w2)));
 
       const dt = 0.072;
-      const w1p = Math.cos(t * 0.72 + seed * 0.13) * 0.28 * 0.72 * dt;
-      const w2p = Math.cos(t * 0.31 + seed * 0.71) * 0.13 * 0.31 * dt;
+      const w1p = Math.cos(t * 0.72 + seed * 0.13) * 0.28 * curveMult * 0.72 * dt;
+      const w2p = Math.cos(t * 0.31 + seed * 0.71) * 0.13 * curveMult * 0.31 * dt;
       curvature = ramp * (w1p + w2p);
     }
 
@@ -3571,7 +3595,7 @@ function buildHighwayPointsFrom(
     const nx = -tz;
     const nz = tx;
 
-    const width = HIGHWAY_ROAD_WIDTH;
+    const width = Number((HIGHWAY_ROAD_WIDTH * widthMult).toFixed(2));
     const elevRamp = Math.min(1, Math.max(0, (idx - 6) / 10));
     const yElevation = Number(
       (
@@ -3631,24 +3655,26 @@ function buildHighwayPointsFrom(
 export function generateHighwayTrack(
   sampleCount: number,
   stepDistance = 3.4,
-  seed = 42
+  seed = 42,
+  options?: TrackGenerationOptions
 ): SCurvePoint[] {
-  return buildHighwayPointsFrom(0, 0, 0, sampleCount, stepDistance, seed);
+  return buildHighwayPointsFrom(0, 0, 0, sampleCount, stepDistance, seed, options);
 }
 
 export function extendHighwayTrack(
   existingTrack: SCurvePoint[],
   count: number,
   stepDistance = 3.4,
-  seed = 42
+  seed = 42,
+  options?: TrackGenerationOptions
 ): SCurvePoint[] {
   if (existingTrack.length === 0) {
-    return generateHighwayTrack(count, stepDistance, seed);
+    return generateHighwayTrack(count, stepDistance, seed, options);
   }
   const last = existingTrack[existingTrack.length - 1];
   const nextX = last.x + last.tx * stepDistance;
   const nextZ = last.z + last.tz * stepDistance;
-  return buildHighwayPointsFrom(last.index + 1, nextX, nextZ, count, stepDistance, seed);
+  return buildHighwayPointsFrom(last.index + 1, nextX, nextZ, count, stepDistance, seed, options);
 }
 
 export function sampleTrackAtS(
@@ -3831,6 +3857,7 @@ export function evaluateTrafficInteraction(params: {
 
   for (let i = 0; i < trafficCars.length; i++) {
     const car = trafficCars[i];
+    if (car.crashed || (car.scrapeCooldown && car.scrapeCooldown > 0)) continue;
     const ds = playerS - car.s;
     const absDs = Math.abs(ds);
     const absDLat = Math.abs(playerLateralOffset - car.lateralOffset);
@@ -4025,6 +4052,10 @@ export function stepTrafficCars(trafficCars: TrafficCarState[], dt: number): voi
   const clampedDt = Math.min(Math.max(dt, 0), 0.08);
   for (let i = 0; i < trafficCars.length; i++) {
     const c = trafficCars[i];
+    if (c.scrapeCooldown && c.scrapeCooldown > 0) {
+      c.scrapeCooldown = Math.max(0, c.scrapeCooldown - clampedDt);
+    }
+    if (c.crashed) continue;
     c.s += c.isOncoming ? -c.speed * clampedDt : c.speed * clampedDt;
 
     if (c.yieldTimer && c.yieldTimer > 0) {

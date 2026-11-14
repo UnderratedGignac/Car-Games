@@ -160,49 +160,49 @@ export const MissionModal: React.FC<MissionModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md pointer-events-auto"
+      className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/85 pointer-events-auto"
       role="dialog"
       aria-modal="true"
       aria-label="Missions Modal"
     >
-      <div className="relative w-full max-w-xl rounded-2xl bg-slate-950/95 border border-slate-700/80 shadow-[0_0_50px_rgba(168,85,247,0.15)] overflow-hidden flex flex-col p-4 sm:p-6 text-slate-100 max-h-[92vh] overflow-y-auto">
+      <div className="relative w-full max-w-xl rounded-2xl bg-slate-950 border border-slate-700/80 shadow-[0_0_50px_rgba(168,85,247,0.15)] overflow-hidden flex flex-col text-slate-100 max-h-[92dvh]">
         {/* Ambient Top Glow */}
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-64 h-12 bg-purple-500/20 blur-2xl pointer-events-none" />
 
-        {/* Close Button */}
-        <button
-          type="button"
-          onClick={onClose}
-          className="absolute top-3.5 right-3.5 w-8 h-8 rounded-full bg-slate-900 border border-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
-          aria-label="Close Missions"
-        >
-          ✕
-        </button>
-
-        {/* Header */}
-        <div className="text-center mb-4">
-          <div className="inline-flex items-center gap-1.5 px-3 py-0.5 rounded bg-purple-500/10 border border-purple-500/30 text-purple-300 text-[10px] font-mono tracking-widest uppercase mb-1">
-            <span>Driving &amp; Precision Mastery</span>
+        {/* Pinned Header */}
+        <div className="shrink-0 px-4 sm:px-5 pt-3.5 pb-3 border-b border-slate-800/80 flex items-center justify-between gap-2 bg-slate-950">
+          <div className="min-w-0">
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-purple-500/10 border border-purple-500/30 text-purple-300 text-[10px] font-mono tracking-widest uppercase mb-1">
+              <span>Driving &amp; Precision Mastery</span>
+            </div>
+            <h2 className="text-xl sm:text-2xl font-display font-black text-white tracking-wide">
+              MISSIONS
+            </h2>
+            <p className="text-[11px] text-cyan-400 font-mono truncate">
+              {activeTab === 'daily'
+                ? `Daily Rotation Resets UTC ${countdownStr ? `(${countdownStr})` : ''}`
+                : 'Valet, Reverse, Parallel & Complex Maneuver Mastery'}
+            </p>
           </div>
-          <h2 className="text-2xl sm:text-3xl font-display font-black text-white tracking-wide">
-            MISSIONS
-          </h2>
-          <p className="text-xs text-cyan-400 font-mono mt-0.5">
-            {activeTab === 'daily'
-              ? `Daily Rotation Resets UTC ${countdownStr ? `(${countdownStr})` : ''}`
-              : 'Persistent Valet, Reverse, Parallel & Complex Maneuver Mastery'}
-          </p>
+          <button
+            type="button"
+            onClick={onClose}
+            className="w-9 h-9 rounded-full bg-slate-900 border border-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors shrink-0"
+            aria-label="Close Missions"
+          >
+            ✕
+          </button>
         </div>
 
-        {/* Category Tabs */}
-        <div className="grid grid-cols-2 gap-2 mb-4" role="tablist" aria-label="Mission Categories">
+        {/* Pinned Category Tabs */}
+        <div className="shrink-0 grid grid-cols-2 gap-2 px-4 sm:px-5 py-2.5 bg-slate-900/60 border-b border-slate-800/80" role="tablist" aria-label="Mission Categories">
           <button
             type="button"
             role="tab"
             aria-selected={activeTab === 'daily'}
             data-mission-tab="daily"
             onClick={() => setActiveTab('daily')}
-            className={`min-h-[40px] px-3 py-2 rounded-xl border text-xs font-display font-bold tracking-wide flex items-center justify-center gap-2 transition-colors ${
+            className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-xs font-display font-bold tracking-wide flex items-center justify-center gap-1.5 transition-colors ${
               activeTab === 'daily'
                 ? 'bg-purple-600/30 border-purple-400 text-white'
                 : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
@@ -221,13 +221,13 @@ export const MissionModal: React.FC<MissionModalProps> = ({
             aria-selected={activeTab === 'tech'}
             data-mission-tab="tech"
             onClick={() => setActiveTab('tech')}
-            className={`min-h-[40px] px-3 py-2 rounded-xl border text-xs font-display font-bold tracking-wide flex items-center justify-center gap-2 transition-colors ${
+            className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-xs font-display font-bold tracking-wide flex items-center justify-center gap-1.5 transition-colors ${
               activeTab === 'tech'
                 ? 'bg-emerald-500/25 border-emerald-400 text-white'
                 : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
             }`}
           >
-            <span>Parking &amp; Car Craft</span>
+            <span>Parking &amp; Craft</span>
             {techReadyCount > 0 && (
               <span className="px-1.5 py-0.5 rounded bg-emerald-400 text-slate-950 font-mono text-[10px] font-bold">
                 {techReadyCount}
@@ -236,8 +236,8 @@ export const MissionModal: React.FC<MissionModalProps> = ({
           </button>
         </div>
 
-        {/* Mission Cards */}
-        <div className="space-y-3">
+        {/* Scrollable Mission Cards */}
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-3.5 sm:p-5 space-y-3">
           {displayedMissions.map((m) => {
             const currentCapped = Math.min(m.current, m.target);
             const percent = Math.min(100, Math.floor((currentCapped / m.target) * 100));
@@ -253,13 +253,13 @@ export const MissionModal: React.FC<MissionModalProps> = ({
                     : 'bg-slate-900/90 border-slate-800'
                 }`}
               >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-3">
+                <div className="flex items-start justify-between gap-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0">
                     <div className="w-10 h-10 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-center shrink-0">
                       {renderMissionIcon(m.icon)}
                     </div>
-                    <div>
-                      <h4 className="font-bold text-sm text-white flex items-center gap-2">
+                    <div className="min-w-0">
+                      <h4 className="font-bold text-sm text-white flex flex-wrap items-center gap-1.5">
                         <span>{m.title}</span>
                         {m.completed && !m.claimed && (
                           <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-400 text-slate-950 font-bold uppercase tracking-wider">
@@ -336,8 +336,8 @@ export const MissionModal: React.FC<MissionModalProps> = ({
           })}
         </div>
 
-        {/* Footer info note */}
-        <div className="mt-4 pt-3 border-t border-slate-800/80 text-center">
+        {/* Pinned Footer info note */}
+        <div className="shrink-0 px-4 py-2.5 border-t border-slate-800/80 text-center bg-slate-950">
           <p className="text-[11px] text-slate-400 font-mono">
             Tracks progress across Touge Drift, Highway Traffic &amp; Precision Parking runs.
           </p>

@@ -48,6 +48,7 @@ import {
 } from '../game/damage';
 import { soundFX } from '../game/audio';
 import { Car3DViewer } from './Car3DViewer';
+import studioPaddockImg from '../assets/images/studio_paddock_bay_1794662835288.jpg';
 
 export type GarageTabId =
   | 'repair'
@@ -448,18 +449,28 @@ export const GarageModal: React.FC<GarageModalProps> = ({
       aria-modal="true"
       aria-label="Neon Redline 3D Garage and Mod Shop"
     >
-      {/* 1. COMPACT PADDOCK HEADER */}
-      <header className="flex items-center justify-between gap-3 px-4 sm:px-6 py-3 border-b border-slate-800 bg-[#0b101d] shrink-0 pt-safe">
-        <div className="flex items-baseline gap-3 min-w-0">
-          <h2 className="text-base sm:text-xl font-bold tracking-tight font-display text-white truncate">
-            Paddock &amp; Mod Shop
-          </h2>
-          <span className="hidden md:inline text-xs font-mono text-slate-400">
-            {CAR_ROSTER.length} Vehicles · {unlockedCarIds.length} Owned
-          </span>
+      {/* 1. COMPACT PADDOCK HEADER (stacks cleanly on narrow vertical phones) */}
+      <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-3 sm:px-6 py-2.5 sm:py-3 border-b border-slate-800 bg-[#0b101d] shrink-0 pt-safe">
+        <div className="flex items-center justify-between gap-2 min-w-0">
+          <div className="flex items-baseline gap-2.5 min-w-0">
+            <h2 className="text-base sm:text-xl font-bold tracking-tight font-display text-white truncate">
+              Paddock &amp; Mod Shop
+            </h2>
+            <span className="hidden md:inline text-xs font-mono text-slate-400">
+              {CAR_ROSTER.length} Vehicles · {unlockedCarIds.length} Owned
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close Garage"
+            className="sm:hidden min-h-[36px] px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+          >
+            Close
+          </button>
         </div>
 
-        <div className="flex items-center gap-2.5 shrink-0">
+        <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0">
           {/* Pixel vs Live 3D Showroom Switcher */}
           <div
             className="inline-flex rounded-lg bg-slate-950 border border-slate-800 p-0.5"
@@ -469,7 +480,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
             <button
               type="button"
               onClick={() => setShowroomMode('pixel')}
-              className={`min-h-[34px] px-3 py-1 rounded-md text-xs font-mono font-semibold transition-colors whitespace-nowrap ${
+              className={`min-h-[32px] sm:min-h-[34px] px-2.5 sm:px-3 py-1 rounded-md text-[11px] sm:text-xs font-mono font-semibold transition-colors whitespace-nowrap ${
                 showroomMode === 'pixel'
                   ? 'bg-amber-400 text-slate-950 font-bold'
                   : 'text-slate-400 hover:text-white'
@@ -480,7 +491,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
             <button
               type="button"
               onClick={() => setShowroomMode('3d')}
-              className={`min-h-[34px] px-3 py-1 rounded-md text-xs font-mono font-semibold transition-colors whitespace-nowrap ${
+              className={`min-h-[32px] sm:min-h-[34px] px-2.5 sm:px-3 py-1 rounded-md text-[11px] sm:text-xs font-mono font-semibold transition-colors whitespace-nowrap ${
                 showroomMode === '3d'
                   ? 'bg-cyan-400 text-slate-950 font-bold'
                   : 'text-slate-400 hover:text-white'
@@ -490,9 +501,9 @@ export const GarageModal: React.FC<GarageModalProps> = ({
             </button>
           </div>
 
-          <div className="text-right pl-3 border-l border-slate-800">
-            <span className="block text-[10px] font-mono text-slate-400 leading-none mb-0.5">CREDITS</span>
-            <span className="text-sm sm:text-base font-bold font-mono tabular-nums text-amber-400 leading-none">
+          <div className="text-right sm:pl-3 sm:border-l border-slate-800">
+            <span className="block text-[9px] sm:text-[10px] font-mono text-slate-400 leading-none mb-0.5">CREDITS</span>
+            <span className="text-xs sm:text-base font-bold font-mono tabular-nums text-amber-400 leading-none">
               {Math.round(coins).toLocaleString()} CR
             </span>
           </div>
@@ -501,7 +512,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
             type="button"
             onClick={onClose}
             aria-label="Close Garage"
-            className="min-h-[40px] px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap shrink-0"
+            className="hidden sm:inline-flex min-h-[40px] px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap shrink-0 items-center justify-center"
           >
             Close
           </button>
@@ -568,7 +579,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                     key={car.id}
                     type="button"
                     onClick={() => setPreviewCarId(car.id)}
-                    className={`min-w-[180px] lg:min-w-0 lg:w-full p-2 rounded-lg border text-left transition-colors snap-start shrink-0 flex items-center gap-2.5 relative ${
+                    className={`min-w-[158px] lg:min-w-0 lg:w-full p-2 rounded-lg border text-left transition-colors snap-start shrink-0 flex items-center gap-2.5 relative ${
                       active
                         ? 'border-amber-400 bg-slate-900'
                         : 'border-slate-800/80 bg-slate-950/70 hover:border-slate-700 hover:bg-slate-900/50'
@@ -626,12 +637,12 @@ export const GarageModal: React.FC<GarageModalProps> = ({
               {/* Stage Sub-Header */}
               <div className="flex items-center justify-between gap-2 mb-3">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2 text-[11px] font-mono text-slate-400">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-mono text-slate-400">
                     <span>{previewCar.codename}</span>
                     <span>·</span>
-                    <span>Tier {previewCar.tier}</span>
+                    <span className="whitespace-nowrap">Tier {previewCar.tier}</span>
                     <span>·</span>
-                    <span className="text-amber-400 font-semibold">{previewCar.coinMultiplier.toFixed(1)}x CR</span>
+                    <span className="text-amber-400 font-semibold whitespace-nowrap">{previewCar.coinMultiplier.toFixed(1)}x CR</span>
                   </div>
                   <h3 className="text-lg sm:text-xl font-bold font-display text-white truncate mt-0.5">
                     {previewCar.name}
@@ -671,7 +682,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                     onPointerMove={handlePointerMove}
                     onPointerUp={handlePointerUp}
                     onPointerCancel={handlePointerUp}
-                    className={`relative flex items-center justify-center h-56 sm:h-64 rounded-xl overflow-hidden bg-slate-900 border border-slate-800 select-none ${
+                    className={`relative flex items-center justify-center h-44 sm:h-64 rounded-xl overflow-hidden bg-slate-900 border border-slate-800 select-none ${
                       isDragging ? 'cursor-grabbing' : 'cursor-grab'
                     }`}
                     style={{
@@ -682,6 +693,20 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                         : 'radial-gradient(circle at 50% 66%, rgba(251, 191, 36, 0.14), rgba(9, 14, 26, 0.98) 74%)',
                     }}
                   >
+                    <img
+                      src={studioPaddockImg}
+                      alt=""
+                      aria-hidden="true"
+                      className="absolute inset-0 w-full h-full object-cover opacity-30 pointer-events-none select-none"
+                    />
+                    <div
+                      aria-hidden="true"
+                      className="absolute inset-0 pointer-events-none"
+                      style={{
+                        background:
+                          'radial-gradient(ellipse at 50% 68%, transparent 18%, rgba(8, 12, 23, 0.78) 88%)',
+                      }}
+                    />
                     <div className="absolute top-2.5 left-3 z-20 text-[11px] font-mono text-amber-300/90 pointer-events-none">
                       {Math.round(((previewYawRad * 180) / Math.PI + 360) % 360)}° ·{' '}
                       {Math.abs(previewYawRad) < 0.15
@@ -715,7 +740,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                   </div>
 
                   {/* Camera Angle Presets + Continuous Slider */}
-                  <div className="grid grid-cols-5 gap-1.5 mt-2.5">
+                  <div className="flex overflow-x-auto scrollbar-none sm:grid sm:grid-cols-5 gap-1.5 mt-2.5">
                     {[
                       { label: 'Front 180°', rad: Math.PI },
                       { label: '135° 3/4', rad: Math.PI * 0.75 },
@@ -734,7 +759,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                             setPreviewYawRad(preset.rad);
                             setIsAutoSpin(false);
                           }}
-                          className={`min-h-[34px] px-1 py-1 rounded-md text-[10px] font-mono font-semibold transition-colors whitespace-nowrap ${
+                          className={`shrink-0 min-h-[34px] px-2.5 sm:px-1 py-1 rounded-md text-[10px] font-mono font-semibold transition-colors whitespace-nowrap ${
                             isSelected
                               ? 'bg-amber-400 text-slate-950 font-bold'
                               : 'bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-800'
@@ -766,7 +791,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
               )}
 
               {/* Interactive Hardware Checks */}
-              <div className="grid grid-cols-4 gap-2 mt-3">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3">
                 <button
                   type="button"
                   onClick={triggerTestFlash}

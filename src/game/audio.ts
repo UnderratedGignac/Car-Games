@@ -56,11 +56,21 @@ export interface AudioDeckSnapshot {
 
 export type HapticType = 'light' | 'medium' | 'heavy' | 'double' | 'fever';
 
+let globalHapticsEnabled = true;
+
+export function isHapticsEnabled(): boolean {
+  return globalHapticsEnabled;
+}
+
 /**
  * Mobile haptic vibration helper using the Web Vibration API.
+ * Respects global haptics toggle unless force = true (e.g., Settings test pulse).
  * Safely guards against SSR and environments without vibration support.
  */
-export function triggerHaptic(type: HapticType): boolean {
+export function triggerHaptic(type: HapticType, force = false): boolean {
+  if (!force && !globalHapticsEnabled) {
+    return false;
+  }
   if (typeof navigator === 'undefined' || typeof navigator.vibrate !== 'function') {
     return false;
   }
@@ -120,7 +130,9 @@ export class SoundFXSystem {
   private lastEngineUpdateTime = 0;
   private lastEngBaseHz = -1;
   private lastEngCutoff = -1;
+  private lastEngBaseVol = 0.03;
   private lastEngVol = -1;
+  public hapticsEnabled = true;
 
   // AI Music Deck + Real-Time Web Audio DSP Chain
   private musicEnabled = true;
@@ -590,9 +602,17 @@ export class SoundFXSystem {
         0.05
       );
     }
-    if (this.ctx && this.engGain && this.engRunning && this.lastEngVol > 0) {
-      this.engGain.gain.setTargetAtTime(this.lastEngVol, this.ctx.currentTime, 0.05);
+    if (this.ctx && this.engGain && this.engRunning && this.lastEngVol >= 0) {
+      const nextEngVol = this.lastEngBaseVol * this.engineScale;
+      this.lastEngVol = nextEngVol;
+      this.engGain.gain.setTargetAtTime(nextEngVol, this.ctx.currentTime, 0.05);
     }
+    this.notifyListeners();
+  }
+
+  public setHapticsEnabled(enabled: boolean) {
+    this.hapticsEnabled = Boolean(enabled);
+    globalHapticsEnabled = this.hapticsEnabled;
     this.notifyListeners();
   }
 
@@ -806,8 +826,8 @@ export class SoundFXSystem {
     return Math.max(0, Math.min(1.25, this.engineVolume * this.masterVolume));
   }
 
-  public triggerHaptic(type: HapticType): boolean {
-    return triggerHaptic(type);
+  public triggerHaptic(type: HapticType, force = false): boolean {
+    return triggerHaptic(type, force);
   }
 
   // Subtle mechanical gear shift / soft thump sound (Parking shifter & traffic bump)
@@ -1646,7 +1666,7 @@ export class SoundFXSystem {
         this.engGain = ctx.createGain();
 
         this.engFilter.type = 'lowpass';
-        this.engFilter.Q.setValueAtTime(2.2, now);
+        this.engFilter.Q.setValueAtTime(1.6, now);
         this.engGain.gain.setValueAtTime(0.001, now);
 
         this.engOscA.connect(this.engFilter);
@@ -1676,27 +1696,27 @@ export class SoundFXSystem {
     const r = Math.max(0.25, Math.min(1.65, params.speedRatio));
     let baseHz = 54 + r * 78;
     let harmMult = 1.5;
-    let cutoff = 280 + r * 420;
+    let cutoff = 220 + r * 360;
     let oscTypeA: OscillatorType = 'sawtooth';
     let oscTypeB: OscillatorType = 'triangle';
 
     if (profile === 'jdm_turbo') {
       baseHz = 62 + r * 92;
       harmMult = 2.0;
-      cutoff = 360 + r * 580;
+      cutoff = 300 + r * 490;
     } else if (profile === 'v8_muscle') {
       baseHz = 42 + r * 54;
       harmMult = 1.5;
-      cutoff = 240 + r * 340;
+      cutoff = 200 + r * 310;
       oscTypeB = 'sawtooth';
     } else if (profile === 'f1_scream') {
       baseHz = 86 + r * 142;
       harmMult = 2.0;
-      cutoff = 540 + r * 900;
+      cutoff = 460 + r * 780;
     } else if (profile === 'rotary_braap') {
       baseHz = 68 + r * 102;
       harmMult = 1.333;
-      cutoff = 420 + r * 660;
+      cutoff = 360 + r * 560;
       oscTypeA = 'square';
     }
 
@@ -1705,8 +1725,9 @@ export class SoundFXSystem {
       cutoff *= 1.35;
     }
 
-    const effectiveCutoff = cutoff + (params.isGassing ? 240 : 0);
-    const baseVol = params.isGassing ? 0.046 : params.isBraking ? 0.02 : 0.03;
+    const effectiveCutoff = cutoff + (params.isGassing ? 220 : 0);
+    const baseVol = params.isGassing ? 0.044 : params.isBraking ? 0.018 : 0.028;
+    this.lastEngBaseVol = baseVol;
     const targetVol = baseVol * this.engineScale;
 
     if (this.engOscA.type !== oscTypeA) this.engOscA.type = oscTypeA;

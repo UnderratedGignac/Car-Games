@@ -17,12 +17,14 @@ import { CarDamageState, getDamageVisualCacheKey } from './damage';
  * - True continuous 3D yaw from rear chase (0) to 3/4 isometric drift ('/' or '\')
  */
 
-const W = 144;
-const H = 108;
-const TW = 112;
-const TH = 84;
-const MAX_HERO_CACHE = 640;
-const MAX_TRAFFIC_CACHE = 640;
+const W = 192;
+const H = 144;
+const TW = 144;
+const TH = 108;
+const HERO_BUCKETS = 16;
+const TRAFFIC_BUCKETS = 8;
+const MAX_HERO_CACHE = 960;
+const MAX_TRAFFIC_CACHE = 720;
 const spriteCache = new Map<string, HTMLCanvasElement>();
 
 // Reusable software rasterizer scratch buffers (zero TypedArray / ImageData / scratch-canvas churn on misses)
@@ -352,7 +354,7 @@ export function getPixelCarTireAnchors(
   driftAngleNorm: number,
   custom?: Partial<CarCustomization>
 ): CarTireAnchors {
-  const angleBucket = Math.max(-6, Math.min(6, Math.round(driftAngleNorm * 6)));
+  const angleBucket = Math.max(-HERO_BUCKETS, Math.min(HERO_BUCKETS, Math.round(driftAngleNorm * HERO_BUCKETS)));
   const tireId = custom?.tires || 'stock';
   const key = `${car.id}_${angleBucket}_${tireId}`;
   const cached = tireAnchorCache.get(key);
@@ -360,8 +362,8 @@ export function getPixelCarTireAnchors(
 
   const { arch, hw, wheelZRear, wheelZFront, isMuscle, isMotorcycle, isFormula, isSemi } = getCarWheelDims(car);
   const dirSign: -1 | 1 = angleBucket < 0 ? -1 : 1;
-  const absNorm = Math.abs(angleBucket) / 6;
-  const yaw = angleBucket === 0 ? 0.0 : 0.10 + absNorm * 0.64;
+  const absNorm = Math.abs(angleBucket) / HERO_BUCKETS;
+  const yaw = absNorm * 0.74;
   const pitch = 0.37;
   const cosY = Math.cos(yaw);
   const sinY = Math.sin(yaw);
@@ -370,7 +372,7 @@ export function getPixelCarTireAnchors(
 
   const cx = W * 0.5;
   const cy = H * 0.65;
-  const scale = 24.8;
+  const scale = 33.067;
 
   const projAnchor = (vx: number, vy: number, vz: number, isCameraFacing: boolean): TireAnchorNorm => {
     const rx = vx * cosY + vz * sinY;
@@ -454,6 +456,30 @@ export function getPixelCarTireAnchors(
  * Generates or retrieves cached 144x108 integer pixel-art sprite for the hero car.
  * Supports continuous 360-degree rotation (customYawRad) for garage showcase turntable!
  */
+export interface FrontWheelSteerParams {
+  frontSteerNorm: number; // -1 (left) .. 0 (straight) .. +1 (right)
+  driftAbsNorm: number; // 0..1 body slip magnitude
+  isCustomYaw: boolean;
+  shouldMirror: boolean;
+}
+
+/**
+ * Computes front-wheel Y-axis steering angle (radians) in un-mirrored car-local 3D coordinates.
+ * Ensures turning the steering wheel right (+1) visibly turns front tires right (+X) regardless
+ * of sprite horizontal mirroring or custom 360-degree camera yaw.
+ */
+export function computeFrontWheelSteerRad(params: FrontWheelSteerParams): number {
+  const clamped = Math.max(-1, Math.min(1, params.frontSteerNorm));
+  const steerBucket = Math.max(-5, Math.min(5, Math.round(clamped * 5)));
+  if (steerBucket !== 0) {
+    const steerNorm = steerBucket / 5;
+    // In un-mirrored car space, negative steerRad turns front of tire (+lz) toward +X (right).
+    // When sprite is horizontally mirrored (dirSign < 0), flip sign so post-mirror direction matches input.
+    return (params.shouldMirror ? 1 : -1) * steerNorm * 0.58;
+  }
+  return params.isCustomYaw ? 0 : -0.30 * Math.max(0, Math.min(1, params.driftAbsNorm));
+}
+
 export function getPixelCarCanvas(
   car: CarSpec,
   driftAngleNorm: number, // -1.0 ('\') .. 0 .. +1.0 ('/')
@@ -465,7 +491,8 @@ export function getPixelCarCanvas(
   isFlashing = false,
   customYawRad?: number,
   customPitchRad?: number,
-  damageState?: CarDamageState
+  damageState?: CarDamageState,
+  frontSteerNorm = 0
 ): HTMLCanvasElement {
   let resolved: ReturnType<typeof resolveCarAppearance>;
   let modKey: string;
@@ -484,25 +511,21 @@ export function getPixelCarCanvas(
   }
 
   const isCustomYaw = typeof customYawRad === 'number';
-  // Straight driving keeps an exact normal straight rear stance 0.0 rad (|);
-  // lane weaves smoothly tilt 0.18-0.38 rad, and full drift swings up to 0.78 rad diagonal!
-  const angleBucket = Math.max(-6, Math.min(6, Math.round(driftAngleNorm * 6)));
+  // Smooth continuous yaw across 16 steps per side (zero snap from straight-ahead 0.0 rad)
+  const angleBucket = Math.max(-HERO_BUCKETS, Math.min(HERO_BUCKETS, Math.round(driftAngleNorm * HERO_BUCKETS)));
   const dirSign = isCustomYaw ? 1 : angleBucket < 0 ? -1 : 1;
-  const absNorm = isCustomYaw ? 0.5 : Math.abs(angleBucket) / 6; // 0 .. 1
+  const absNorm = isCustomYaw ? 0.5 : Math.abs(angleBucket) / HERO_BUCKETS; // 0 .. 1
 
-  const yaw = isCustomYaw
-    ? customYawRad
-    : angleBucket === 0
-    ? 0.0
-    : 0.10 + absNorm * 0.64;
+  const yaw = isCustomYaw ? customYawRad : absNorm * 0.74;
   const pitch = typeof customPitchRad === 'number' ? customPitchRad : 0.37; // elevated chase tilt
 
-  const spinFrame = Math.floor(wheelPhase) % 2;
+  const spinFrame = ((Math.floor(wheelPhase) % 4) + 4) % 4;
   const angleKey = isCustomYaw
     ? `yaw_${Math.round(customYawRad * 72)}`
     : `${angleBucket}`;
+  const steerBucket = Math.max(-5, Math.min(5, Math.round(Math.max(-1, Math.min(1, frontSteerNorm)) * 5)));
   const dmgKey = getDamageVisualCacheKey(damageState);
-  const key = `${car.id}_${angleKey}_${isFever ? 1 : 0}_${isWrecked ? 1 : 0}_${spinFrame}_${pedalMode}_${isFlashing ? 1 : 0}_${modKey}_${dmgKey}`;
+  const key = `${car.id}_${angleKey}_${isFever ? 1 : 0}_${isWrecked ? 1 : 0}_${spinFrame}_${pedalMode}_${isFlashing ? 1 : 0}_${modKey}_${dmgKey}_s${steerBucket}`;
 
   const cached = spriteCache.get(key);
   if (cached) return cached;
@@ -512,10 +535,10 @@ export function getPixelCarCanvas(
   const cosP = Math.cos(pitch);
   const sinP = Math.sin(pitch);
 
-  // Project 3D car-local coordinate to 144x108 pixel space (exact 4:3 aspect match)
+  // Project 3D car-local coordinate to 192x144 pixel space (exact 4:3 aspect match)
   const cx = W * 0.5;
   const cy = H * 0.65;
-  const scale = 24.8;
+  const scale = 33.067;
 
   const project = (v: Vec3): ScreenPt => {
     // Rotate around Y (yaw): +Z nose swings upper-right, -Z rear swings lower-left, +X side faces camera
@@ -843,7 +866,7 @@ export function getPixelCarCanvas(
     steerRad: number,
     showRim: boolean
   ) => {
-    const segs = 14;
+    const segs = 20;
     const cs = Math.cos(steerRad);
     const ss = Math.sin(steerRad);
     const wyCenter = rad;
@@ -943,17 +966,17 @@ export function getPixelCarCanvas(
         fillTri3D(centerOuter, rimOffsetPts[i], rimOffsetPts[n], colCarbonSpec, -0.036);
       }
       const caliperCol = isGt3 || isPrototype || isSupercar ? colEngineHeader : colBrakeGlow;
-      fillTri3D(centerOuter, rimInnerPts[1], rimOffsetPts[2], caliperCol, -0.052);
       fillTri3D(centerOuter, rimInnerPts[2], rimOffsetPts[3], caliperCol, -0.052);
+      fillTri3D(centerOuter, rimInnerPts[3], rimOffsetPts[4], caliperCol, -0.052);
 
-      // Deep-dish barrel lip & 5 spinning spokes + center-lock nut
+      // Deep-dish barrel lip & 5 smooth 4-frame spinning spokes + center-lock nut
       for (let i = 0; i < segs; i++) {
         const n = (i + 1) % segs;
         fillTri3D(centerOuter, rimOffsetPts[i], rimOffsetPts[n], colRim, -0.042);
       }
-      const spokeOffset = spinFrame * 1;
+      const spokeOffset = spinFrame;
       for (let s = 0; s < 5; s++) {
-        const idxA = (s * 3 + spokeOffset) % segs;
+        const idxA = (s * 4 + spokeOffset) % segs;
         const idxB = (idxA + 1) % segs;
         fillQuad3D(centerOuter, rimInnerPts[idxA], rimOffsetPts[idxB], rimOffsetPts[idxA], colRimSpec, -0.072);
       }
@@ -964,7 +987,7 @@ export function getPixelCarCanvas(
       fillTri3D(
         centerOuter,
         rimInnerPts[0],
-        rimInnerPts[7],
+        rimInnerPts[10],
         isGt3 || isFormula || isPrototype ? colEngineHeader : colRimSpec,
         -0.088
       );
@@ -1008,7 +1031,13 @@ export function getPixelCarCanvas(
     : isMotorcycle
     ? 0.16
     : 0.32;
-  const counterSteer = -0.34 * absNorm; // Counter-steered front wheels into the slide!
+  const willMirror = !isCustomYaw && dirSign < 0;
+  const counterSteer = computeFrontWheelSteerRad({
+    frontSteerNorm,
+    driftAbsNorm: absNorm,
+    isCustomYaw,
+    shouldMirror: willMirror,
+  });
 
   if (isMono) {
     // Giant central gyro ring wheel + twin front stabilizer wheels
@@ -2020,6 +2049,18 @@ export function getPixelCarCanvas(
         { x: -hw * 0.88, y: yNose, z: zFront },
         hoodColor
       );
+      if (!isTruck && !isSemi && !isVan) {
+        for (const cxH of [-hw * 0.34, hw * 0.28]) {
+          fillQuad3D(
+            { x: cxH, y: yBeltFront + 0.065, z: zHoodBase + 0.08 },
+            { x: cxH + 0.05, y: yBeltFront + 0.065, z: zHoodBase + 0.08 },
+            { x: cxH + 0.04, y: yNose + 0.008, z: zFront - 0.14 },
+            { x: cxH + 0.01, y: yNose + 0.008, z: zFront - 0.14 },
+            hasCarbonHood ? colCarbonSpec : colBodyLight,
+            -0.01
+          );
+        }
+      }
     }
 
     if (!hoodDetached && hoodBend <= 0.15) {
@@ -2560,7 +2601,7 @@ export function getPixelCarCanvas(
         }
       }
 
-      // Rear Fastback Glass (with DeLorean louvers, Hearse chrome landau bars, or Truck back window)
+      // Rear Fastback Glass + Interior Bucket Seat Headrests Silhouette
       if (arch !== 'truck_cyber') {
         fillQuad3D(
           { x: -hw * 0.84, y: yBeltRear + 0.04, z: zTrunk },
@@ -2569,6 +2610,17 @@ export function getPixelCarCanvas(
           { x: -rw, y: yRoof, z: zRearGlassTop },
           colGlassMid
         );
+        // Subtle twin bucket-seat headrests behind glass for interior depth
+        for (const sxSeat of [-0.30, 0.30]) {
+          fillQuad3D(
+            { x: sxSeat - 0.11, y: yBeltRear + 0.08, z: zRearGlassTop + 0.28 },
+            { x: sxSeat + 0.11, y: yBeltRear + 0.08, z: zRearGlassTop + 0.28 },
+            { x: sxSeat + 0.09, y: yRoof - 0.09, z: zRearGlassTop + 0.32 },
+            { x: sxSeat - 0.09, y: yRoof - 0.09, z: zRearGlassTop + 0.32 },
+            colWheelWell,
+            -0.008
+          );
+        }
       }
       if (arch === 'interceptor_delorean') {
         for (const lz of [0.15, 0.35, 0.55, 0.75]) {
@@ -3346,9 +3398,9 @@ export function getPixelCarCanvas(
   // Grounded contact shadow ellipse (+ Neon Underglow Kit if equipped!)
   const shCenter = project({ x: 0, y: 0.02, z: 0 });
   const shX = Math.round(shouldMirror ? W - 1 - shCenter.x : shCenter.x);
-  const shY = Math.round(shCenter.y + 1);
-  const shRx = Math.round(32 + absNorm * 13);
-  const shRy = Math.round(12 + absNorm * 3);
+  const shY = Math.round(shCenter.y + 1.5);
+  const shRx = Math.round((32 + absNorm * 13) * 1.333);
+  const shRy = Math.round((12 + absNorm * 3) * 1.333);
   const shadowTilt = shouldMirror ? 0.18 : isCustomYaw ? Math.sin(yaw) * -0.18 : dirSign * -0.18;
 
   if (resolved.underglowHex && !isWrecked) {
@@ -3356,7 +3408,7 @@ export function getPixelCarCanvas(
     ctx.globalAlpha = 0.65;
     ctx.fillStyle = resolved.underglowHex;
     ctx.beginPath();
-    ctx.ellipse(shX, shY + 1, shRx + 5, shRy + 3, shadowTilt, 0, Math.PI * 2);
+    ctx.ellipse(shX, shY + 1.5, shRx + 7, shRy + 4, shadowTilt, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
   }
@@ -3381,8 +3433,8 @@ export function getPixelCarCanvas(
   // Stamp crisp 3x5 pixel bitmap racing number onto door roundel!
   if (showDoorRoundel) {
     const doorPt = project({ x: hw * 1.0, y: yFloor + 0.34, z: -0.02 });
-    const dx = Math.round(shouldMirror ? W - 1 - doorPt.x - 4 : doorPt.x - 3);
-    const dy = Math.round(doorPt.y - 2);
+    const dx = Math.round(shouldMirror ? W - 1 - doorPt.x - 6 : doorPt.x - 5);
+    const dy = Math.round(doorPt.y - 3);
     ctx.fillStyle = '#090d16';
     const drawDigit = (char: string, ox: number, oy: number) => {
       const rows = PIXEL_DIGITS[char];
@@ -3390,14 +3442,14 @@ export function getPixelCarCanvas(
       for (let r = 0; r < rows.length; r++) {
         for (let col = 0; col < rows[r].length; col++) {
           if (rows[r][col] === '1') {
-            ctx.fillRect(ox + col, oy + r, 1, 1);
+            ctx.fillRect(ox + col * 1.5, oy + r * 1.5, 1.5, 1.5);
           }
         }
       }
     };
     const numStr = resolved.number.padStart(2, '0');
     drawDigit(numStr[0], dx, dy);
-    drawDigit(numStr[1], dx + 4, dy);
+    drawDigit(numStr[1], dx + 6, dy);
   }
 
   // Animated Exhaust Backfire Flames OR Brake Light Glow Halo OR High-Beam Flash OR Wrecked Sparks
@@ -3410,12 +3462,12 @@ export function getPixelCarCanvas(
       ctx.fillStyle = resolved.headlightBeamHex;
       ctx.globalAlpha = 0.72;
       ctx.beginPath();
-      ctx.arc(hx, hy, 7, 0, Math.PI * 2);
+      ctx.arc(hx, hy, 9, 0, Math.PI * 2);
       ctx.fill();
       ctx.globalAlpha = 1;
       ctx.fillStyle = '#ffffff';
       ctx.beginPath();
-      ctx.arc(hx, hy, 3, 0, Math.PI * 2);
+      ctx.arc(hx, hy, 4, 0, Math.PI * 2);
       ctx.fill();
     }
 
@@ -3424,22 +3476,37 @@ export function getPixelCarCanvas(
         const tp = project({ x: side * hw * 0.64, y: yBeltRear - 0.14, z: zRear - 0.05 });
         const tx = Math.round(shouldMirror ? W - 1 - tp.x : tp.x);
         const ty = Math.round(tp.y);
-        ctx.fillStyle = 'rgba(255, 59, 48, 0.42)';
+        ctx.fillStyle = 'rgba(255, 59, 48, 0.48)';
         ctx.beginPath();
-        ctx.arc(tx, ty, 6, 0, Math.PI * 2);
+        ctx.arc(tx, ty, 8.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(254, 202, 202, 0.55)';
+        ctx.beginPath();
+        ctx.arc(tx, ty, 3.2, 0, Math.PI * 2);
         ctx.fill();
       }
     } else {
+      // Subtle ambient LED taillight aura
+      for (const side of [-1, 1]) {
+        const tp = project({ x: side * hw * 0.64, y: yBeltRear - 0.14, z: zRear - 0.05 });
+        const tx = Math.round(shouldMirror ? W - 1 - tp.x : tp.x);
+        const ty = Math.round(tp.y);
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.20)';
+        ctx.beginPath();
+        ctx.arc(tx, ty, 5.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
       const isBoss = car.id === 'matte_boss' || car.id === 'apex_valkyrie';
       const isGassing = pedalMode === 'gas';
       if (isGassing || isFever || isBoss) {
         const flameOuter = isFever ? '#06b6d4' : resolved.flameOuter;
         const flameCore = isFever ? '#cffafe' : resolved.flameCore;
         const reach =
-          (isBoss ? 0.34 : 0.24) +
-          (isGassing ? 0.18 : 0) +
-          (isFever ? 0.16 : 0) +
-          (spinFrame === 0 ? 0.08 : 0);
+          (isBoss ? 0.36 : 0.25) +
+          (isGassing ? 0.20 : 0) +
+          (isFever ? 0.18 : 0) +
+          ((spinFrame % 2 === 0) ? 0.08 : 0.02);
 
         const exhaustAnchors: {
           x: number;
@@ -3497,17 +3564,31 @@ export function getPixelCarCanvas(
           const x1 = shouldMirror ? W - 1 - p1.x : p1.x;
           const y0 = p0.y;
           const y1 = p1.y;
-          const steps = 6;
+
+          // Soft translucent exhaust nozzle plasma halo
+          ctx.save();
+          ctx.globalAlpha = isFever ? 0.34 : 0.24;
+          ctx.fillStyle = flameOuter;
+          ctx.beginPath();
+          ctx.arc(x0, y0, isFever ? 5.6 : 4.4, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+
+          const steps = 8;
           for (let s = 0; s <= steps; s++) {
             const t = s / steps;
-            const px = Math.round(x0 + (x1 - x0) * t);
-            const py = Math.round(y0 + (y1 - y0) * t);
-            const w = t < 0.4 ? 3 : t < 0.78 ? 2 : 1;
+            const px = x0 + (x1 - x0) * t;
+            const py = y0 + (y1 - y0) * t;
+            const rad = t < 0.35 ? 2.6 : t < 0.72 ? 1.8 : 0.9;
             ctx.fillStyle = flameOuter;
-            ctx.fillRect(px - Math.floor(w / 2), py, w, 2);
+            ctx.beginPath();
+            ctx.arc(px, py, rad, 0, Math.PI * 2);
+            ctx.fill();
             if (t < 0.65) {
               ctx.fillStyle = flameCore;
-              ctx.fillRect(px, py, 1, 1);
+              ctx.beginPath();
+              ctx.arc(px, py, rad * 0.52, 0, Math.PI * 2);
+              ctx.fill();
             }
           }
         }
@@ -3515,11 +3596,11 @@ export function getPixelCarCanvas(
     }
   } else {
     ctx.fillStyle = '#ef4444';
-    ctx.fillRect(Math.round(cx - 10), Math.round(cy - 18), 3, 3);
-    ctx.fillRect(Math.round(cx - 7), Math.round(cy - 15), 3, 3);
-    ctx.fillRect(Math.round(cx - 4), Math.round(cy - 12), 3, 3);
-    ctx.fillRect(Math.round(cx - 1), Math.round(cy - 15), 3, 3);
-    ctx.fillRect(Math.round(cx + 2), Math.round(cy - 18), 3, 3);
+    ctx.fillRect(Math.round(cx - 13), Math.round(cy - 24), 4, 4);
+    ctx.fillRect(Math.round(cx - 9), Math.round(cy - 20), 4, 4);
+    ctx.fillRect(Math.round(cx - 5), Math.round(cy - 16), 4, 4);
+    ctx.fillRect(Math.round(cx - 1), Math.round(cy - 20), 4, 4);
+    ctx.fillRect(Math.round(cx + 3), Math.round(cy - 24), 4, 4);
   }
 
   if (spriteCache.size >= MAX_HERO_CACHE) {
@@ -3533,7 +3614,7 @@ export function getPixelCarCanvas(
 const trafficSpriteCache = new Map<string, HTMLCanvasElement>();
 
 /**
- * Generates or retrieves cached 112x84 integer pixel-art sprite for 2-lane highway traffic.
+ * Generates or retrieves cached 144x108 integer pixel-art sprite for 2-lane highway traffic.
  * - isOncoming = true: rotated 180 deg so camera sees front bumper, grille, twin bright headlights, and windshield!
  * - isOncoming = false: rear chase view with twin glowing red taillights, plate, and side profile!
  */
@@ -3545,19 +3626,20 @@ export function getTrafficVehicleCanvas(
   isNight = false,
   customYawRad?: number
 ): HTMLCanvasElement {
-  const angleBucket = Math.max(-3, Math.min(3, Math.round(viewAngleNorm * 3)));
-  const yawQuant = customYawRad !== undefined ? Math.round(customYawRad * 24) / 24 : null;
+  const angleBucket = Math.max(-TRAFFIC_BUCKETS, Math.min(TRAFFIC_BUCKETS, Math.round(viewAngleNorm * TRAFFIC_BUCKETS)));
+  const yawQuant = customYawRad !== undefined ? Math.round(customYawRad * 32) / 32 : null;
   const key = `tr_${kind}_${primaryHex}_${isOncoming ? 1 : 0}_${angleBucket}_${isNight ? 1 : 0}_${yawQuant !== null ? yawQuant.toFixed(2) : 'auto'}`;
   const cached = trafficSpriteCache.get(key);
   if (cached) return cached;
 
-  // Base yaw: arbitrary 3D orientation when provided, else slight 3/4 highway angle
+  // Base yaw: arbitrary 3D orientation when provided, else smooth 8-step 3/4 highway angle
+  const angleOffset = (angleBucket / TRAFFIC_BUCKETS) * 0.42;
   const baseYaw =
     yawQuant !== null
       ? yawQuant
       : isOncoming
-      ? Math.PI - angleBucket * 0.14
-      : -angleBucket * 0.14;
+      ? Math.PI - angleOffset
+      : -angleOffset;
   const pitch = 0.30;
   const cosY = Math.cos(baseYaw);
   const sinY = Math.sin(baseYaw);
@@ -3566,7 +3648,7 @@ export function getTrafficVehicleCanvas(
 
   const cx = TW * 0.5;
   const cy = TH * 0.68;
-  const scale = 18.6;
+  const scale = 23.914;
 
   const project = (v: Vec3): ScreenPt => {
     const rx = v.x * cosY + v.z * sinY;
@@ -3951,13 +4033,21 @@ export function getTrafficVehicleCanvas(
         colLight,
         -0.01
       );
-      // Side Windows
+      // Side Windows & Wing Mirrors
       fillQuad3D(
         { x: sgn * hw * 0.88, y: yBeltRear + 0.02, z: zTrunk + 0.04 },
         { x: sgn * hw * 0.86, y: yBeltFront + 0.04, z: zHoodBase - 0.04 },
         { x: sgn * rw * 0.96, y: yRoof, z: zFrontGlassTop },
         { x: sgn * rw, y: yRoof, z: zRearGlassTop },
         colGlassMid
+      );
+      fillQuad3D(
+        { x: sgn * hw * 0.94, y: yBeltFront + 0.04, z: zHoodBase - 0.20 },
+        { x: sgn * hw * 1.11, y: yBeltFront + 0.06, z: zHoodBase - 0.24 },
+        { x: sgn * hw * 1.11, y: yBeltFront + 0.16, z: zHoodBase - 0.24 },
+        { x: sgn * hw * 0.94, y: yBeltFront + 0.12, z: zHoodBase - 0.20 },
+        colLight,
+        -0.02
       );
     }
 
@@ -4087,10 +4177,10 @@ export function getTrafficVehicleCanvas(
   // Grounded contact shadow ellipse
   const shCenter = project({ x: 0, y: 0.02, z: 0 });
   const shX = Math.round(shCenter.x);
-  const shY = Math.round(shCenter.y + 1);
+  const shY = Math.round(shCenter.y + 1.5);
   ctx.fillStyle = 'rgba(9, 13, 22, 0.48)';
   ctx.beginPath();
-  ctx.ellipse(shX, shY, isTruck ? 28 : 24, 9, 0, 0, Math.PI * 2);
+  ctx.ellipse(shX, shY, isTruck ? 36 : 31, 11.5, 0, 0, Math.PI * 2);
   ctx.fill();
 
   if (!trScratchCanvas) {
@@ -4104,15 +4194,25 @@ export function getTrafficVehicleCanvas(
   trScratchCtx!.putImageData(trScratchImgData!, 0, 0);
   ctx.drawImage(trScratchCanvas, 0, 0);
 
-  // Subtle headlight flare on oncoming front bumper
+  // Headlight or Taillight glow flare for strong figure-ground readability
   if (isOncoming) {
     for (const sgn of [-1, 1]) {
       const hp = project({ x: sgn * hw * 0.68, y: 0.48, z: zFront + 0.08 });
       const hx = Math.round(hp.x);
       const hy = Math.round(hp.y);
-      ctx.fillStyle = isNight ? 'rgba(254, 249, 195, 0.55)' : 'rgba(254, 240, 138, 0.36)';
+      ctx.fillStyle = isNight ? 'rgba(254, 249, 195, 0.58)' : 'rgba(254, 240, 138, 0.38)';
       ctx.beginPath();
-      ctx.arc(hx, hy, isNight ? 5 : 4, 0, Math.PI * 2);
+      ctx.arc(hx, hy, isNight ? 7 : 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else {
+    for (const sgn of [-1, 1]) {
+      const tp = project({ x: sgn * hw * 0.64, y: 0.64, z: zRear - 0.05 });
+      const tx = Math.round(tp.x);
+      const ty = Math.round(tp.y);
+      ctx.fillStyle = isNight ? 'rgba(239, 68, 68, 0.42)' : 'rgba(239, 68, 68, 0.24)';
+      ctx.beginPath();
+      ctx.arc(tx, ty, isNight ? 5.5 : 4, 0, Math.PI * 2);
       ctx.fill();
     }
   }
@@ -4124,4 +4224,5 @@ export function getTrafficVehicleCanvas(
   trafficSpriteCache.set(key, c);
   return c;
 }
+
 

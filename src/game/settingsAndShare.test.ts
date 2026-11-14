@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -12,6 +12,7 @@ import {
   saveGameSettings,
   GameSettings,
 } from '../components/SettingsModal';
+import { SoundFXSystem, isHapticsEnabled, triggerHaptic } from './audio';
 import { getDriftRank } from './rules';
 
 // Minimal mock localStorage for test environment
@@ -142,4 +143,68 @@ test('Share Card - Rank and Telemetry Formatters', () => {
   assert.ok(formattedLines[1].includes('Shadow Drifter (Tier 45)'));
   assert.ok(formattedLines[2].includes('RANK SS · DRIFT KING'));
   assert.ok(formattedLines[3].includes('124,500 PTS'));
+});
+
+test('Audio Mixer & Haptics - Global haptics toggle and live gain scaling', () => {
+  const sfx = new SoundFXSystem();
+  let vibrateCalls = 0;
+
+  const origNavigatorDesc = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: {
+      vibrate: () => {
+        vibrateCalls++;
+        return true;
+      },
+    },
+  });
+
+  try {
+    sfx.setHapticsEnabled(false);
+    assert.equal(isHapticsEnabled(), false);
+    assert.equal(triggerHaptic('light'), false);
+    assert.equal(vibrateCalls, 0);
+
+    // Force pulse (used by Settings test button) bypasses mute toggle
+    assert.equal(triggerHaptic('medium', true), true);
+    assert.equal(vibrateCalls, 1);
+
+    sfx.setHapticsEnabled(true);
+    assert.equal(isHapticsEnabled(), true);
+    assert.equal(triggerHaptic('heavy'), true);
+    assert.equal(vibrateCalls, 2);
+  } finally {
+    if (origNavigatorDesc) {
+      Object.defineProperty(globalThis, 'navigator', origNavigatorDesc);
+    } else {
+      delete (globalThis as unknown as { navigator?: unknown }).navigator;
+    }
+  }
+
+  // Verify mixer clamps cleanly without compounding master^2 and updates live engine gain
+  const gainTargets: { music: number[]; engine: number[] } = { music: [], engine: [] };
+  (sfx as unknown as { ctx: unknown }).ctx = { currentTime: 1.0 };
+  (sfx as unknown as { musicGainNode: unknown }).musicGainNode = {
+    gain: { setTargetAtTime: (v: number) => gainTargets.music.push(v) },
+  };
+  (sfx as unknown as { engGain: unknown }).engGain = {
+    gain: { setTargetAtTime: (v: number) => gainTargets.engine.push(v) },
+  };
+  (sfx as unknown as { engRunning: boolean }).engRunning = true;
+  (sfx as unknown as { lastEngBaseVol: number }).lastEngBaseVol = 0.04;
+  (sfx as unknown as { lastEngVol: number }).lastEngVol = 0.028;
+
+  sfx.setMixerVolumes({ master: 0.5, music: 0.8, sfx: 0.6, engine: 0.4 });
+  assert.deepEqual(sfx.getMixerVolumes(), {
+    master: 0.5,
+    music: 0.8,
+    sfx: 0.6,
+    engine: 0.4,
+  });
+
+  // Effective music gain = 0.8 * 0.5 * 1.0 * 0.72 = 0.288 (NOT master^2 * 0.8)
+  assert.ok(Math.abs(gainTargets.music[0] - 0.288) < 1e-6);
+  // Live engine gain = lastEngBaseVol (0.04) * engineScale (0.4 * 0.5 = 0.2) = 0.008
+  assert.ok(Math.abs(gainTargets.engine[0] - 0.008) < 1e-6);
 });

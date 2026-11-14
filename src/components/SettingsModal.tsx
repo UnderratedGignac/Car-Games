@@ -131,14 +131,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       onUpdateSettings(nextSettings);
       saveGameSettings(nextSettings);
 
-      // Keep soundFX volumes synchronized in real-time
-      if (key === 'masterVolume' || key === 'musicVolume') {
-        const effMusic = (nextSettings.musicVolume * nextSettings.masterVolume);
-        soundFX.setMusicVolume(effMusic);
+      // Keep soundFX volumes & haptics synchronized in real-time (no double-multiplication)
+      if (
+        key === 'masterVolume' ||
+        key === 'musicVolume' ||
+        key === 'sfxVolume' ||
+        key === 'engineVolume'
+      ) {
+        soundFX.setMixerVolumes({
+          master: nextSettings.masterVolume,
+          music: nextSettings.musicVolume,
+          sfx: nextSettings.sfxVolume,
+          engine: nextSettings.engineVolume,
+        });
       }
-      if (key === 'masterVolume' || key === 'sfxVolume') {
-        const effSfx = (nextSettings.sfxVolume * nextSettings.masterVolume);
-        soundFX.setSfxVolume(effSfx);
+      if (key === 'hapticsEnabled') {
+        soundFX.setHapticsEnabled(nextSettings.hapticsEnabled);
       }
     },
     [settings, onUpdateSettings]
@@ -152,7 +160,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   }, [settings.hapticsEnabled]);
 
   const handleTestHaptics = useCallback(() => {
-    const success = triggerHaptic('medium');
+    const success = triggerHaptic('medium', true);
     setHapticFeedbackNotice(
       success ? '⚡ Haptic pulse triggered!' : '⚠️ Vibration unsupported on this device/browser'
     );
@@ -162,8 +170,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const handleResetDefaults = useCallback(() => {
     onUpdateSettings({ ...DEFAULT_SETTINGS });
     saveGameSettings({ ...DEFAULT_SETTINGS });
-    soundFX.setMusicVolume(DEFAULT_SETTINGS.musicVolume * DEFAULT_SETTINGS.masterVolume);
-    soundFX.setSfxVolume(DEFAULT_SETTINGS.sfxVolume * DEFAULT_SETTINGS.masterVolume);
+    soundFX.setMixerVolumes({
+      master: DEFAULT_SETTINGS.masterVolume,
+      music: DEFAULT_SETTINGS.musicVolume,
+      sfx: DEFAULT_SETTINGS.sfxVolume,
+      engine: DEFAULT_SETTINGS.engineVolume,
+    });
+    soundFX.setHapticsEnabled(DEFAULT_SETTINGS.hapticsEnabled);
     soundFX.playCoinPickup(1);
   }, [onUpdateSettings]);
 
@@ -171,29 +184,29 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-md pointer-events-auto"
+      className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/85 pointer-events-auto"
       role="dialog"
       aria-modal="true"
       aria-label="Settings and Accessibility"
     >
       <div
-        className="relative w-full max-w-lg rounded-2xl bg-slate-950/95 border border-cyan-500/40 shadow-[0_0_50px_rgba(6,182,212,0.2)] overflow-hidden flex flex-col max-h-[92vh] text-slate-100"
-        style={{ backgroundColor: 'rgba(9, 14, 26, 0.96)' }}
+        className="relative w-full max-w-lg rounded-2xl bg-slate-950/95 border border-cyan-500/40 shadow-[0_0_50px_rgba(6,182,212,0.2)] overflow-hidden flex flex-col max-h-[92dvh] text-slate-100"
+        style={{ backgroundColor: 'rgba(9, 14, 26, 0.98)' }}
       >
         {/* Ambient Top Cyber Glow */}
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-64 h-10 bg-cyan-500/20 blur-2xl pointer-events-none" />
 
-        {/* Modal Header */}
-        <div className="flex items-center justify-between px-5 pt-4 pb-3 border-b border-slate-800/80">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-cyan-950/70 border border-cyan-500/50 flex items-center justify-center text-cyan-300 font-bold text-sm shadow-[0_0_12px_rgba(6,182,212,0.3)]">
+        {/* Modal Header (Pinned) */}
+        <div className="shrink-0 flex items-center justify-between px-4 sm:px-5 pt-3.5 pb-3 border-b border-slate-800/80">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-8 h-8 rounded-lg bg-cyan-950/70 border border-cyan-500/50 flex items-center justify-center text-cyan-300 font-bold text-sm shadow-[0_0_12px_rgba(6,182,212,0.3)] shrink-0">
               ⚙️
             </div>
-            <div>
-              <h2 className="text-lg sm:text-xl font-display font-bold tracking-wide text-white">
+            <div className="min-w-0">
+              <h2 className="text-base sm:text-xl font-display font-bold tracking-wide text-white truncate">
                 GAME SETTINGS
               </h2>
-              <p className="text-[10px] font-mono text-cyan-400 tracking-wider uppercase">
+              <p className="text-[10px] font-mono text-cyan-400 tracking-wider uppercase truncate">
                 AUDIO · ACCESSIBILITY · CONTROLS
               </p>
             </div>
@@ -201,19 +214,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="w-8 h-8 rounded-full bg-slate-900 border border-slate-700 text-slate-400 hover:text-white hover:border-slate-500 flex items-center justify-center transition-colors text-sm"
+            className="w-9 h-9 rounded-full bg-slate-900 border border-slate-700 text-slate-400 hover:text-white hover:border-slate-500 flex items-center justify-center transition-colors text-sm shrink-0"
             aria-label="Close Settings"
           >
             ✕
           </button>
         </div>
 
-        {/* Tab Navigation */}
-        <div className="grid grid-cols-3 p-2 gap-1.5 bg-slate-900/60 border-b border-slate-800/80">
+        {/* Tab Navigation (Pinned) */}
+        <div className="shrink-0 grid grid-cols-3 p-2 gap-1.5 bg-slate-900/60 border-b border-slate-800/80">
           <button
             type="button"
             onClick={() => setActiveTab('audio')}
-            className={`min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+            className={`min-h-[38px] px-2 sm:px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
               activeTab === 'audio'
                 ? 'bg-cyan-500 text-slate-950 shadow-[0_0_16px_rgba(6,182,212,0.4)] font-bold'
                 : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
@@ -225,7 +238,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             type="button"
             onClick={() => setActiveTab('accessibility')}
-            className={`min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+            className={`min-h-[38px] px-2 sm:px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
               activeTab === 'accessibility'
                 ? 'bg-cyan-500 text-slate-950 shadow-[0_0_16px_rgba(6,182,212,0.4)] font-bold'
                 : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
@@ -237,7 +250,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             type="button"
             onClick={() => setActiveTab('controls')}
-            className={`min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+            className={`min-h-[38px] px-2 sm:px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
               activeTab === 'controls'
                 ? 'bg-cyan-500 text-slate-950 shadow-[0_0_16px_rgba(6,182,212,0.4)] font-bold'
                 : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
@@ -248,19 +261,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </button>
         </div>
 
-        {/* Tab Content Body */}
-        <div className="p-4 sm:p-5 overflow-y-auto space-y-4 max-h-[calc(92vh-150px)]">
+        {/* Tab Content Body (Scrollable) */}
+        <div className="flex-1 min-h-0 p-3.5 sm:p-5 overflow-y-auto overscroll-contain space-y-3.5 sm:space-y-4">
           {/* TAB 1: AUDIO MIXER */}
           {activeTab === 'audio' && (
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-mono uppercase tracking-wider text-slate-400">
                   Master Equalizer &amp; Channel Gains
                 </span>
                 <button
                   type="button"
                   onClick={handleTestSfx}
-                  className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs font-mono flex items-center gap-1 border border-cyan-500/30"
+                  className="shrink-0 whitespace-nowrap px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs font-mono flex items-center gap-1 border border-cyan-500/30"
                 >
                   <span>▶</span> Test SFX
                 </button>
@@ -440,11 +453,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </p>
                 )}
 
-                <div className="flex items-center gap-2 pt-1">
+                <div className="grid grid-cols-3 gap-1.5 pt-1">
                   <button
                     type="button"
                     onClick={() => updateSetting('screenShake', 0)}
-                    className={`px-3 py-1 rounded-lg text-xs font-mono transition-colors ${
+                    className={`min-h-[34px] px-2 py-1 rounded-lg text-[11px] font-mono transition-colors ${
                       settings.screenShake === 0
                         ? 'bg-emerald-500 text-slate-950 font-bold'
                         : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
@@ -455,32 +468,32 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <button
                     type="button"
                     onClick={() => updateSetting('screenShake', 0.5)}
-                    className={`px-3 py-1 rounded-lg text-xs font-mono transition-colors ${
+                    className={`min-h-[34px] px-2 py-1 rounded-lg text-[11px] font-mono transition-colors ${
                       settings.screenShake === 0.5
                         ? 'bg-amber-500 text-slate-950 font-bold'
                         : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
                     }`}
                   >
-                    Gentle (50%)
+                    Gentle 50%
                   </button>
                   <button
                     type="button"
                     onClick={() => updateSetting('screenShake', 1.0)}
-                    className={`px-3 py-1 rounded-lg text-xs font-mono transition-colors ${
+                    className={`min-h-[34px] px-2 py-1 rounded-lg text-[11px] font-mono transition-colors ${
                       settings.screenShake === 1.0
                         ? 'bg-amber-500 text-slate-950 font-bold'
                         : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
                     }`}
                   >
-                    Arcade Max (100%)
+                    Max 100%
                   </button>
                 </div>
               </div>
 
               {/* High Refresh Rate Mode */}
-              <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
+              <div className="p-3.5 sm:p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
                     <h3 className="text-sm font-semibold text-white">
                       ⚡ Refresh Rate Cadence
                     </h3>
@@ -489,7 +502,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </p>
                   </div>
                   <span
-                    className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider ${
+                    className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider shrink-0 ${
                       settings.highFpsMode
                         ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
                         : 'bg-slate-800 text-slate-400 border border-slate-700'
@@ -499,7 +512,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </span>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <button
                     type="button"
                     onClick={() => updateSetting('highFpsMode', false)}
@@ -697,19 +710,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           )}
         </div>
 
-        {/* Modal Footer Controls */}
-        <div className="p-4 bg-slate-950 border-t border-slate-800/80 flex items-center justify-between gap-3">
+        {/* Modal Footer Controls (Pinned) */}
+        <div className="shrink-0 p-3.5 sm:p-4 bg-slate-950 border-t border-slate-800/80 flex items-center justify-between gap-3">
           <button
             type="button"
             onClick={handleResetDefaults}
-            className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white text-xs font-mono transition-colors"
+            className="min-h-[40px] px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white text-xs font-mono transition-colors"
           >
             Reset Defaults
           </button>
           <button
             type="button"
             onClick={onClose}
-            className="px-6 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-display font-bold text-sm tracking-wide shadow-[0_0_15px_rgba(6,182,212,0.4)] transition-all"
+            className="min-h-[40px] px-6 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-display font-bold text-sm tracking-wide shadow-[0_0_15px_rgba(6,182,212,0.4)] transition-all"
           >
             Done
           </button>
