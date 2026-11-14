@@ -1,4 +1,4 @@
-﻿import type { HornStyleId, HornTypeId, SoundProfileId } from './rules';
+import type { HornStyleId, HornTypeId, SoundProfileId } from './rules';
 import {
   AI_SFX_SLOT_MAP,
   AiSfxSlotId,
@@ -810,7 +810,7 @@ export class SoundFXSystem {
     return triggerHaptic(type);
   }
 
-  // Subtle mechanical gear shift / soft thump sound (Zen mode guardrails & traffic bump)
+  // Subtle mechanical gear shift / soft thump sound (Parking shifter & traffic bump)
   public playGearShift() {
     const ctx = this.ensureContext();
     if (!ctx) return;
@@ -1155,77 +1155,160 @@ export class SoundFXSystem {
     });
   }
 
-  // Car falling off the 3D cliff + guardrail crunch + AI Crash Impact & valley boom
+  // Guardrail breach metallic crunch + wind rush before hitting ground (NO explosion boom)
   public playFallAndDestroy() {
     const ctx = this.ensureContext();
     if (!ctx) return;
-    const hasAi = this.playAiSfxClip('crash', 0.96, 1.0);
-    const layer = (hasAi ? 0.65 : 1.0) * this.sfxScale;
-
     const now = ctx.currentTime;
+    const layer = this.sfxScale;
 
     // Stage 1: Metallic guardrail crunch burst
-    const crunchLen = Math.floor(ctx.sampleRate * 0.14);
+    const crunchLen = Math.floor(ctx.sampleRate * 0.16);
     const crunchBuf = ctx.createBuffer(1, crunchLen, ctx.sampleRate);
     const crunchCh = crunchBuf.getChannelData(0);
     for (let i = 0; i < crunchLen; i++) {
-      crunchCh[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / crunchLen, 1.2);
+      crunchCh[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / crunchLen, 1.15);
     }
     const crunchNoise = ctx.createBufferSource();
     crunchNoise.buffer = crunchBuf;
     const crunchFilter = ctx.createBiquadFilter();
     crunchFilter.type = 'bandpass';
-    crunchFilter.frequency.setValueAtTime(1600, now);
-    crunchFilter.Q.setValueAtTime(1.5, now);
+    crunchFilter.frequency.setValueAtTime(1450, now);
+    crunchFilter.Q.setValueAtTime(1.6, now);
     const crunchGain = ctx.createGain();
-    crunchGain.gain.setValueAtTime(0.24 * layer, now);
-    crunchGain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+    crunchGain.gain.setValueAtTime(0.28 * layer, now);
+    crunchGain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
     crunchNoise.connect(crunchFilter);
     crunchFilter.connect(crunchGain);
     crunchGain.connect(this.getOutputNode(ctx));
     crunchNoise.start(now);
 
-    // Stage 2: Falling whistle while tumbling off viaduct
-    const fallOsc = ctx.createOscillator();
-    const fallGain = ctx.createGain();
-    fallOsc.type = 'sine';
-    fallOsc.frequency.setValueAtTime(540, now);
-    fallOsc.frequency.exponentialRampToValueAtTime(90, now + 0.42);
-    fallGain.gain.setValueAtTime(0.18 * layer, now);
-    fallGain.gain.exponentialRampToValueAtTime(0.01, now + 0.42);
-    fallOsc.connect(fallGain);
-    fallGain.connect(this.getOutputNode(ctx));
-    fallOsc.start(now);
-    fallOsc.stop(now + 0.43);
-
-    // Stage 3: Heavy explosion sub-bass & shatter noise at t + 0.40s (valley impact)
-    const boomTime = now + 0.40;
-    const subOsc = ctx.createOscillator();
-    const subGain = ctx.createGain();
-    subOsc.type = 'triangle';
-    subOsc.frequency.setValueAtTime(145, boomTime);
-    subOsc.frequency.exponentialRampToValueAtTime(26, boomTime + 0.62);
-    subGain.gain.setValueAtTime(0.36 * layer, boomTime);
-    subGain.gain.exponentialRampToValueAtTime(0.001, boomTime + 0.64);
-    subOsc.connect(subGain);
-    subGain.connect(this.getOutputNode(ctx));
-    subOsc.start(boomTime);
-    subOsc.stop(boomTime + 0.65);
-
-    const len = Math.floor(ctx.sampleRate * 0.56);
-    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
-    const ch = buf.getChannelData(0);
-    for (let i = 0; i < len; i++) {
-      ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 1.4);
+    // Stage 2: Realistic downward wind rush & suspension creak (no whistle/boom)
+    const windLen = Math.floor(ctx.sampleRate * 0.44);
+    const windBuf = ctx.createBuffer(1, windLen, ctx.sampleRate);
+    const windCh = windBuf.getChannelData(0);
+    for (let i = 0; i < windLen; i++) {
+      windCh[i] = (Math.random() * 2 - 1) * Math.sin((i / windLen) * Math.PI);
     }
-    const crashNoise = ctx.createBufferSource();
-    crashNoise.buffer = buf;
-    const crashGain = ctx.createGain();
-    crashGain.gain.setValueAtTime(0.28 * layer, boomTime);
-    crashGain.gain.exponentialRampToValueAtTime(0.001, boomTime + 0.56);
-    crashNoise.connect(crashGain);
-    crashGain.connect(this.getOutputNode(ctx));
-    crashNoise.start(boomTime);
+    const windNoise = ctx.createBufferSource();
+    windNoise.buffer = windBuf;
+    const windFilter = ctx.createBiquadFilter();
+    windFilter.type = 'lowpass';
+    windFilter.frequency.setValueAtTime(950, now);
+    windFilter.frequency.exponentialRampToValueAtTime(280, now + 0.44);
+    const windGain = ctx.createGain();
+    windGain.gain.setValueAtTime(0.14 * layer, now);
+    windGain.gain.exponentialRampToValueAtTime(0.001, now + 0.44);
+    windNoise.connect(windFilter);
+    windFilter.connect(windGain);
+    windGain.connect(this.getOutputNode(ctx));
+    windNoise.start(now);
+  }
+
+  // Heavy chassis slam into the ground: suspension thud + sheet-metal crumple + glass/dirt scatter
+  public playGroundSlam(intensity = 1.0) {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const hasAi = this.playAiSfxClip('crash', 0.94, Math.min(1.0, 0.72 * intensity));
+    const layer = (hasAi ? 0.6 : 1.0) * this.sfxScale * Math.max(0.45, Math.min(1.25, intensity));
+    const now = ctx.currentTime;
+
+    // 1. Heavy chassis thud (fast punchy 85Hz -> 32Hz drop, no boom tail)
+    const thudOsc = ctx.createOscillator();
+    const thudGain = ctx.createGain();
+    thudOsc.type = 'triangle';
+    thudOsc.frequency.setValueAtTime(92, now);
+    thudOsc.frequency.exponentialRampToValueAtTime(28, now + 0.24);
+    thudGain.gain.setValueAtTime(0.42 * layer, now);
+    thudGain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+    thudOsc.connect(thudGain);
+    thudGain.connect(this.getOutputNode(ctx));
+    thudOsc.start(now);
+    thudOsc.stop(now + 0.27);
+
+    // 2. Crunchy deformed sheet-metal & gravel skid scatter
+    const crumpleLen = Math.floor(ctx.sampleRate * 0.42);
+    const crumpleBuf = ctx.createBuffer(1, crumpleLen, ctx.sampleRate);
+    const crumpleCh = crumpleBuf.getChannelData(0);
+    for (let i = 0; i < crumpleLen; i++) {
+      const env = Math.pow(1 - i / crumpleLen, 1.35);
+      const pulse = Math.sin(i * 0.045) > 0.2 ? 1.0 : 0.45;
+      crumpleCh[i] = (Math.random() * 2 - 1) * env * pulse;
+    }
+    const crumpleSrc = ctx.createBufferSource();
+    crumpleSrc.buffer = crumpleBuf;
+    const crumpleBp = ctx.createBiquadFilter();
+    crumpleBp.type = 'bandpass';
+    crumpleBp.frequency.setValueAtTime(920, now);
+    crumpleBp.Q.setValueAtTime(1.1, now);
+    const crumpleGain = ctx.createGain();
+    crumpleGain.gain.setValueAtTime(0.32 * layer, now);
+    crumpleGain.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
+    crumpleSrc.connect(crumpleBp);
+    crumpleBp.connect(crumpleGain);
+    crumpleGain.connect(this.getOutputNode(ctx));
+    crumpleSrc.start(now);
+
+    // 3. High metallic glass/panel clatter sparkles
+    const glassOsc = ctx.createOscillator();
+    const glassGain = ctx.createGain();
+    glassOsc.type = 'square';
+    glassOsc.frequency.setValueAtTime(2600, now + 0.02);
+    glassOsc.frequency.exponentialRampToValueAtTime(720, now + 0.14);
+    glassGain.gain.setValueAtTime(0.08 * layer, now + 0.02);
+    glassGain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+    glassOsc.connect(glassGain);
+    glassGain.connect(this.getOutputNode(ctx));
+    glassOsc.start(now + 0.02);
+    glassOsc.stop(now + 0.16);
+  }
+
+  // Heavy vehicle-to-vehicle or barrier impact crunch
+  public playTrafficCrunch(intensity = 1.0) {
+    this.playGroundSlam(Math.max(0.65, intensity));
+  }
+
+  // Sharp metallic bolt snap + rattling body panel clatter when a part detaches
+  public playPartDetach(partCount = 1) {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const hits = Math.min(3, Math.max(1, partCount));
+    for (let i = 0; i < hits; i++) {
+      const t = now + i * 0.055;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(420 + i * 95, t);
+      osc.frequency.exponentialRampToValueAtTime(135, t + 0.12);
+      gain.gain.setValueAtTime(0.14 * this.sfxScale, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.13);
+      osc.connect(gain);
+      gain.connect(this.getOutputNode(ctx));
+      osc.start(t);
+      osc.stop(t + 0.14);
+    }
+  }
+
+  // Pneumatic impact wrench + metallic torque lock sound when repairing a car part
+  public playRepairWrench() {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    [0, 0.055, 0.11].forEach((offset, idx) => {
+      const t = now + offset;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = idx === 2 ? 'triangle' : 'square';
+      osc.frequency.setValueAtTime(idx === 2 ? 780 : 320 + idx * 65, t);
+      osc.frequency.exponentialRampToValueAtTime(idx === 2 ? 1180 : 190, t + 0.048);
+      gain.gain.setValueAtTime((idx === 2 ? 0.16 : 0.11) * this.sfxScale, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.052);
+      osc.connect(gain);
+      gain.connect(this.getOutputNode(ctx));
+      osc.start(t);
+      osc.stop(t + 0.06);
+    });
   }
 
   // Crisp rising turbo-pass cue when overtaking traffic

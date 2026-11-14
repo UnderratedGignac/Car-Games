@@ -247,7 +247,7 @@ test('Jukebox track cycling - nextJukeboxTrack, prevJukeboxTrack & switchJukebox
   const prevTrack = engine.prevJukeboxTrack();
   assert.equal(prevTrack.id, 'lofi');
 
-  // Direct switch to Zen mode track
+  // Direct switch to chill lo-fi cruise track
   const direct = engine.switchJukeboxTrack('lofi');
   assert.equal(direct.id, 'lofi');
   assert.equal(direct.title, 'Neo-Tokyo Lo-Fi Serenity');

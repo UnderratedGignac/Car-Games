@@ -183,6 +183,12 @@ function fillTerrainRow(
   }
 }
 
+export function computeDistanceFogAlpha(rawZ: number, fadeStart = 104, fadeEnd = 152): number {
+  if (rawZ <= fadeStart) return 1;
+  if (rawZ >= fadeEnd) return 0;
+  return 1 - (rawZ - fadeStart) / (fadeEnd - fadeStart);
+}
+
 /**
  * Renders true 3D contoured terrain strips (riverbed, sloped embankments, rolling ridges,
  * and cast viaduct shadows) below & flanking the highway with zero per-frame allocations
@@ -196,30 +202,24 @@ export function renderTerrainMesh3D(params: {
   nowMs: number;
   projectInto: Project3DIntoFn;
 }) {
-  const { ctx, visibleSlices, visibleCount, biome, nowMs, projectInto } = params;
+  const { ctx, visibleSlices, visibleCount, biome, projectInto } = params;
   const pal = BIOME_TERRAIN_PALETTE[biome.id];
-  const shimmerTick = Math.floor(nowMs * 0.008);
 
   let farRow = terrainRowA;
   let nearRow = terrainRowB;
   let prevNearIndex = -999999;
 
-  for (let i = 0; i < visibleCount - 1; ) {
+  for (let i = 0; i < visibleCount - 1; i++) {
     const far = visibleSlices[i];
-    const step =
-      far.rawZ > 64 && i + 3 < visibleCount
-        ? 3
-        : far.rawZ > 22 && i + 2 < visibleCount
-        ? 2
-        : 1;
-    const near = visibleSlices[i + step];
-    i += step;
-    if (Math.abs(far.pt.index - near.pt.index) > step + 1) continue;
-    if (far.rawZ > 148) continue;
+    const near = visibleSlices[i + 1];
+    if (Math.abs(far.pt.index - near.pt.index) > 2) continue;
+    if (far.rawZ > 152) continue;
 
     const fpt = far.pt;
     const npt = near.pt;
-    const isEven = Math.floor(fpt.index / step) % 2 === 0;
+    const isEven = Math.floor(fpt.index / 2) % 2 === 0;
+    const fogAlpha = computeDistanceFogAlpha(far.rawZ, 108, 152);
+    if (fogAlpha <= 0.02) continue;
 
     if (fpt.index === prevNearIndex) {
       const tmp = farRow;
@@ -236,7 +236,9 @@ export function renderTerrainMesh3D(params: {
     const np = nearRow.pts;
     const no = nearRow.ok;
 
-    // 1. Outer 3D hills / canyon ridges / neon mega-decks
+    ctx.globalAlpha = fogAlpha;
+
+    // 1. Outer 3D hills / canyon ridges / neon waterfront decks
     if (fo[0] && fo[1] && no[1] && no[0]) {
       drawQuadDirect(ctx, fp[0], fp[1], np[1], np[0], isEven ? pal.hillLight : pal.hillDark);
     }
@@ -244,7 +246,7 @@ export function renderTerrainMesh3D(params: {
       drawQuadDirect(ctx, fp[6], fp[7], np[7], np[6], isEven ? pal.hillDark : pal.hillLight);
     }
 
-    // 2 & 3. Sloped embankment walls + valley floor banks (batched by shared parity color!)
+    // 2 & 3. Sloped embankment walls + valley floor banks (batched by shared parity color)
     const canSlopeL = fo[1] && fo[2] && no[2] && no[1];
     const canSlopeR = fo[5] && fo[6] && no[6] && no[5];
     const canBankL = fo[2] && fo[3] && no[3] && no[2];
@@ -265,13 +267,13 @@ export function renderTerrainMesh3D(params: {
       ctx.fill();
     }
 
-    // Ridge highlight lines for nearby embankment crests
-    if (far.rawZ < 68 && fpt.index % 3 === 0) {
+    // Subtle ridge crest highlights (steady, no sudden threshold flicker)
+    if (far.rawZ < 85 && fpt.index % 3 === 0) {
       const hasL = fo[1] && no[1];
       const hasR = fo[6] && no[6];
       if (hasL || hasR) {
         ctx.strokeStyle = pal.ridgeCap;
-        ctx.globalAlpha = biome.id === 'neon' ? 0.35 : 0.25;
+        ctx.globalAlpha = fogAlpha * (biome.id === 'neon' ? 0.28 : 0.20);
         ctx.lineWidth = 1;
         ctx.beginPath();
         if (hasL) {
@@ -283,31 +285,31 @@ export function renderTerrainMesh3D(params: {
           ctx.lineTo(Math.round(np[6].x), Math.round(np[6].y));
         }
         ctx.stroke();
-        ctx.globalAlpha = 1.0;
+        ctx.globalAlpha = fogAlpha;
       }
     }
 
-    // 4. Shimmering central river / neon canal / canyon wash beneath viaduct
+    // 4. Calm central river / canal / canyon wash beneath viaduct (no 8Hz strobing)
     if (fo[3] && fo[4] && no[4] && no[3]) {
       drawQuadDirect(ctx, fp[3], fp[4], np[4], np[3], pal.riverBase);
-      if (far.rawZ < 70 && (fpt.index + shimmerTick) % 4 === 0) {
-        const rx1 = fp[3].x + (fp[4].x - fp[3].x) * 0.28;
-        const ry1 = fp[3].y + (fp[4].y - fp[3].y) * 0.28;
-        const rx2 = fp[3].x + (fp[4].x - fp[3].x) * 0.72;
-        const ry2 = fp[3].y + (fp[4].y - fp[3].y) * 0.72;
+      if (far.rawZ < 88 && fpt.index % 4 === 0) {
+        const rx1 = fp[3].x + (fp[4].x - fp[3].x) * 0.26;
+        const ry1 = fp[3].y + (fp[4].y - fp[3].y) * 0.26;
+        const rx2 = fp[3].x + (fp[4].x - fp[3].x) * 0.74;
+        const ry2 = fp[3].y + (fp[4].y - fp[3].y) * 0.74;
         ctx.strokeStyle = pal.riverGlint;
-        ctx.globalAlpha = biome.id === 'canyon' ? 0.25 : 0.55;
+        ctx.globalAlpha = fogAlpha * (biome.id === 'canyon' ? 0.18 : 0.34);
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(Math.round(rx1), Math.round(ry1));
         ctx.lineTo(Math.round(rx2), Math.round(ry2));
         ctx.stroke();
-        ctx.globalAlpha = 1.0;
+        ctx.globalAlpha = fogAlpha;
       }
     }
 
-    // 5. Cast Viaduct Bridge Shadow onto valley basin directly below the road deck!
-    if (far.rawZ < 82) {
+    // 5. Cast Viaduct Bridge Shadow onto valley basin directly below the road deck
+    if (far.rawZ < 92) {
       const shOff = 1.3;
       const fhw = fpt.width * 0.5;
       const nhw = npt.width * 0.5;
@@ -320,6 +322,7 @@ export function renderTerrainMesh3D(params: {
       }
     }
   }
+  ctx.globalAlpha = 1.0;
 }
 
 /**
@@ -342,15 +345,20 @@ export function renderWorldObject3D(params: {
   const s = prop.scale;
   const sc = wpBase.scale;
   const rawZ = wpBase.z;
+  const fogAlpha = computeDistanceFogAlpha(rawZ, 102, 154);
+  if (fogAlpha <= 0.02) return;
+
   const bx = Math.round(wpBase.x);
   const by = Math.round(wpBase.y);
-  const nearOutline = rawZ < 72;
+  const nearOutline = rawZ < 78;
+
+  ctx.globalAlpha = fogAlpha;
 
   // Grounded contact shadow beneath mid/near 3D objects
-  if (rawZ < 95) {
+  if (rawZ < 105) {
     const shW = Math.max(3, Math.round(2.3 * s * sc));
     const shH = Math.max(1, Math.round(shW * 0.35));
-    ctx.fillStyle = 'rgba(9, 13, 22, 0.35)';
+    ctx.fillStyle = 'rgba(9, 13, 22, 0.30)';
     ctx.beginPath();
     ctx.ellipse(bx + Math.round(shW * 0.25), by, shW, shH, 0, 0, Math.PI * 2);
     ctx.fill();
@@ -393,10 +401,10 @@ export function renderWorldObject3D(params: {
       ctx.lineTo(Math.round(wp2.x), Math.round(wp2.y));
       ctx.stroke();
 
-      // Lit pixel window grid batched into 2 color passes (near/mid towers only)
+      // Lit glass facade floor bands & window mullions
       const bW = Math.round(Math.abs(wp1.x - wp0.x));
       const bH = Math.round(Math.abs(wp0.y - wp3.y));
-      if (rawZ < 76 && bW >= 7 && bH >= 14) {
+      if (rawZ < 92 && bW >= 6 && bH >= 12) {
         const leftX = Math.round(Math.min(wp0.x, wp1.x));
         const topY = Math.round(wp3.y);
         const maxWX = leftX + bW - 3;
@@ -426,7 +434,7 @@ export function renderWorldObject3D(params: {
         drawQuadDirect(ctx, edgeBot, wp4, wp5, edgeTop, '#0f172a', nearOutline ? '#090d16' : undefined, 1);
       }
 
-      if (prop.variant === 0 && rawZ < 92) {
+      if (prop.variant === 0 && rawZ < 96) {
         if (projectInto(prop.x, groundY + h3d + 2.4, prop.z + d3d * 0.5, wp6)) {
           ctx.strokeStyle = '#64748b';
           ctx.lineWidth = 1;
@@ -439,6 +447,7 @@ export function renderWorldObject3D(params: {
         }
       }
     }
+    ctx.globalAlpha = 1.0;
     return;
   }
 
@@ -457,7 +466,7 @@ export function renderWorldObject3D(params: {
 
       if (okFL && okFR && okTR && okTL) {
         drawQuadDirect(ctx, wp0, wp1, wp2, wp3, '#b45309', nearOutline ? '#451a03' : undefined, 1);
-        if (rawZ < 85) {
+        if (rawZ < 92) {
           ctx.strokeStyle = '#f97316';
           ctx.lineWidth = Math.max(1, Math.round(0.25 * sc));
           ctx.beginPath();
@@ -472,6 +481,7 @@ export function renderWorldObject3D(params: {
           drawQuadDirect(ctx, wp3, wp2, wp5, wp6, '#fdba74');
         }
       }
+      ctx.globalAlpha = 1.0;
       return;
     }
 
@@ -498,6 +508,7 @@ export function renderWorldObject3D(params: {
         ctx.fillStyle = '#f97316';
         ctx.fillRect(Math.round(wp2.x), Math.round(wp2.y), Math.round(wp3.x - wp2.x), signTopH);
       }
+      ctx.globalAlpha = 1.0;
       return;
     }
 
@@ -517,6 +528,7 @@ export function renderWorldObject3D(params: {
     ctx.fillRect(bx - Math.round(cw * 1.9), by - Math.round(th * 0.88), Math.max(1, Math.round(cw * 0.7)), Math.round(th * 0.26));
     ctx.fillRect(bx + Math.round(cw * 0.4), by - Math.round(th * 0.52), Math.round(cw * 1.5), Math.max(1, Math.round(cw * 0.65)));
     ctx.fillRect(bx + Math.round(cw * 1.2), by - Math.round(th * 0.78), Math.max(1, Math.round(cw * 0.7)), Math.round(th * 0.26));
+    ctx.globalAlpha = 1.0;
     return;
   }
 
@@ -545,10 +557,14 @@ export function renderWorldObject3D(params: {
         ctx.fillStyle = '#ef4444';
         ctx.fillRect(Math.round(wp4.x + 1), Math.round(wp4.y), Math.round(wp5.x - wp4.x - 2), Math.max(2, Math.round(postW * 0.75)));
       }
+      ctx.globalAlpha = 1.0;
       return;
     }
 
-    if (!projectInto(prop.x, groundY + 4.8 * s, prop.z, wp0)) return;
+    if (!projectInto(prop.x, groundY + 4.8 * s, prop.z, wp0)) {
+      ctx.globalAlpha = 1.0;
+      return;
+    }
     const th = Math.max(6, Math.round(by - wp0.y));
     const rad = Math.max(3, Math.round(th * 0.44));
     const trunkW = Math.max(2, Math.round(th * 0.16));
@@ -571,6 +587,7 @@ export function renderWorldObject3D(params: {
       ctx.arc(bx - Math.round(rad * 0.25), by - Math.round(th * 0.84), Math.max(2, Math.round(rad * 0.58)), 0, Math.PI * 2);
       ctx.fill();
     }
+    ctx.globalAlpha = 1.0;
     return;
   }
 
@@ -614,6 +631,7 @@ export function renderWorldObject3D(params: {
         ctx.fillRect(winX, winY, Math.max(2, Math.round(0.45 * sc)), Math.max(2, Math.round(0.45 * sc)));
       }
     }
+    ctx.globalAlpha = 1.0;
     return;
   }
 
@@ -629,7 +647,7 @@ export function renderWorldObject3D(params: {
       ctx.stroke();
 
       const bladeLen = Math.max(4, Math.round(2.4 * s * sc));
-      const baseAng = nowMs * 0.003 + prop.z * 0.1;
+      const baseAng = nowMs * 0.0014 + prop.z * 0.1;
       ctx.strokeStyle = '#f8fafc';
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -640,6 +658,7 @@ export function renderWorldObject3D(params: {
       }
       ctx.stroke();
     }
+    ctx.globalAlpha = 1.0;
     return;
   }
 
@@ -678,11 +697,15 @@ export function renderWorldObject3D(params: {
         ctx.stroke();
       }
     }
+    ctx.globalAlpha = 1.0;
     return;
   }
 
-  // 3D Faceted 3-Tier Alpine Pine Tree (batched into 2 fills + 1 outline stroke!)
-  if (!projectInto(prop.x, groundY + 5.4 * s, prop.z, wp0)) return;
+  // 3D Faceted 3-Tier Alpine Pine Tree (batched into 2 fills + 1 outline stroke)
+  if (!projectInto(prop.x, groundY + 5.4 * s, prop.z, wp0)) {
+    ctx.globalAlpha = 1.0;
+    return;
+  }
   const th = Math.max(7, Math.round(by - wp0.y));
   const tw = Math.max(5, Math.round(th * 0.56));
   const trunkH = Math.max(2, Math.round(th * 0.18));
@@ -738,7 +761,7 @@ export function renderWorldObject3D(params: {
   ctx.fill();
 
   // Batch 3: Crisp dark contour stroke (near/mid trees only)
-  if (rawZ < 68) {
+  if (rawZ < 76) {
     ctx.strokeStyle = '#14241c';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -756,6 +779,7 @@ export function renderWorldObject3D(params: {
     ctx.closePath();
     ctx.stroke();
   }
+  ctx.globalAlpha = 1.0;
 }
 
 /**
@@ -767,7 +791,10 @@ export function renderReflectorBollard3D(params: {
   biome: RoadBiomeConfig;
 }) {
   const { ctx, far, biome } = params;
-  if (far.pt.index % 4 !== 0 || far.rawZ <= 3 || far.rawZ >= 88) return;
+  if (far.pt.index % 4 !== 0 || far.rawZ <= 3 || far.rawZ >= 92) return;
+
+  const fogAlpha = computeDistanceFogAlpha(far.rawZ, 68, 92);
+  if (fogAlpha <= 0.02) return;
 
   const postH = Math.max(2, Math.round(0.55 * far.cM.scale));
   const postW = Math.max(1, Math.round(0.14 * far.cM.scale));
@@ -780,12 +807,14 @@ export function renderReflectorBollard3D(params: {
   const rx = Math.round(far.gR.x) - halfPW;
   const ry = Math.round(far.gR.y) - postH;
 
+  ctx.globalAlpha = fogAlpha;
   ctx.fillStyle = '#1e293b';
   ctx.fillRect(lx, ly, postW, postH);
   ctx.fillRect(rx, ry, postW, postH);
   ctx.fillStyle = reflectorCol;
   ctx.fillRect(lx, ly, postW, capH);
   ctx.fillRect(rx, ry, postW, capH);
+  ctx.globalAlpha = 1.0;
 }
 
 /**
@@ -798,7 +827,10 @@ export function renderBridgeTrussArch3D(params: {
   projectInto: Project3DIntoFn;
 }) {
   const { ctx, far, biome, projectInto } = params;
-  if (far.pt.index < 18 || far.pt.index % 44 !== 22 || far.rawZ <= 4 || far.rawZ >= 115) return;
+  if (far.pt.index < 18 || far.pt.index % 44 !== 22 || far.rawZ <= 4 || far.rawZ >= 122) return;
+
+  const fogAlpha = computeDistanceFogAlpha(far.rawZ, 94, 122);
+  if (fogAlpha <= 0.02) return;
 
   const pt = far.pt;
   const hw = pt.width * 0.54;
@@ -821,6 +853,7 @@ export function renderBridgeTrussArch3D(params: {
   const tRx = Math.round(wp3.x);
   const tRy = Math.round(wp3.y);
 
+  ctx.globalAlpha = fogAlpha;
   ctx.strokeStyle = '#090d16';
   ctx.lineWidth = beamW + 2;
   ctx.beginPath();
@@ -845,174 +878,621 @@ export function renderBridgeTrussArch3D(params: {
   ctx.moveTo(tLx, tLy);
   ctx.lineTo(tRx, tRy);
   ctx.stroke();
+  ctx.globalAlpha = 1.0;
 }
 
 /**
- * Renders weird roadside 3D landmarks (Ancient Dragon Skull rock, Glowing Torii Gate,
- * Floating Alien Monolith, and Giant Desert Arcade Cabinet) along the highway!
+ * Renders grounded, biome-authentic architectural roadside landmarks along the highway
+ * (alpine viaduct overlooks & chalets, canyon flat-top sandstone buttes & rock arches,
+ * Tokyo bayfront suspension pylons, and sakura vermilion Torii shrine gates & stone lanterns).
  */
-export function renderWeirdRoadsideLandmarks3D(params: {
+export function renderRealisticRoadsideLandmarks3D(params: {
   ctx: CanvasRenderingContext2D;
   far: RoadSlice3D;
   biome: RoadBiomeConfig;
   projectInto: Project3DIntoFn;
-  nowMs: number;
+  nowMs?: number;
 }) {
-  const { ctx, far, biome, projectInto, nowMs } = params;
-  if (far.rawZ <= 4 || far.rawZ >= 115) return;
+  const { ctx, far, biome, projectInto } = params;
+  if (far.rawZ <= 4 || far.rawZ >= 124) return;
+  const fogAlpha = computeDistanceFogAlpha(far.rawZ, 94, 124);
+  if (fogAlpha <= 0.02) return;
+
   const pt = far.pt;
   const idx = pt.index;
+  ctx.globalAlpha = fogAlpha;
 
-  // 1. Glowing Cyber Torii Gate Spanning Roadway (every ~54 slices)
-  if (idx > 15 && idx % 54 === 12) {
-    const hw = pt.width * 0.58;
-    const gateH = 6.2;
-    const ok1 = projectInto(pt.x - pt.nx * hw, pt.y, pt.z - pt.nz * hw, wp0, 0.55);
-    const ok2 = projectInto(pt.x + pt.nx * hw, pt.y, pt.z + pt.nz * hw, wp1, 0.55);
-    const ok3 = projectInto(pt.x - pt.nx * (hw + 0.6), pt.y + gateH, pt.z - pt.nz * (hw + 0.6), wp2, 0.55);
-    const ok4 = projectInto(pt.x + pt.nx * (hw + 0.6), pt.y + gateH, pt.z + pt.nz * (hw + 0.6), wp3, 0.55);
-    if (ok1 && ok2 && ok3 && ok4) {
-      const col = biome.isNight ? '#f43f5e' : '#dc2626';
-      const beamW = Math.max(2, Math.round(0.32 * far.cM.scale));
-      // Base pillars
-      ctx.strokeStyle = '#090d16';
-      ctx.lineWidth = beamW + 3;
-      ctx.beginPath();
-      ctx.moveTo(Math.round(wp0.x), Math.round(wp0.y));
-      ctx.lineTo(Math.round(wp2.x), Math.round(wp2.y));
-      ctx.moveTo(Math.round(wp1.x), Math.round(wp1.y));
-      ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y));
-      ctx.moveTo(Math.round(wp2.x), Math.round(wp2.y));
-      ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y));
-      ctx.stroke();
+  if (biome.id === 'sakura') {
+    // 1. Traditional Vermilion Cedar Torii Shrine Gate spanning scenic road
+    if (idx > 14 && idx % 64 === 18) {
+      const hw = pt.width * 0.56;
+      const gateH = 5.8;
+      const ok1 = projectInto(pt.x - pt.nx * hw, pt.y, pt.z - pt.nz * hw, wp0, 0.55);
+      const ok2 = projectInto(pt.x + pt.nx * hw, pt.y, pt.z + pt.nz * hw, wp1, 0.55);
+      const ok3 = projectInto(pt.x - pt.nx * (hw + 0.5), pt.y + gateH, pt.z - pt.nz * (hw + 0.5), wp2, 0.55);
+      const ok4 = projectInto(pt.x + pt.nx * (hw + 0.5), pt.y + gateH, pt.z + pt.nz * (hw + 0.5), wp3, 0.55);
+      if (ok1 && ok2 && ok3 && ok4) {
+        const beamW = Math.max(2, Math.round(0.30 * far.cM.scale));
+        ctx.strokeStyle = '#090d16';
+        ctx.lineWidth = beamW + 2;
+        ctx.beginPath();
+        ctx.moveTo(Math.round(wp0.x), Math.round(wp0.y));
+        ctx.lineTo(Math.round(wp2.x), Math.round(wp2.y));
+        ctx.moveTo(Math.round(wp1.x), Math.round(wp1.y));
+        ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y));
+        ctx.moveTo(Math.round(wp2.x - 4), Math.round(wp2.y + 1));
+        ctx.lineTo(Math.round(wp3.x + 4), Math.round(wp3.y + 1));
+        ctx.stroke();
 
-      ctx.strokeStyle = col;
-      ctx.lineWidth = beamW;
-      ctx.beginPath();
-      ctx.moveTo(Math.round(wp0.x), Math.round(wp0.y));
-      ctx.lineTo(Math.round(wp2.x), Math.round(wp2.y));
-      ctx.moveTo(Math.round(wp1.x), Math.round(wp1.y));
-      ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y));
-      ctx.moveTo(Math.round(wp2.x), Math.round(wp2.y));
-      ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y));
-      ctx.stroke();
+        ctx.strokeStyle = '#b91c1c';
+        ctx.lineWidth = beamW;
+        ctx.beginPath();
+        ctx.moveTo(Math.round(wp0.x), Math.round(wp0.y));
+        ctx.lineTo(Math.round(wp2.x), Math.round(wp2.y));
+        ctx.moveTo(Math.round(wp1.x), Math.round(wp1.y));
+        ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y));
+        ctx.moveTo(Math.round(wp2.x - 3), Math.round(wp2.y + 2));
+        ctx.lineTo(Math.round(wp3.x + 3), Math.round(wp3.y + 2));
+        ctx.stroke();
 
-      // Glowing upper lintel Kasagi
-      ctx.strokeStyle = '#fecdd3';
-      ctx.lineWidth = Math.max(1, Math.round(beamW * 0.4));
-      ctx.beginPath();
-      ctx.moveTo(Math.round(wp2.x - 4), Math.round(wp2.y - 2));
-      ctx.lineTo(Math.round(wp3.x + 4), Math.round(wp3.y - 2));
-      ctx.stroke();
+        // Curved dark-slate Kasagi top cap
+        ctx.strokeStyle = '#1e293b';
+        ctx.lineWidth = Math.max(2, Math.round(beamW * 0.72));
+        ctx.beginPath();
+        ctx.moveTo(Math.round(wp2.x - 6), Math.round(wp2.y - 1));
+        ctx.lineTo(Math.round(wp3.x + 6), Math.round(wp3.y - 1));
+        ctx.stroke();
+      }
     }
+
+    // 2. Carved Moss-Granite Roadside Stone Lanterns (Tōrō)
+    if (idx > 8 && idx % 36 === 8) {
+      const side = idx % 72 === 8 ? 1 : -1;
+      const lat = side * (pt.width * 0.5 + 3.8);
+      const sx = pt.x + pt.nx * lat;
+      const sz = pt.z + pt.nz * lat;
+      const gy = sampleTerrainElevation(lat, sz, biome.id);
+      if (projectInto(sx, gy, sz, wp0, 0.55) && projectInto(sx, gy + 2.4, sz, wp1, 0.55)) {
+        const sc = far.cM.scale;
+        const postW = Math.max(2, Math.round(0.32 * sc));
+        const cx = Math.round(wp0.x);
+        const botY = Math.round(wp0.y);
+        const topY = Math.round(wp1.y);
+        const capW = Math.max(4, Math.round(0.95 * sc));
+        ctx.fillStyle = '#475569';
+        ctx.fillRect(cx - Math.floor(postW * 0.5), topY + Math.round(postW * 0.7), postW, Math.max(2, botY - topY));
+        ctx.fillStyle = '#fef3c7';
+        ctx.fillRect(cx - Math.floor(postW * 0.65), topY + 2, Math.max(2, Math.round(postW * 1.3)), Math.max(2, Math.round(postW * 0.85)));
+        ctx.fillStyle = '#334155';
+        ctx.fillRect(cx - Math.floor(capW * 0.5), topY, capW, Math.max(2, Math.round(postW * 0.45)));
+      }
+    }
+    ctx.globalAlpha = 1.0;
+    return;
   }
 
-  // 2. Colossal Ancient Dragon Skull Rock Carving on Roadside Cliff (every ~64 slices)
-  if (idx > 20 && idx % 64 === 32) {
-    const side = (idx % 128 === 32) ? 1 : -1;
-    const skullDist = side * (pt.width * 0.5 + 9.5);
-    const sx = pt.x + pt.nx * skullDist;
-    const sz = pt.z + pt.nz * skullDist;
-    const sy = pt.y + 2.2;
-    if (projectInto(sx, sy, sz, wp0, 0.55)) {
-      const sc = far.cM.scale;
-      const r = Math.max(4, Math.round(2.6 * sc));
-      const cx = Math.round(wp0.x);
-      const cy = Math.round(wp0.y);
+  if (biome.id === 'neon') {
+    // 1. Tokyo Wangan Steel Cable-Stayed Suspension Bridge Pylon Towers
+    if (idx > 14 && idx % 64 === 18) {
+      const hw = pt.width * 0.58;
+      const towerH = 12.5;
+      const okL0 = projectInto(pt.x - pt.nx * hw, pt.y - 1.5, pt.z - pt.nz * hw, wp0, 0.55);
+      const okR0 = projectInto(pt.x + pt.nx * hw, pt.y - 1.5, pt.z + pt.nz * hw, wp1, 0.55);
+      const okLT = projectInto(pt.x - pt.nx * (hw - 0.6), pt.y + towerH, pt.z - pt.nz * (hw - 0.6), wp2, 0.55);
+      const okRT = projectInto(pt.x + pt.nx * (hw - 0.6), pt.y + towerH, pt.z + pt.nz * (hw - 0.6), wp3, 0.55);
+      const okSpanL = projectInto(pt.x - pt.nx * hw, pt.y, pt.z - pt.nz * hw - 5.5, wp4, 0.55);
+      const okSpanR = projectInto(pt.x + pt.nx * hw, pt.y, pt.z + pt.nz * hw - 5.5, wp5, 0.55);
+      if (okL0 && okR0 && okLT && okRT) {
+        const beamW = Math.max(2, Math.round(0.36 * far.cM.scale));
+        // Diagonal stay cables down to bridge deck
+        if (okSpanL && okSpanR) {
+          ctx.strokeStyle = 'rgba(148, 163, 184, 0.62)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(Math.round(wp2.x), Math.round(wp2.y + 3));
+          ctx.lineTo(Math.round(wp4.x), Math.round(wp4.y));
+          ctx.moveTo(Math.round(wp3.x), Math.round(wp3.y + 3));
+          ctx.lineTo(Math.round(wp5.x), Math.round(wp5.y));
+          ctx.stroke();
+        }
+        ctx.strokeStyle = '#090d16';
+        ctx.lineWidth = beamW + 2;
+        ctx.beginPath();
+        ctx.moveTo(Math.round(wp0.x), Math.round(wp0.y));
+        ctx.lineTo(Math.round(wp2.x), Math.round(wp2.y));
+        ctx.moveTo(Math.round(wp1.x), Math.round(wp1.y));
+        ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y));
+        ctx.moveTo(Math.round(wp2.x), Math.round(wp2.y + 4));
+        ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y + 4));
+        ctx.stroke();
 
-      // Skull Cranium
-      ctx.fillStyle = '#090d16';
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = beamW;
+        ctx.beginPath();
+        ctx.moveTo(Math.round(wp0.x), Math.round(wp0.y));
+        ctx.lineTo(Math.round(wp2.x), Math.round(wp2.y));
+        ctx.moveTo(Math.round(wp1.x), Math.round(wp1.y));
+        ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y));
+        ctx.moveTo(Math.round(wp2.x), Math.round(wp2.y + 4));
+        ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y + 4));
+        ctx.stroke();
+
+        // Calm aviation marker dots on top of towers
+        ctx.fillStyle = '#f43f5e';
+        ctx.fillRect(Math.round(wp2.x) - 1, Math.round(wp2.y) - 2, 2, 2);
+        ctx.fillRect(Math.round(wp3.x) - 1, Math.round(wp3.y) - 2, 2, 2);
+      }
+    }
+    ctx.globalAlpha = 1.0;
+    return;
+  }
+
+  if (biome.id === 'canyon') {
+    // Layered Terracotta Flat-Top Sandstone Butte flanking the canyon highway
+    if (idx > 14 && idx % 58 === 20) {
+      const side = idx % 116 === 20 ? 1 : -1;
+      const lat = side * (pt.width * 0.5 + 14.5);
+      const bx = pt.x + pt.nx * lat;
+      const bz = pt.z + pt.nz * lat;
+      const gy = sampleTerrainElevation(lat, bz, biome.id);
+      const bw = 6.2;
+      const bd = 4.6;
+      const bh = 9.4;
+      const okFL = projectInto(bx - bw * 0.55, gy, bz + bd * 0.5, wp0, 0.55);
+      const okFR = projectInto(bx + bw * 0.55, gy, bz + bd * 0.5, wp1, 0.55);
+      const okTR = projectInto(bx + bw * 0.36, gy + bh, bz + bd * 0.36, wp2, 0.55);
+      const okTL = projectInto(bx - bw * 0.36, gy + bh, bz + bd * 0.36, wp3, 0.55);
+      const okSB = projectInto(bx + side * bw * 0.58, gy, bz - bd * 0.45, wp4, 0.55);
+      const okST = projectInto(bx + side * bw * 0.38, gy + bh, bz - bd * 0.36, wp5, 0.55);
+      if (okFL && okFR && okTR && okTL) {
+        drawQuadDirect(ctx, wp0, wp1, wp2, wp3, '#9a3412', '#451a03', 1);
+        // Sedimentary rock stripe
+        ctx.strokeStyle = '#ea580c';
+        ctx.lineWidth = Math.max(1, Math.round(0.28 * far.cM.scale));
+        ctx.beginPath();
+        ctx.moveTo(Math.round((wp0.x + wp3.x) * 0.5), Math.round((wp0.y + wp3.y) * 0.5));
+        ctx.lineTo(Math.round((wp1.x + wp2.x) * 0.5), Math.round((wp1.y + wp2.y) * 0.5));
+        ctx.stroke();
+        if (okSB && okST) {
+          drawQuadDirect(ctx, side > 0 ? wp1 : wp0, wp4, wp5, side > 0 ? wp2 : wp3, '#7c2d12', '#451a03', 1);
+        }
+      }
+    }
+    ctx.globalAlpha = 1.0;
+    return;
+  }
+
+  // ALPINE: Concrete & Stone Viaduct Lookouts and Milepost Gantries
+  if (idx > 16 && idx % 64 === 24) {
+    const side = idx % 128 === 24 ? -1 : 1;
+    const lat = side * (pt.width * 0.5 + 9.2);
+    const sx = pt.x + pt.nx * lat;
+    const sz = pt.z + pt.nz * lat;
+    const gy = sampleTerrainElevation(lat, sz, biome.id);
+    const w3 = 3.6;
+    const h3 = 2.8;
+    const okFL = projectInto(sx - w3 * 0.5, gy, sz + 1.4, wp0, 0.55);
+    const okFR = projectInto(sx + w3 * 0.5, gy, sz + 1.4, wp1, 0.55);
+    const okTR = projectInto(sx + w3 * 0.5, gy + h3, sz + 1.4, wp2, 0.55);
+    const okTL = projectInto(sx - w3 * 0.5, gy + h3, sz + 1.4, wp3, 0.55);
+    const okPeak = projectInto(sx, gy + h3 + 1.6, sz + 1.4, wp4, 0.55);
+    if (okFL && okFR && okTR && okTL && okPeak) {
+      drawQuadDirect(ctx, wp0, wp1, wp2, wp3, '#78350f', '#1e293b', 1);
       ctx.beginPath();
-      ctx.ellipse(cx, cy, r * 1.35 + 2, r + 2, side * -0.15, 0, Math.PI * 2);
+      ctx.moveTo(Math.round(wp3.x - 2), Math.round(wp3.y));
+      ctx.lineTo(Math.round(wp4.x), Math.round(wp4.y));
+      ctx.lineTo(Math.round(wp2.x + 2), Math.round(wp2.y));
+      ctx.closePath();
+      ctx.fillStyle = '#e2e8f0';
       ctx.fill();
-      ctx.fillStyle = biome.isNight ? '#cbd5e1' : '#e2e8f0';
-      ctx.beginPath();
-      ctx.ellipse(cx, cy, r * 1.35, r, side * -0.15, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Curved Horns curving backward
-      ctx.strokeStyle = '#090d16';
-      ctx.lineWidth = Math.max(2, Math.round(r * 0.28) + 2);
-      ctx.beginPath();
-      ctx.moveTo(cx - side * r * 0.4, cy - r * 0.6);
-      ctx.quadraticCurveTo(cx - side * r * 1.4, cy - r * 1.8, cx - side * r * 2.2, cy - r * 1.2);
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = 1;
       ctx.stroke();
-
-      ctx.strokeStyle = '#64748b';
-      ctx.lineWidth = Math.max(1, Math.round(r * 0.28));
-      ctx.stroke();
-
-      // Glowing Hollow Ruby Eyes
-      const eyeCol = '#ef4444';
-      ctx.fillStyle = eyeCol;
-      const eyeX = cx + side * Math.round(r * 0.45);
-      const eyeY = cy - Math.round(r * 0.2);
-      ctx.fillRect(eyeX - 2, eyeY - 2, 4, 4);
-      ctx.fillStyle = '#fecaca';
-      ctx.fillRect(eyeX - 1, eyeY - 1, 2, 2);
-
-      // Snout and Fangs
-      ctx.fillStyle = '#090d16';
-      ctx.fillRect(cx + side * Math.round(r * 0.8), cy + Math.round(r * 0.2), Math.max(2, Math.round(r * 0.6)), Math.max(2, Math.round(r * 0.4)));
     }
   }
+  ctx.globalAlpha = 1.0;
+}
 
-  // 3. Floating Alien Monolith with Pulsing Runes (every ~72 slices)
-  if (idx > 10 && idx % 72 === 24) {
-    const side = (idx % 144 === 24) ? -1 : 1;
-    const monoDist = side * (pt.width * 0.5 + 7.5);
-    const mx = pt.x + pt.nx * monoDist;
-    const mz = pt.z + pt.nz * monoDist;
-    const floatY = pt.y + 1.8 + Math.sin(nowMs * 0.003 + idx) * 0.6;
-    if (projectInto(mx, floatY, mz, wp0, 0.55)) {
-      const sc = far.cM.scale;
-      const mW = Math.max(3, Math.round(0.85 * sc));
-      const mH = Math.max(6, Math.round(2.6 * sc));
-      const cx = Math.round(wp0.x);
-      const cy = Math.round(wp0.y);
+export const renderWeirdRoadsideLandmarks3D = renderRealisticRoadsideLandmarks3D;
 
-      // Obsidian Monolith Body
-      ctx.fillStyle = '#090d16';
-      ctx.fillRect(cx - Math.floor(mW * 0.5) - 1, cy - mH - 1, mW + 2, mH + 2);
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(cx - Math.floor(mW * 0.5), cy - mH, mW, mH);
+// ===========================================================================
+// TRUE 3D PROJECTED DISTANT BACKGROUND VISTAS (Mountains, Mesas, City, Fuji)
+// ===========================================================================
 
-      // Pulsing Runes
-      const runeAlpha = (Math.sin(nowMs * 0.007 + idx) + 1) * 0.5;
-      ctx.fillStyle = runeAlpha > 0.4 ? '#c084fc' : '#a855f7';
-      const runeW = Math.max(1, Math.floor(mW * 0.6));
-      ctx.fillRect(cx - Math.floor(runeW * 0.5), cy - Math.round(mH * 0.75), runeW, 2);
-      ctx.fillRect(cx - Math.floor(runeW * 0.5), cy - Math.round(mH * 0.45), runeW, 2);
-      ctx.fillRect(cx - Math.floor(runeW * 0.5), cy - Math.round(mH * 0.20), runeW, 2);
-    }
-  }
+export function computeVistaFadeAlpha(rawZ: number): number {
+  if (rawZ <= 146 || rawZ >= 415) return 0;
+  if (rawZ < 176) return (rawZ - 146) / 30;
+  if (rawZ > 340) return 1 - (rawZ - 340) / 75;
+  return 1;
+}
 
-  // 4. Giant Desert Arcade Cabinet (every ~48 slices)
-  if (idx > 12 && idx % 48 === 6) {
-    const side = 1;
-    const arcDist = side * (pt.width * 0.5 + 5.8);
-    const ax = pt.x + pt.nx * arcDist;
-    const az = pt.z + pt.nz * arcDist;
-    if (projectInto(ax, pt.y + 1.2, az, wp0, 0.55)) {
-      const sc = far.cM.scale;
-      const aW = Math.max(4, Math.round(1.1 * sc));
-      const aH = Math.max(6, Math.round(2.2 * sc));
-      const cx = Math.round(wp0.x);
-      const cy = Math.round(wp0.y);
+interface VistaItem3D {
+  wx: number;
+  wz: number;
+  rawZ: number;
+  lat: number;
+  height: number;
+  width: number;
+  depth: number;
+  kind: number; // 0 = peak/mesa/tower, 1 = spur/wing/bridge, 2 = landmark (Fuji / Bay Bridge)
+  seed: number;
+}
 
-      // Cabinet outline & side panels
-      ctx.fillStyle = '#090d16';
-      ctx.fillRect(cx - Math.floor(aW * 0.5) - 1, cy - aH - 1, aW + 2, aH + 2);
-      ctx.fillStyle = '#f43f5e';
-      ctx.fillRect(cx - Math.floor(aW * 0.5), cy - aH, aW, aH);
+const VISTA_POOL: VistaItem3D[] = Array.from({ length: 120 }, () => ({
+  wx: 0,
+  wz: 0,
+  rawZ: 0,
+  lat: 0,
+  height: 0,
+  width: 0,
+  depth: 0,
+  kind: 0,
+  seed: 0,
+}));
 
-      // Glowing Neon Marquee
-      ctx.fillStyle = '#fbbf24';
-      ctx.fillRect(cx - Math.floor(aW * 0.4), cy - aH + 1, Math.max(2, Math.floor(aW * 0.8)), Math.max(1, Math.floor(aH * 0.18)));
+function hashGrid(ix: number, iz: number): number {
+  const n = Math.sin(ix * 127.1 + iz * 311.7) * 43758.5453123;
+  return n - Math.floor(n);
+}
 
-      // Glowing CRT Screen
-      ctx.fillStyle = '#06b6d4';
-      ctx.fillRect(cx - Math.floor(aW * 0.35), cy - Math.floor(aH * 0.72), Math.max(2, Math.floor(aW * 0.7)), Math.max(2, Math.floor(aH * 0.36)));
-    }
+function drawTriProjected(
+  ctx: CanvasRenderingContext2D,
+  a: Projected3D,
+  b: Projected3D,
+  c: Projected3D,
+  fillStyle: string,
+  strokeStyle?: string
+) {
+  ctx.beginPath();
+  ctx.moveTo(Math.round(a.x), Math.round(a.y));
+  ctx.lineTo(Math.round(b.x), Math.round(b.y));
+  ctx.lineTo(Math.round(c.x), Math.round(c.y));
+  ctx.closePath();
+  ctx.fillStyle = fillStyle;
+  ctx.fill();
+  if (strokeStyle) {
+    ctx.strokeStyle = strokeStyle;
+    ctx.lineWidth = 1;
+    ctx.stroke();
   }
 }
+
+/**
+ * Renders true perspective-projected 3D background vistas (faceted snow-capped alpine peaks,
+ * Monument Valley sandstone mesas, extruded Tokyo bayfront skyscrapers & 3D suspension bridge,
+ * and Mt. Fuji snow cone) anchored in world coordinates with zero per-frame allocations.
+ */
+export function renderBackgroundVista3D(params: {
+  ctx: CanvasRenderingContext2D;
+  camWorldX: number;
+  camWorldZ: number;
+  fwdX: number;
+  fwdZ: number;
+  rightX: number;
+  rightZ: number;
+  biome: RoadBiomeConfig;
+  skyIsNight: boolean;
+  skyId: string;
+  mtnFarColor: string;
+  mtnNearColor: string;
+  pxW: number;
+  projectInto: Project3DIntoFn;
+}) {
+  const {
+    ctx,
+    camWorldX,
+    camWorldZ,
+    fwdX,
+    fwdZ,
+    rightX,
+    rightZ,
+    biome,
+    skyIsNight,
+    skyId,
+    mtnFarColor,
+    mtnNearColor,
+    pxW,
+    projectInto,
+  } = params;
+
+  const CELL = 68;
+  const baseIx = Math.round(camWorldX / CELL);
+  const baseIz = Math.round(camWorldZ / CELL);
+  const searchRadius = 6; // ±408m coverage in world space
+
+  let count = 0;
+
+  for (let gx = baseIx - searchRadius; gx <= baseIx + searchRadius; gx++) {
+    for (let gz = baseIz - searchRadius; gz <= baseIz + searchRadius; gz++) {
+      if (count >= VISTA_POOL.length - 2) break;
+      const h0 = hashGrid(gx, gz);
+      const h1 = hashGrid(gx + 19, gz - 7);
+      const h2 = hashGrid(gx - 11, gz + 23);
+
+      const wx = (gx + (h0 - 0.5) * 0.62) * CELL;
+      const wz = (gz + (h1 - 0.5) * 0.62) * CELL;
+      const dx = wx - camWorldX;
+      const dz = wz - camWorldZ;
+      const rawZ = dx * fwdX + dz * fwdZ;
+      if (rawZ <= 148 || rawZ >= 412) continue;
+
+      const lat = dx * rightX + dz * rightZ;
+      // Keep mid-distance central corridor clear so the elevated viaduct doesn't clip a peak directly ahead
+      if (rawZ < 290 && Math.abs(lat) < 42) continue;
+      // Frustum cull generously beyond viewport edges
+      if (Math.abs(lat) > rawZ * 1.35 + 48) continue;
+
+      const item = VISTA_POOL[count++];
+      item.wx = wx;
+      item.wz = wz;
+      item.rawZ = rawZ;
+      item.lat = lat;
+      item.seed = h2;
+
+      if (biome.id === 'neon') {
+        item.width = 16 + h0 * 18;
+        item.depth = 14 + h1 * 16;
+        item.height = (rawZ > 270 ? 34 : 22) + h2 * 44;
+        item.kind = h2 > 0.86 && rawZ > 240 ? 2 : h0 > 0.5 ? 1 : 0;
+      } else if (biome.id === 'canyon') {
+        item.width = 34 + h0 * 34;
+        item.depth = 28 + h1 * 26;
+        item.height = 24 + h2 * 36;
+        item.kind = h2 > 0.72 ? 1 : 0;
+      } else if (biome.id === 'sakura') {
+        const isFuji = ((Math.abs(gx) + Math.abs(gz)) % 7 === 0) && rawZ > 265;
+        item.width = isFuji ? 96 : 38 + h0 * 32;
+        item.depth = isFuji ? 84 : 34 + h1 * 28;
+        item.height = isFuji ? 74 : 22 + h2 * 32;
+        item.kind = isFuji ? 2 : 0;
+      } else {
+        // Alpine massive faceted peaks
+        item.width = 42 + h0 * 38;
+        item.depth = 38 + h1 * 32;
+        item.height = (rawZ > 250 ? 38 : 26) + h2 * 48;
+        item.kind = h2 > 0.65 ? 1 : 0;
+      }
+    }
+  }
+
+  // Far-to-near painter's sort (zero-alloc insertion sort)
+  for (let i = 1; i < count; i++) {
+    const key = VISTA_POOL[i];
+    let j = i - 1;
+    while (j >= 0 && VISTA_POOL[j].rawZ < key.rawZ) {
+      VISTA_POOL[j + 1] = VISTA_POOL[j];
+      j--;
+    }
+    VISTA_POOL[j + 1] = key;
+  }
+
+  const baseY = VALLEY_BASE_Y - 5.5;
+  const isRedMoon = skyId === 'red_moon';
+  const isSunset = skyId === 'golden_sunset';
+  const isAurora = skyId === 'aurora_night';
+
+  for (let i = 0; i < count; i++) {
+    const v = VISTA_POOL[i];
+    const fade = computeVistaFadeAlpha(v.rawZ);
+    if (fade <= 0.02) continue;
+
+    const farBlend = v.rawZ > 275;
+    ctx.globalAlpha = fade * (farBlend ? 0.84 : 0.96);
+
+    if (biome.id === 'neon') {
+      // 3D Extruded Bayfront Skyscrapers & 3D Suspension Bridge Spans
+      if (v.kind === 2) {
+        // Long 3D Distant Suspension Bridge spanning across the horizon
+        const spanW = 58;
+        const towerH = v.height * 0.78;
+        const deckY = baseY + 11;
+        const okL0 = projectInto(v.wx - spanW * 0.5, baseY, v.wz, wp0, 1.0);
+        const okR0 = projectInto(v.wx + spanW * 0.5, baseY, v.wz, wp1, 1.0);
+        const okLT = projectInto(v.wx - spanW * 0.5, baseY + towerH, v.wz, wp2, 1.0);
+        const okRT = projectInto(v.wx + spanW * 0.5, baseY + towerH, v.wz, wp3, 1.0);
+        const okDL = projectInto(v.wx - spanW * 1.15, deckY, v.wz, wp4, 1.0);
+        const okDR = projectInto(v.wx + spanW * 1.15, deckY, v.wz, wp5, 1.0);
+        if (okL0 && okR0 && okLT && okRT && okDL && okDR) {
+          ctx.strokeStyle = isRedMoon ? '#881337' : '#334155';
+          ctx.lineWidth = Math.max(2, Math.round(0.45 * wp0.scale));
+          ctx.beginPath();
+          ctx.moveTo(Math.round(wp0.x), Math.round(wp0.y));
+          ctx.lineTo(Math.round(wp2.x), Math.round(wp2.y));
+          ctx.moveTo(Math.round(wp1.x), Math.round(wp1.y));
+          ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y));
+          ctx.moveTo(Math.round(wp4.x), Math.round(wp4.y));
+          ctx.lineTo(Math.round(wp5.x), Math.round(wp5.y));
+          ctx.stroke();
+
+          // Catenary main cables + deck glow
+          ctx.strokeStyle = isRedMoon ? '#fda4af' : '#38bdf8';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(Math.round(wp4.x), Math.round(wp4.y));
+          ctx.quadraticCurveTo(
+            Math.round((wp4.x + wp2.x) * 0.5),
+            Math.round(wp4.y - 4),
+            Math.round(wp2.x),
+            Math.round(wp2.y)
+          );
+          ctx.quadraticCurveTo(
+            Math.round((wp2.x + wp3.x) * 0.5),
+            Math.round(wp4.y - 2),
+            Math.round(wp3.x),
+            Math.round(wp3.y)
+          );
+          ctx.quadraticCurveTo(
+            Math.round((wp3.x + wp5.x) * 0.5),
+            Math.round(wp5.y - 4),
+            Math.round(wp5.x),
+            Math.round(wp5.y)
+          );
+          ctx.stroke();
+
+          ctx.fillStyle = '#f43f5e';
+          ctx.fillRect(Math.round(wp2.x) - 1, Math.round(wp2.y) - 2, 2, 2);
+          ctx.fillRect(Math.round(wp3.x) - 1, Math.round(wp3.y) - 2, 2, 2);
+        }
+        continue;
+      }
+
+      const hw = v.width * 0.5;
+      const hd = v.depth * 0.5;
+      const isLeft = v.lat < 0;
+      const frontZ = v.wz + (fwdZ < 0 ? hd : -hd);
+      const backZ = v.wz - (fwdZ < 0 ? hd : -hd);
+      const sideX = isLeft ? v.wx + hw : v.wx - hw;
+
+      const okFL = projectInto(v.wx - hw, baseY, frontZ, wp0, 1.0);
+      const okFR = projectInto(v.wx + hw, baseY, frontZ, wp1, 1.0);
+      const okTR = projectInto(v.wx + hw, baseY + v.height, frontZ, wp2, 1.0);
+      const okTL = projectInto(v.wx - hw, baseY + v.height, frontZ, wp3, 1.0);
+      if (!okFL || !okFR || !okTR || !okTL) continue;
+      if (Math.max(wp0.x, wp1.x) < -24 || Math.min(wp0.x, wp1.x) > pxW + 24) continue;
+
+      const frontCol = isRedMoon
+        ? farBlend ? '#2d0b19' : '#1f0710'
+        : skyIsNight
+        ? farBlend ? '#1e293b' : '#111827'
+        : farBlend ? '#475569' : '#334155';
+      const sideCol = isRedMoon ? '#14040a' : skyIsNight ? '#090e1a' : '#1e293b';
+
+      drawQuadDirect(ctx, wp0, wp1, wp2, wp3, frontCol);
+
+      if (
+        projectInto(sideX, baseY, backZ, wp4, 1.0) &&
+        projectInto(sideX, baseY + v.height, backZ, wp5, 1.0)
+      ) {
+        const eb = isLeft ? wp1 : wp0;
+        const et = isLeft ? wp2 : wp3;
+        drawQuadDirect(ctx, eb, wp4, wp5, et, sideCol);
+      }
+
+      // Illuminated neon roof crown + subtle interior window grid on mid-range towers
+      const crownCol = isRedMoon
+        ? '#fda4af'
+        : v.seed > 0.65
+        ? '#22d3ee'
+        : v.seed > 0.32
+        ? '#f472b6'
+        : '#facc15';
+      ctx.strokeStyle = crownCol;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(wp3.x), Math.round(wp3.y));
+      ctx.lineTo(Math.round(wp2.x), Math.round(wp2.y));
+      ctx.stroke();
+
+      const scrW = Math.abs(wp1.x - wp0.x);
+      const scrH = Math.abs(wp0.y - wp3.y);
+      if (scrW >= 7 && scrH >= 14 && v.rawZ < 310) {
+        const lx = Math.round(Math.min(wp0.x, wp1.x)) + 2;
+        const rx = Math.round(Math.max(wp0.x, wp1.x)) - 2;
+        const ty = Math.round(wp3.y) + 3;
+        const by = Math.round(Math.min(wp0.y, wp1.y)) - 3;
+        ctx.fillStyle = isRedMoon ? '#fda4af' : v.kind === 1 ? '#bae6fd' : '#fef08a';
+        for (let wy = ty; wy < by; wy += 4) {
+          for (let wx2 = lx; wx2 < rx; wx2 += 3) {
+            if (((wx2 + wy) & 3) !== 0) {
+              ctx.fillRect(wx2, wy, 1, 2);
+            }
+          }
+        }
+      }
+      continue;
+    }
+
+    if (biome.id === 'canyon') {
+      // Sculpted 3D Monument Valley Flat-Top Sandstone Mesas & Stratified Buttes
+      const botHW = v.width * 0.56;
+      const topHW = v.width * (v.kind === 1 ? 0.28 : 0.38);
+      const peakY = baseY + v.height;
+      const ridgeX = v.wx + (v.seed - 0.5) * v.width * 0.16;
+
+      const okBL = projectInto(v.wx - botHW, baseY, v.wz, wp0, 1.0);
+      const okBM = projectInto(ridgeX, baseY, v.wz + v.depth * 0.25, wp1, 1.0);
+      const okBR = projectInto(v.wx + botHW, baseY, v.wz, wp2, 1.0);
+      const okTL = projectInto(ridgeX - topHW, peakY, v.wz + v.depth * 0.08, wp3, 1.0);
+      const okTR = projectInto(ridgeX + topHW, peakY, v.wz + v.depth * 0.08, wp4, 1.0);
+      if (!okBL || !okBM || !okBR || !okTL || !okTR) continue;
+      if (Math.max(wp0.x, wp2.x) < -30 || Math.min(wp0.x, wp2.x) > pxW + 30) continue;
+
+      const litFace = skyIsNight ? mtnFarColor : farBlend ? '#c2410c' : '#ea580c';
+      const darkFace = skyIsNight ? mtnNearColor : farBlend ? '#7c2d12' : '#9a3412';
+      drawQuadDirect(ctx, wp0, wp1, wp4, wp3, litFace);
+      drawQuadDirect(ctx, wp1, wp2, wp4, wp4, darkFace);
+
+      // Sunlit horizontal sedimentary rim on flat plateau crest
+      ctx.strokeStyle = skyIsNight ? 'rgba(148, 163, 184, 0.35)' : isSunset ? '#fed7aa' : '#fdba74';
+      ctx.lineWidth = Math.max(1, Math.round(0.32 * wp3.scale));
+      ctx.beginPath();
+      ctx.moveTo(Math.round(wp3.x), Math.round(wp3.y));
+      ctx.lineTo(Math.round(wp4.x), Math.round(wp4.y));
+      ctx.stroke();
+      continue;
+    }
+
+    // ALPINE & SAKURA: True 3D Faceted Mountains + Majestic Snow-Capped Mt. Fuji
+    const hw = v.width * 0.5;
+    const peakY = baseY + v.height;
+    const isFuji = biome.id === 'sakura' && v.kind === 2;
+    const peakOffset = isFuji ? 0 : (v.seed - 0.5) * hw * 0.42;
+
+    const okBL = projectInto(v.wx - hw, baseY, v.wz, wp0, 1.0);
+    const okBM = projectInto(v.wx + peakOffset * 0.4, baseY, v.wz + v.depth * 0.38, wp1, 1.0);
+    const okBR = projectInto(v.wx + hw, baseY, v.wz, wp2, 1.0);
+    const okPkL = projectInto(v.wx + peakOffset - (isFuji ? 9.5 : 0), peakY, v.wz, wp3, 1.0);
+    const okPkR = isFuji
+      ? projectInto(v.wx + peakOffset + 9.5, peakY, v.wz, wp4, 1.0)
+      : okPkL;
+    if (!okBL || !okBM || !okBR || !okPkL || !okPkR) continue;
+    if (Math.max(wp0.x, wp2.x) < -36 || Math.min(wp0.x, wp2.x) > pxW + 36) continue;
+
+    const litCol = farBlend ? mtnFarColor : mtnNearColor;
+    const shadowCol = isRedMoon
+      ? '#260814'
+      : skyIsNight
+      ? '#0f172a'
+      : biome.id === 'sakura'
+      ? farBlend ? '#475569' : '#334155'
+      : farBlend ? '#334155' : '#1e293b';
+
+    if (isFuji) {
+      drawQuadDirect(ctx, wp0, wp1, wp4, wp3, litCol);
+      drawTriProjected(ctx, wp1, wp2, wp4, shadowCol);
+    } else {
+      drawTriProjected(ctx, wp0, wp1, wp3, litCol);
+      drawTriProjected(ctx, wp1, wp2, wp3, shadowCol);
+    }
+
+    // Sculpted Snowcaps on tall 3D summits & Mt. Fuji
+    if (isFuji || v.height > 44) {
+      const snowBaseY = baseY + v.height * (isFuji ? 0.62 : 0.72);
+      const snowHW = hw * (isFuji ? 0.38 : 0.28);
+      const okSL = projectInto(v.wx + peakOffset - snowHW, snowBaseY, v.wz + v.depth * 0.11, wp5, 1.0);
+      const okSM = projectInto(v.wx + peakOffset * 0.6, snowBaseY - 1.5, v.wz + v.depth * 0.14, wp6, 1.0);
+      const okSR = projectInto(v.wx + peakOffset + snowHW, snowBaseY, v.wz + v.depth * 0.11, wp7, 1.0);
+      if (okSL && okSM && okSR) {
+        const snowLit = isRedMoon
+          ? '#fda4af'
+          : isSunset
+          ? '#fed7aa'
+          : isAurora
+          ? '#cffafe'
+          : '#f8fafc';
+        const snowShade = isRedMoon ? '#9f1239' : isSunset ? '#fb923c' : '#cbd5e1';
+        if (isFuji) {
+          drawQuadDirect(ctx, wp5, wp6, wp4, wp3, snowLit);
+          drawTriProjected(ctx, wp6, wp7, wp4, snowShade);
+        } else {
+          drawTriProjected(ctx, wp5, wp6, wp3, snowLit);
+          drawTriProjected(ctx, wp6, wp7, wp3, snowShade);
+        }
+      }
+    }
+  }
+
+  ctx.globalAlpha = 1.0;
+}
+
+

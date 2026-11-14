@@ -23,9 +23,28 @@ import {
   resolveRoadBiome,
 } from './game/rules';
 import { GamePhase, LiveTelemetry, SceneCanvas } from './game/SceneCanvas';
+import { getPixelCarCanvas } from './game/pixelSprites';
+import {
+  CAR_PARTS_META,
+  CarDamageMap,
+  CarDamageState,
+  CarPartId,
+  computeDamagedStats,
+  countDamagedParts,
+  getCarOverallIntegrity,
+  getDamageVisualCacheKey,
+  getFullRepairCost,
+  getPartRepairCost,
+  isCarTotaled,
+  loadSavedDamageMap,
+  normalizeCarDamageState,
+  repairAllParts,
+  repairSinglePart,
+  saveDamageMap,
+} from './game/damage';
 import { SKY_THEME_OPTIONS, SkyThemeId } from './game/skyArt';
 import { AudioDeckSnapshot, JukeboxTrack, soundFX } from './game/audio';
-import { GarageModal } from './components/GarageModal';
+import { GarageModal, GarageTabId } from './components/GarageModal';
 import { LeaderboardEntry, LeaderboardModal } from './components/LeaderboardModal';
 import { ArtGalleryModal } from './components/ArtGalleryModal';
 import { SteeringWheel } from './components/SteeringWheel';
@@ -34,11 +53,55 @@ import { MissionModal } from './components/MissionModal';
 import { GameSettings, SettingsModal, loadGameSettings } from './components/SettingsModal';
 import { ShareCardModal } from './components/ShareCardModal';
 import {
-  getClaimableMissionsCount,
+  MissionType,
   getDailyMissions,
-  hasClaimableMissions,
+  getTechnicalMissions,
+  getTotalClaimableMissionsCount,
   recordMissionProgress,
 } from './game/missions';
+import { ParkingGear } from './game/parking';
+
+const WreckedCarPreviewCanvas: React.FC<{
+  car: CarSpec;
+  customization: CarCustomization;
+  damage: CarDamageState;
+}> = ({ car, customization, damage }) => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const dmgKey = getDamageVisualCacheKey(damage);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const src = getPixelCarCanvas(
+      car,
+      -0.55,
+      false,
+      false,
+      0,
+      customization,
+      'coast',
+      false,
+      -0.55,
+      0.37,
+      damage
+    );
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+  }, [car, customization, damage, dmgKey]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={144}
+      height={108}
+      style={{ imageRendering: 'pixelated' }}
+      className="w-28 h-20 object-contain shrink-0 rounded-lg bg-slate-900/90 border border-slate-800"
+    />
+  );
+};
 
 const INITIAL_UPGRADES: Record<string, CarUpgradeLevels> = {
   blue_jdm: { speed: 1, handling: 1, magnet: 1 },
@@ -91,6 +154,8 @@ export default function App() {
     return {};
   });
   const [customSpriteUrl, setCustomSpriteUrl] = useState<string>('');
+  const [carDamageMap, setCarDamageMap] = useState<CarDamageMap>(() => loadSavedDamageMap());
+  const [garageInitialTab, setGarageInitialTab] = useState<GarageTabId>('body');
   const [roadMode, setRoadMode] = useState<RoadSelectionMode>(() => {
     if (typeof window === 'undefined') return 'tour';
     try {
@@ -113,11 +178,11 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     const qMode = params.get('mode');
     if (qMode === 'traffic' || qMode === 'highway_traffic') return 'highway_traffic';
+    if (qMode === 'parking' || qMode === 'park') return 'parking';
     if (qMode === 'drift') return 'drift';
-    if (qMode === 'zen') return 'zen';
     try {
       const saved = window.localStorage.getItem('apex_slash_mode_v1');
-      if (saved === 'highway_traffic' || saved === 'drift' || saved === 'zen') return saved;
+      if (saved === 'highway_traffic' || saved === 'drift' || saved === 'parking') return saved;
     } catch {}
     return 'drift';
   });
@@ -184,11 +249,7 @@ export default function App() {
     try {
       window.localStorage.setItem('apex_slash_mode_v1', mode);
     } catch {}
-    if (mode === 'zen') {
-      const lofiTrack = soundFX.switchJukeboxTrack('lofi');
-      showJukeboxTrackToast(lofiTrack);
-    }
-  }, [showJukeboxTrackToast]);
+  }, []);
 
   const handleSelectRoadMode = useCallback((mode: RoadSelectionMode) => {
     setRoadMode(mode);
@@ -207,6 +268,13 @@ export default function App() {
   // Imperative simulation triggers passed into SceneCanvas
   const [steerHold, setSteerHold] = useState<number>(0);
   const [keySteerVisual, setKeySteerVisual] = useState<number>(0);
+  const [pedalGas, setPedalGas] = useState<boolean>(false);
+  const [pedalBrake, setPedalBrake] = useState<boolean>(false);
+  const [pedalHandbrake, setPedalHandbrake] = useState<boolean>(false);
+  const [keyGasVisual, setKeyGasVisual] = useState<boolean>(false);
+  const [keyBrakeVisual, setKeyBrakeVisual] = useState<boolean>(false);
+  const [keyHandbrakeVisual, setKeyHandbrakeVisual] = useState<boolean>(false);
+  const [parkingGear, setParkingGear] = useState<ParkingGear>('D');
   const [flipTriggerCount, setFlipTriggerCount] = useState<number>(0);
   const [boostTriggerCount, setBoostTriggerCount] = useState<number>(0);
   const [restartTriggerCount, setRestartTriggerCount] = useState<number>(0);
@@ -256,6 +324,7 @@ export default function App() {
     overtakes?: number;
     nearMisses?: number;
     crashReason?: string;
+    isVictory?: boolean;
   }>({
     score: 0,
     distance: 0,
@@ -264,6 +333,7 @@ export default function App() {
     overtakes: 0,
     nearMisses: 0,
     crashReason: 'Guardrail Breached',
+    isVictory: false,
   });
 
   // Modals & Collapsible Bottom Dock
@@ -272,6 +342,7 @@ export default function App() {
   const [isArtGalleryOpen, setIsArtGalleryOpen] = useState<boolean>(false);
   const [isDailySpinOpen, setIsDailySpinOpen] = useState<boolean>(false);
   const [isMissionsOpen, setIsMissionsOpen] = useState<boolean>(false);
+  const [missionModalTab, setMissionModalTab] = useState<'daily' | 'tech'>('daily');
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isShareCardOpen, setIsShareCardOpen] = useState<boolean>(false);
   const [gameSettings, setGameSettings] = useState<GameSettings>(() => loadGameSettings());
@@ -306,10 +377,94 @@ export default function App() {
     ...carCustomizations[selectedCar.id],
     number: carCustomizations[selectedCar.id]?.number || selectedCar.decalText || '73',
   };
+  const activeCarDamage: CarDamageState = normalizeCarDamageState(carDamageMap[selectedCar.id]);
+  const activeOverallIntegrity = getCarOverallIntegrity(activeCarDamage);
+  const activeDamageCounts = countDamagedParts(activeCarDamage);
+  const activeIsTotaled = isCarTotaled(activeCarDamage);
+  const activeRepairCost = getFullRepairCost(activeCarDamage);
+
   const activeAppearance = resolveCarAppearance(selectedCar, activeCarCustom);
-  const activeStats = computeEffectiveCarStats(selectedCar, activeCarUpgrades, activeCarCustom);
+  const activeStats = computeDamagedStats(
+    computeEffectiveCarStats(selectedCar, activeCarUpgrades, activeCarCustom),
+    activeCarDamage
+  );
   const activeEngineOption =
     ENGINE_OPTIONS.find((e) => e.id === activeAppearance.engine) || ENGINE_OPTIONS[0];
+
+  const openGarageTab = useCallback((tab: GarageTabId) => {
+    setGarageInitialTab(tab);
+    setIsGarageOpen(true);
+  }, []);
+
+  const handleActiveCarDamageChange = useCallback(
+    (nextDamage: CarDamageState) => {
+      setCarDamageMap((prev) => {
+        const nextMap: CarDamageMap = {
+          ...prev,
+          [selectedCar.id]: normalizeCarDamageState(nextDamage),
+        };
+        saveDamageMap(nextMap);
+        return nextMap;
+      });
+    },
+    [selectedCar.id]
+  );
+
+  const handleRepairPart = useCallback(
+    (carId: string, partId: CarPartId, useEmergencyFree = false) => {
+      const currentDmg = normalizeCarDamageState(carDamageMap[carId]);
+      const cost = getPartRepairCost(partId, currentDmg[partId]);
+      if (cost <= 0) return;
+
+      const payWithCoins = !useEmergencyFree && coins >= cost;
+      if (!payWithCoins && !useEmergencyFree) return;
+
+      if (payWithCoins) {
+        const nextCoins = coins - cost;
+        setCoins(nextCoins);
+        try {
+          window.localStorage.setItem('neon_coins_v1', String(nextCoins));
+        } catch {}
+      }
+
+      const nextDmg = repairSinglePart(currentDmg, partId);
+      setCarDamageMap((prev) => {
+        const nextMap: CarDamageMap = { ...prev, [carId]: nextDmg };
+        saveDamageMap(nextMap);
+        return nextMap;
+      });
+      soundFX.playRepairWrench();
+    },
+    [carDamageMap, coins]
+  );
+
+  const handleRepairAll = useCallback(
+    (carId: string, useEmergencyFree = false) => {
+      const currentDmg = normalizeCarDamageState(carDamageMap[carId]);
+      const cost = getFullRepairCost(currentDmg);
+      if (cost <= 0) return;
+
+      const payWithCoins = !useEmergencyFree && coins >= cost;
+      if (!payWithCoins && !useEmergencyFree) return;
+
+      if (payWithCoins) {
+        const nextCoins = coins - cost;
+        setCoins(nextCoins);
+        try {
+          window.localStorage.setItem('neon_coins_v1', String(nextCoins));
+        } catch {}
+      }
+
+      const nextDmg = repairAllParts();
+      setCarDamageMap((prev) => {
+        const nextMap: CarDamageMap = { ...prev, [carId]: nextDmg };
+        saveDamageMap(nextMap);
+        return nextMap;
+      });
+      soundFX.playRepairWrench();
+    },
+    [carDamageMap, coins]
+  );
 
   // Mirror gamePhase to document.body.dataset.state & clear held controls when leaving 'playing'
   useEffect(() => {
@@ -317,6 +472,12 @@ export default function App() {
     if (gamePhase !== 'playing') {
       setSteerHold(0);
       setKeySteerVisual(0);
+      setPedalGas(false);
+      setPedalBrake(false);
+      setPedalHandbrake(false);
+      setKeyGasVisual(false);
+      setKeyBrakeVisual(false);
+      setKeyHandbrakeVisual(false);
     }
   }, [gamePhase]);
 
@@ -448,12 +609,23 @@ export default function App() {
     if (document.activeElement instanceof HTMLElement) {
       document.activeElement.blur();
     }
+    if (activeIsTotaled) {
+      openGarageTab('repair');
+      return;
+    }
     prevTelemetryRef.current = {
       distance: 0,
       coinsRun: 0,
       overtakes: 0,
       nearMisses: 0,
     };
+    setPedalGas(false);
+    setPedalBrake(false);
+    setPedalHandbrake(false);
+    setKeyGasVisual(false);
+    setKeyBrakeVisual(false);
+    setKeyHandbrakeVisual(false);
+    setParkingGear('D');
     setIsGarageOpen(false);
     setIsLeaderboardOpen(false);
     setIsArtGalleryOpen(false);
@@ -465,9 +637,9 @@ export default function App() {
     setRestartTriggerCount((c) => c + 1);
     setGamePhase('playing');
     soundFX.unlockAndEnsureMusic().catch(() => {});
-  }, []);
+  }, [activeIsTotaled, openGarageTab]);
 
-  // End-of-Run Defeat Callback (after 3D fall-off & destruction animation finishes)
+  // End-of-Run Defeat / Victory Callback
   const handleGameOver = useCallback(
     async (finalStats: {
       score: number;
@@ -477,6 +649,7 @@ export default function App() {
       overtakes?: number;
       nearMisses?: number;
       crashReason?: string;
+      isVictory?: boolean;
     }) => {
       setLastRunStats(finalStats);
       const nextCoins = coins + finalStats.coinsCollected;
@@ -603,6 +776,19 @@ export default function App() {
     [bestScore, bestCombo, selectedCarId, unlockedCarIds, carUpgrades, customSpriteUrl, syncGarageToCloudSql]
   );
 
+  const handleMissionEvent = useCallback((event: Partial<Record<MissionType, number>>) => {
+    const { newlyCompleted } = recordMissionProgress(event);
+    if (newlyCompleted.length > 0) {
+      const latest = newlyCompleted[newlyCompleted.length - 1];
+      setMissionToast({ title: latest.title, reward: latest.reward });
+      soundFX.playFeverBurst();
+      if (missionToastTimerRef.current) window.clearTimeout(missionToastTimerRef.current);
+      missionToastTimerRef.current = window.setTimeout(() => {
+        setMissionToast(null);
+      }, 3600);
+    }
+  }, []);
+
   // Unified Keyboard Input Hub (Edge-Triggered One-Shots & Blur Hygiene)
   const keysHeldRef = useRef<Set<string>>(new Set());
 
@@ -613,6 +799,16 @@ export default function App() {
       const rightHeld =
         keysHeldRef.current.has('ArrowRight') || keysHeldRef.current.has('KeyD');
       setKeySteerVisual((rightHeld ? 1 : 0) - (leftHeld ? 1 : 0));
+    };
+
+    const syncKeyboardPedalVisuals = () => {
+      setKeyGasVisual(
+        keysHeldRef.current.has('ArrowUp') || keysHeldRef.current.has('KeyW')
+      );
+      setKeyBrakeVisual(
+        keysHeldRef.current.has('ArrowDown') || keysHeldRef.current.has('KeyS')
+      );
+      setKeyHandbrakeVisual(keysHeldRef.current.has('Space'));
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
@@ -671,7 +867,7 @@ export default function App() {
           e.preventDefault();
           handleStartRun();
         } else if (code === 'KeyG') {
-          setIsGarageOpen(true);
+          openGarageTab(activeDamageCounts.totalDamaged > 0 ? 'repair' : 'body');
         }
         return;
       }
@@ -691,6 +887,10 @@ export default function App() {
           syncKeyboardSteerVisual();
           return;
         }
+        if (code === 'ArrowUp' || code === 'KeyW' || code === 'ArrowDown' || code === 'KeyS') {
+          syncKeyboardPedalVisuals();
+          return;
+        }
         if (code === 'KeyF') {
           e.preventDefault();
           triggerFlashAction();
@@ -703,7 +903,10 @@ export default function App() {
         }
         if (code === 'Space' || code === 'ShiftLeft' || code === 'ShiftRight') {
           e.preventDefault();
-          setBoostTriggerCount((c) => c + 1);
+          syncKeyboardPedalVisuals();
+          if (gameMode !== 'parking') {
+            setBoostTriggerCount((c) => c + 1);
+          }
         }
       } else if (gamePhase === 'paused') {
         if (code === 'Escape' || code === 'KeyP' || code === 'Space' || code === 'Enter') {
@@ -723,12 +926,24 @@ export default function App() {
       ) {
         syncKeyboardSteerVisual();
       }
+      if (
+        e.code === 'ArrowUp' ||
+        e.code === 'KeyW' ||
+        e.code === 'ArrowDown' ||
+        e.code === 'KeyS' ||
+        e.code === 'Space'
+      ) {
+        syncKeyboardPedalVisuals();
+      }
     };
 
     const onWindowBlur = () => {
       keysHeldRef.current.clear();
       setSteerHold(0);
       setKeySteerVisual(0);
+      setKeyGasVisual(false);
+      setKeyBrakeVisual(false);
+      setKeyHandbrakeVisual(false);
     };
 
     window.addEventListener('keydown', onKeyDown);
@@ -741,9 +956,14 @@ export default function App() {
     };
   }, [
     gamePhase,
+    gameMode,
     isGarageOpen,
     isLeaderboardOpen,
     isArtGalleryOpen,
+    isDailySpinOpen,
+    isMissionsOpen,
+    isSettingsOpen,
+    isShareCardOpen,
     handleStartRun,
     triggerFlashAction,
     triggerHornAction,
@@ -838,10 +1058,18 @@ export default function App() {
         selectedCar={selectedCar}
         carUpgrades={activeCarUpgrades}
         carCustom={activeCarCustom}
+        carDamage={activeCarDamage}
+        onCarDamageChange={handleActiveCarDamageChange}
         customSpriteUrl={customSpriteUrl}
         roadMode={roadMode}
         skyMode={skyMode}
         steerHold={steerHold}
+        pedalGas={pedalGas}
+        pedalBrake={pedalBrake}
+        pedalHandbrake={pedalHandbrake}
+        parkingGear={parkingGear}
+        onParkingGearChange={setParkingGear}
+        onMissionEvent={handleMissionEvent}
         flipTriggerCount={flipTriggerCount}
         boostTriggerCount={boostTriggerCount}
         restartTriggerCount={restartTriggerCount}
@@ -937,19 +1165,19 @@ export default function App() {
           }}
         >
           {/* Top Utility Bar */}
-          <div className="w-full max-w-lg flex items-center justify-between gap-3 pointer-events-auto">
-            <div className="flex items-center gap-2 text-xs font-mono tabular-nums text-slate-200 truncate">
+          <div className="w-full max-w-6xl flex flex-wrap items-center justify-between gap-2.5 pointer-events-auto">
+            <div className="flex items-center gap-2 text-xs font-mono tabular-nums text-slate-100 px-3 py-1.5 rounded-lg bg-slate-900/95 border border-slate-700/90 shadow-sm shrink-0">
               <span
                 className="w-2.5 h-2.5 rounded-sm border border-white/40 shrink-0"
                 style={{ backgroundColor: activeAppearance.primaryColor }}
                 aria-hidden="true"
               />
-              <span className="font-semibold truncate">{selectedCar.name}</span>
+              <span className="font-semibold whitespace-nowrap">{selectedCar.name}</span>
               <span aria-hidden="true" className="text-slate-500">·</span>
-              <span className="text-amber-400 font-bold shrink-0">{Math.round(coins)} CR</span>
+              <span className="text-amber-400 font-bold shrink-0 whitespace-nowrap">{Math.round(coins)} CR</span>
             </div>
 
-            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            <div className="flex flex-wrap items-center justify-end gap-1.5 sm:gap-2">
               <button
                 type="button"
                 onClick={() => setIsDailySpinOpen(true)}
@@ -957,21 +1185,21 @@ export default function App() {
               >
                 <span>🎡 Daily Spin</span>
                 {isDailySpinReady() && (
-                  <span className="w-2 h-2 rounded-full bg-amber-400 absolute -top-0.5 -right-0.5 animate-ping" />
-                )}
-                {isDailySpinReady() && (
-                  <span className="w-2 h-2 rounded-full bg-amber-400 absolute -top-0.5 -right-0.5" />
+                  <span className="w-2 h-2 rounded-full bg-amber-400 absolute -top-0.5 -right-0.5 shadow-sm" />
                 )}
               </button>
               <button
                 type="button"
-                onClick={() => setIsMissionsOpen(true)}
+                onClick={() => {
+                  setMissionModalTab(gameMode === 'parking' ? 'tech' : 'daily');
+                  setIsMissionsOpen(true);
+                }}
                 className="relative min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-purple-500/50 text-xs font-semibold text-purple-300 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5"
               >
                 <span>📋 Missions</span>
-                {hasClaimableMissions() && (
-                  <span className="px-1.5 py-0.2 rounded-full bg-rose-500 text-white text-[9px] font-mono font-bold animate-pulse absolute -top-1.5 -right-1.5 shadow-sm">
-                    {getClaimableMissionsCount()}
+                {getTotalClaimableMissionsCount() > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full bg-rose-500 text-white text-[9px] font-mono font-bold absolute -top-1.5 -right-1.5 shadow-sm">
+                    {getTotalClaimableMissionsCount()}
                   </span>
                 )}
               </button>
@@ -1071,8 +1299,8 @@ export default function App() {
                 fontSize="10"
                 letterSpacing="1.8"
               >
-                {gameMode === 'zen'
-                  ? 'ZEN CRUISE · ENDLESS RELAXATION'
+                {gameMode === 'parking'
+                  ? 'PRECISION PARKING · VALET & GYMKHANA'
                   : gameMode === 'highway_traffic'
                   ? 'HIGHWAY TRAFFIC · OVERTAKE CLASH'
                   : 'TOKYO TOUGE · 3D PIXEL DRIFT'}
@@ -1099,11 +1327,24 @@ export default function App() {
                   {activeEngineOption.label}
                 </span>
               </div>
-              <div className="flex items-center gap-2 shrink-0 font-mono tabular-nums text-[11px] text-amber-400">
+              <div className="flex items-center gap-1.5 shrink-0 font-mono tabular-nums text-[11px] text-amber-400">
+                {activeOverallIntegrity < 100 && (
+                  <button
+                    type="button"
+                    onClick={() => openGarageTab('repair')}
+                    className={`px-1.5 py-0.5 rounded font-bold text-[10px] border transition-colors whitespace-nowrap ${
+                      activeIsTotaled
+                        ? 'bg-rose-500/20 border-rose-500/60 text-rose-300 hover:bg-rose-500/30'
+                        : 'bg-amber-500/20 border-amber-500/50 text-amber-300 hover:bg-amber-500/30'
+                    }`}
+                  >
+                    CHASSIS {activeOverallIntegrity}%
+                  </button>
+                )}
                 <span>{Math.round(activeStats.topSpeed * 8)} KM/H</span>
                 <button
                   type="button"
-                  onClick={() => setIsGarageOpen(true)}
+                  onClick={() => openGarageTab('body')}
                   className="px-2 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-100 font-sans font-semibold text-[11px] whitespace-nowrap"
                 >
                   Tune
@@ -1139,15 +1380,15 @@ export default function App() {
               </button>
               <button
                 type="button"
-                data-mode-id="zen"
-                onClick={() => handleSelectGameMode('zen')}
+                data-mode-id="parking"
+                onClick={() => handleSelectGameMode('parking')}
                 className={`min-h-[40px] px-2 py-1.5 rounded-lg text-xs font-display font-bold tracking-wide transition-colors whitespace-nowrap ${
-                  gameMode === 'zen'
+                  gameMode === 'parking'
                     ? 'bg-emerald-400 text-slate-950'
                     : 'bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-800'
                 }`}
               >
-                Zen Cruise
+                Parking
               </button>
             </div>
 
@@ -1212,14 +1453,22 @@ export default function App() {
               })}
             </div>
 
-            {/* Primary Launch CTA */}
+            {/* Primary Launch CTA (Blocked cleanly to Repair Bay if Chassis is Totaled) */}
             <button
               type="button"
               data-start="true"
               onClick={handleStartRun}
-              className="w-full min-h-[50px] py-3 px-5 rounded-xl bg-amber-500 hover:bg-amber-400 active:scale-[0.99] text-slate-950 font-display font-bold text-lg tracking-wider shadow-lg transition-transform whitespace-nowrap"
+              className={`w-full min-h-[50px] py-3 px-5 rounded-xl active:scale-[0.99] font-display font-bold text-lg tracking-wider shadow-lg transition-transform whitespace-nowrap ${
+                activeIsTotaled
+                  ? 'bg-rose-500 hover:bg-rose-400 text-white'
+                  : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+              }`}
             >
-              {gameMode === 'highway_traffic'
+              {activeIsTotaled
+                ? `🔧 Repair Car to Race (${activeOverallIntegrity}%)`
+                : gameMode === 'parking'
+                ? 'Launch Parking Test'
+                : gameMode === 'highway_traffic'
                 ? 'Launch Highway Run'
                 : 'Launch Drift Run'}
             </button>
@@ -1228,10 +1477,12 @@ export default function App() {
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={() => setIsGarageOpen(true)}
+                onClick={() => openGarageTab(activeDamageCounts.totalDamaged > 0 ? 'repair' : 'body')}
                 className="min-h-[42px] py-2 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-100 text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap"
               >
-                Garage ({unlockedCarIds.length}/{CAR_ROSTER.length} Cars)
+                {activeDamageCounts.totalDamaged > 0
+                  ? `Repair Bay (${activeDamageCounts.totalDamaged} Damaged)`
+                  : `Garage (${unlockedCarIds.length}/${CAR_ROSTER.length} Cars)`}
               </button>
               <button
                 type="button"
@@ -1243,8 +1494,8 @@ export default function App() {
             </div>
 
             <p className="text-center text-[10px] sm:text-xs text-slate-300 pt-0.5 leading-tight flex items-center justify-center gap-1.5 font-mono">
-              <span className="text-cyan-400">📱 Mobile Ready:</span>
-              <span>Tap to Drift · Pedals &amp; Wheel for Traffic · 3D Garage</span>
+              <span className="text-cyan-400">📱 Controls:</span>
+              <span>Wheel · Gas/Brake Pedals · P/R/D Shifter · Flash [F]</span>
             </p>
           </div>
         </div>
@@ -1298,13 +1549,25 @@ export default function App() {
 
                 <div className="pl-2 sm:pl-3 border-l border-slate-800">
                   <span className="block text-[9px] sm:text-[10px] font-semibold tracking-wider text-slate-400">
-                    {gameMode === 'highway_traffic' ? 'PASSES' : 'DIR'}
+                    {gameMode === 'parking'
+                      ? 'STAGE'
+                      : gameMode === 'highway_traffic'
+                      ? 'PASSES'
+                      : 'DIR'}
                   </span>
                   <span
                     className="text-lg sm:text-2xl font-bold font-mono tabular-nums text-cyan-400"
-                    data-testid={gameMode === 'highway_traffic' ? 'hud-passes' : 'hud-dir'}
+                    data-testid={
+                      gameMode === 'parking'
+                        ? 'hud-stage'
+                        : gameMode === 'highway_traffic'
+                        ? 'hud-passes'
+                        : 'hud-dir'
+                    }
                   >
-                    {gameMode === 'highway_traffic'
+                    {gameMode === 'parking'
+                      ? `${telemetry.parking?.stageNum || 1}/${telemetry.parking?.totalStages || 6}`
+                      : gameMode === 'highway_traffic'
                       ? Math.round(telemetry.overtakes || 0)
                       : telemetry.direction === 'right'
                       ? '/'
@@ -1398,7 +1661,180 @@ export default function App() {
             </div>
           )}
 
-          {/* Ephemeral Near-Miss / Fever / Flash / Milestone Callout Banner */}
+          {/* Surround Park-Assist & Stage Mission Telemetry Bar (Parking Mode Only) */}
+          {gameMode === 'parking' && telemetry.parking && (() => {
+            const pk = telemetry.parking;
+            const sinH = Math.sin(pk.carHeading + Math.PI / 2);
+            const cosH = Math.cos(pk.carHeading + Math.PI / 2);
+            const toRadar = (wx: number, wz: number) => {
+              const dx = wx - pk.carX;
+              const dz = wz - pk.carZ;
+              return {
+                x: dx * cosH + dz * sinH,
+                y: -dx * sinH + dz * cosH,
+              };
+            };
+            const bayLocal = toRadar(pk.bayX, pk.bayZ);
+            const bayRelDeg = ((pk.bayHeading - pk.carHeading) * 180) / Math.PI;
+            const sensCol = (intensity: number) =>
+              intensity >= 0.72 ? '#f43f5e' : intensity >= 0.35 ? '#f59e0b' : '#34d399';
+            const bayStroke =
+              pk.lockProgress > 0.05
+                ? '#34d399'
+                : pk.isInsideBox
+                ? '#22d3ee'
+                : '#f59e0b';
+
+            return (
+              <div
+                className="w-full max-w-2xl mx-auto mt-2 rounded-2xl border border-slate-700/85 px-3 py-2 shadow-xl flex items-center justify-between gap-3"
+                style={{ backgroundColor: 'rgba(9, 13, 24, 0.88)' }}
+                data-testid="parking-assist-hud"
+              >
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/50 text-[10px] font-mono font-bold text-emerald-300">
+                      STAGE {pk.stageNum}/{pk.totalStages}
+                    </span>
+                    <span className="text-xs sm:text-sm font-display font-bold text-white truncate">
+                      {pk.stageTitle}
+                    </span>
+                    <span
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold border ${
+                        pk.hits >= pk.maxHits - 1
+                          ? 'bg-rose-500/20 border-rose-400/60 text-rose-300'
+                          : pk.hits > 0
+                          ? 'bg-amber-500/20 border-amber-400/60 text-amber-300'
+                          : 'bg-slate-800/90 border-slate-700 text-slate-300'
+                      }`}
+                    >
+                      HITS {pk.hits}/{pk.maxHits}
+                    </span>
+                  </div>
+
+                  <p className="text-[11px] text-slate-200 leading-snug truncate">
+                    {pk.instruction}
+                  </p>
+
+                  <div className="flex items-center gap-3 text-[10px] font-mono tabular-nums">
+                    <span className={pk.distM <= 1.1 ? 'text-emerald-400 font-bold' : 'text-cyan-300'}>
+                      BAY {pk.distM.toFixed(1)}m
+                    </span>
+                    <span className={pk.isAligned ? 'text-emerald-400 font-bold' : 'text-amber-300'}>
+                      ANGLE {Math.round(pk.angleErrDeg)}°
+                    </span>
+                    {pk.gatesTotal > 0 && (
+                      <span className={pk.gatesCleared >= pk.gatesTotal ? 'text-emerald-400 font-bold' : 'text-slate-300'}>
+                        GATES {pk.gatesCleared}/{pk.gatesTotal}
+                      </span>
+                    )}
+                    <span className="text-slate-400 hidden sm:inline">
+                      CLEAR {pk.proximity.minClearanceM.toFixed(1)}m
+                    </span>
+                  </div>
+
+                  <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                    <div
+                      className={`h-full transition-transform origin-left ${
+                        pk.lockProgress > 0.05 ? 'bg-emerald-400' : pk.isInsideBox ? 'bg-cyan-400' : 'bg-amber-400'
+                      }`}
+                      style={{
+                        transform: `scaleX(${Math.max(0.02, Math.min(1, pk.lockProgress))})`,
+                      }}
+                    />
+                  </div>
+                </div>
+
+                {/* Compact 360 Surround Park-Assist Radar */}
+                <div className="shrink-0 w-[86px] h-[86px] sm:w-[96px] sm:h-[96px] rounded-xl bg-slate-950 border border-slate-700/90 p-1 flex flex-col items-center justify-center">
+                  <svg viewBox="-13 -13 26 26" className="w-full h-full overflow-hidden">
+                    <circle cx="0" cy="0" r="11" fill="none" stroke="#1e293b" strokeWidth="0.35" />
+                    <circle cx="0" cy="0" r="6" fill="none" stroke="#1e293b" strokeWidth="0.35" strokeDasharray="1 1" />
+
+                    {/* Nearby Concrete Barriers */}
+                    {pk.nearbyBarriers.map((b, idx) => {
+                      const pos = toRadar(b.x, b.z);
+                      const relDeg = ((b.heading - pk.carHeading) * 180) / Math.PI;
+                      return (
+                        <rect
+                          key={`rb-${idx}`}
+                          x={-b.hw}
+                          y={-b.hl}
+                          width={b.hw * 2}
+                          height={b.hl * 2}
+                          fill="#475569"
+                          stroke="#f59e0b"
+                          strokeWidth="0.22"
+                          transform={`translate(${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}) rotate(${relDeg.toFixed(1)})`}
+                        />
+                      );
+                    })}
+
+                    {/* Target Parking Bay */}
+                    <g transform={`translate(${bayLocal.x.toFixed(2)}, ${bayLocal.y.toFixed(2)}) rotate(${bayRelDeg.toFixed(1)})`}>
+                      <rect
+                        x={-pk.bayW * 0.5}
+                        y={-pk.bayL * 0.5}
+                        width={pk.bayW}
+                        height={pk.bayL}
+                        fill={pk.isInsideBox ? 'rgba(52,211,153,0.22)' : 'rgba(245,158,11,0.12)'}
+                        stroke={bayStroke}
+                        strokeWidth="0.45"
+                        strokeDasharray="1.1 0.7"
+                        rx="0.4"
+                      />
+                    </g>
+
+                    {/* Nearby Parked Cars */}
+                    {pk.nearbyCars.map((c, idx) => {
+                      const pos = toRadar(c.x, c.z);
+                      const relDeg = ((c.heading - pk.carHeading) * 180) / Math.PI;
+                      return (
+                        <rect
+                          key={`rc-${idx}`}
+                          x={-c.hw}
+                          y={-c.hl}
+                          width={c.hw * 2}
+                          height={c.hl * 2}
+                          rx="0.3"
+                          fill="#64748b"
+                          stroke="#cbd5e1"
+                          strokeWidth="0.2"
+                          transform={`translate(${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}) rotate(${relDeg.toFixed(1)})`}
+                        />
+                      );
+                    })}
+
+                    {/* Nearby Cones */}
+                    {pk.nearbyCones.map((cn, idx) => {
+                      const pos = toRadar(cn.x, cn.z);
+                      return (
+                        <circle
+                          key={`rcn-${idx}`}
+                          cx={pos.x}
+                          cy={pos.y}
+                          r={cn.knocked ? 0.35 : 0.48}
+                          fill={cn.knocked ? '#475569' : '#f97316'}
+                        />
+                      );
+                    })}
+
+                    {/* Ultrasonic Corner Arcs */}
+                    <path d="M -2.2 -3.1 A 2.6 2.6 0 0 1 -0.2 -3.6" fill="none" stroke={sensCol(pk.proximity.frontLeft)} strokeWidth="0.55" strokeLinecap="round" />
+                    <path d="M 0.2 -3.6 A 2.6 2.6 0 0 1 2.2 -3.1" fill="none" stroke={sensCol(pk.proximity.frontRight)} strokeWidth="0.55" strokeLinecap="round" />
+                    <path d="M -2.2 3.1 A 2.6 2.6 0 0 0 -0.2 3.6" fill="none" stroke={sensCol(pk.proximity.rearLeft)} strokeWidth="0.55" strokeLinecap="round" />
+                    <path d="M 0.2 3.6 A 2.6 2.6 0 0 0 2.2 3.1" fill="none" stroke={sensCol(pk.proximity.rearRight)} strokeWidth="0.55" strokeLinecap="round" />
+
+                    {/* Hero Car Center Body */}
+                    <rect x="-1.0" y="-2.05" width="2.0" height="4.1" rx="0.45" fill="#22d3ee" stroke="#ffffff" strokeWidth="0.28" />
+                    <polygon points="0,-1.5 -0.55,-0.5 0.55,-0.5" fill="#0f172a" />
+                  </svg>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Ephemeral Near-Miss / Fever / Flash / Stage Callout Banner */}
           {telemetry.nearMissText && (
             <div
               className={`mx-auto mt-2 px-4 py-1 rounded-lg font-display font-bold text-sm tracking-wide shadow-md ${
@@ -1411,8 +1847,15 @@ export default function App() {
                   : telemetry.nearMissText.includes('RANK') ||
                     telemetry.nearMissText.includes('SECTOR') ||
                     telemetry.nearMissText.includes('APEX') ||
-                    telemetry.nearMissText.includes('UNSTOPPABLE')
+                    telemetry.nearMissText.includes('UNSTOPPABLE') ||
+                    telemetry.nearMissText.includes('STAGE') ||
+                    telemetry.nearMissText.includes('PARKED') ||
+                    telemetry.nearMissText.includes('GATE')
                   ? 'bg-emerald-400 text-slate-950'
+                  : telemetry.nearMissText.includes('HIT') ||
+                    telemetry.nearMissText.includes('CONE') ||
+                    telemetry.nearMissText.includes('STRIKE')
+                  ? 'bg-rose-500 text-white'
                   : 'bg-amber-500 text-slate-950'
               }`}
             >
@@ -1422,8 +1865,8 @@ export default function App() {
 
           <div className="my-auto" />
 
-          {/* Unified Cockpit Controls: Steering Wheel + Flash/Horn/Nitro + Metal Gas & Brake Pedals */}
-          <div className="w-full max-w-lg mx-auto pointer-events-auto flex flex-col items-center">
+          {/* Unified Cockpit Controls: Steering Wheel + P/R/D Shifter + Flash/Horn + Metal Gas/Brake Pedals */}
+          <div className="w-full max-w-2xl mx-auto pointer-events-auto flex flex-col items-center">
             <button
               type="button"
               tabIndex={-1}
@@ -1442,7 +1885,7 @@ export default function App() {
                 className="w-full rounded-2xl border border-slate-700/80 p-2 sm:p-2.5 shadow-2xl"
                 style={{ backgroundColor: 'rgba(9, 14, 26, 0.94)' }}
               >
-                {/* Telemetry & Fever Strip */}
+                {/* Telemetry Strip */}
                 <div className="flex items-center justify-between gap-2 mb-2 text-[11px]">
                   <div className="flex items-center gap-2 font-mono tabular-nums">
                     <span className="text-slate-300">
@@ -1468,20 +1911,79 @@ export default function App() {
                     <span className="text-slate-300">
                       {Math.round(telemetry.distance)}m
                     </span>
+                    {activeOverallIntegrity < 100 && (
+                      <>
+                        <span aria-hidden="true" className="text-slate-600">·</span>
+                        <span
+                          data-testid="hud-integrity"
+                          className={`font-bold ${
+                            activeIsTotaled ? 'text-rose-400' : 'text-amber-300'
+                          }`}
+                        >
+                          BODY {activeOverallIntegrity}%
+                        </span>
+                      </>
+                    )}
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-400 hidden sm:block">
+                    {gameMode === 'parking'
+                      ? 'W/S Pedals · A/D Steer · G Reverse · Space Handbrake'
+                      : 'A/D Steer · W/S Pedals · F Flash · E Horn · Space Nitro'}
                   </div>
                 </div>
 
-                {/* Tactile Cockpit Row: Steering Wheel & Flash + Horn */}
-                <div className="flex items-center justify-between gap-2">
+                {/* Tactile Cockpit Row: Steering Wheel + Gear Shifter + Flash/Horn + Metal Pedals */}
+                <div className="flex items-center justify-between gap-1.5 sm:gap-2.5">
                   {/* Left: Interactive Rotatable Steering Wheel with Center Horn */}
-                  <SteeringWheel
-                    value={steerHold !== 0 ? steerHold : keySteerVisual}
-                    onChange={setSteerHold}
-                    onHorn={triggerHornAction}
-                  />
+                  <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                    <SteeringWheel
+                      value={steerHold !== 0 ? steerHold : keySteerVisual}
+                      onChange={setSteerHold}
+                      onHorn={triggerHornAction}
+                    />
 
-                  {/* Right: High-Beam Flash [F] & Horn [E] */}
-                  <div className="flex items-center gap-2">
+                    {/* Electronic P / R / D Gear Shifter (Parking Mode) */}
+                    {gameMode === 'parking' && (
+                      <div
+                        className="flex flex-col gap-0.5 p-1 rounded-xl bg-slate-950 border border-slate-700/90 shrink-0"
+                        role="group"
+                        aria-label="Parking Transmission Gear"
+                        data-testid="parking-shifter"
+                      >
+                        {(['P', 'R', 'D'] as const).map((g) => {
+                          const active = (telemetry.parking?.gear || parkingGear) === g;
+                          return (
+                            <button
+                              key={g}
+                              type="button"
+                              tabIndex={-1}
+                              data-hud-btn="true"
+                              data-gear={g}
+                              onClick={(e) => {
+                                e.currentTarget.blur();
+                                setParkingGear(g);
+                                soundFX.playGearShift();
+                              }}
+                              className={`min-w-[30px] h-[22px] sm:min-w-[34px] sm:h-[24px] rounded-md text-[11px] font-mono font-bold transition-colors ${
+                                active
+                                  ? g === 'R'
+                                    ? 'bg-rose-500 text-white'
+                                    : g === 'P'
+                                    ? 'bg-amber-400 text-slate-950'
+                                    : 'bg-emerald-400 text-slate-950'
+                                  : 'bg-slate-900 text-slate-400 hover:bg-slate-800 hover:text-white'
+                              }`}
+                            >
+                              {g}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Center: High-Beam Flash [F] & Horn [E] */}
+                  <div className="flex items-center gap-1.5 shrink-0">
                     <button
                       type="button"
                       data-hud-btn="true"
@@ -1492,16 +1994,16 @@ export default function App() {
                         e.currentTarget.blur();
                         triggerFlashAction();
                       }}
-                      className={`min-h-[52px] min-w-[58px] sm:min-w-[64px] px-2 py-1.5 rounded-xl border flex flex-col items-center justify-center gap-0.5 transition-colors whitespace-nowrap ${
+                      className={`min-h-[54px] min-w-[46px] sm:min-w-[54px] px-1.5 py-1 rounded-xl border flex flex-col items-center justify-center gap-0.5 transition-colors whitespace-nowrap ${
                         flashPulse
                           ? 'bg-cyan-400 border-white text-slate-950'
                           : 'bg-slate-900 border-cyan-500/60 hover:bg-slate-800 text-cyan-300'
                       }`}
                     >
-                      <svg viewBox="0 0 24 24" className="w-5 h-5 fill-current" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" className="w-4 h-4 sm:w-5 sm:h-5 fill-current" aria-hidden="true">
                         <path d="M5 7c-1.7 0-3 2.2-3 5s1.3 5 3 5h5V7H5zm8 0v2h8V7h-8zm0 4v2h9v-2h-9zm0 4v2h8v-2h-8z" />
                       </svg>
-                      <span className="text-[10px] font-mono font-bold">FLASH</span>
+                      <span className="text-[9px] font-mono font-bold">FLASH</span>
                     </button>
 
                     <button
@@ -1514,16 +2016,104 @@ export default function App() {
                         e.currentTarget.blur();
                         triggerHornAction();
                       }}
-                      className={`min-h-[52px] min-w-[58px] sm:min-w-[64px] px-2 py-1.5 rounded-xl border flex flex-col items-center justify-center gap-0.5 transition-colors whitespace-nowrap ${
+                      className={`min-h-[54px] min-w-[46px] sm:min-w-[54px] px-1.5 py-1 rounded-xl border flex flex-col items-center justify-center gap-0.5 transition-colors whitespace-nowrap ${
                         hornPulse
                           ? 'bg-amber-400 border-white text-slate-950'
                           : 'bg-slate-900 border-amber-500/60 hover:bg-slate-800 text-amber-300'
                       }`}
                     >
-                      <svg viewBox="0 0 24 24" className="w-5 h-5 fill-current" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" className="w-4 h-4 sm:w-5 sm:h-5 fill-current" aria-hidden="true">
                         <path d="M3 10v4h4l5 5V5L7 10H3zm13.5 2c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
                       </svg>
-                      <span className="text-[10px] font-mono font-bold">HORN</span>
+                      <span className="text-[9px] font-mono font-bold">HORN</span>
+                    </button>
+                  </div>
+
+                  {/* Right: Brushed Metal Racing Pedals (Handbrake in Parking + Brake + Gas) */}
+                  <div className="flex items-end gap-1.5 shrink-0" data-testid="cockpit-pedals">
+                    {gameMode === 'parking' && (
+                      <button
+                        type="button"
+                        data-hud-btn="true"
+                        data-testid="pedal-handbrake"
+                        tabIndex={-1}
+                        aria-label="Handbrake Pedal [Space]"
+                        onPointerDown={(e) => {
+                          e.preventDefault();
+                          try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+                          setPedalHandbrake(true);
+                        }}
+                        onPointerUp={() => setPedalHandbrake(false)}
+                        onPointerCancel={() => setPedalHandbrake(false)}
+                        onPointerLeave={() => setPedalHandbrake(false)}
+                        className={`touch-none select-none w-[44px] sm:w-[48px] h-[54px] rounded-lg border flex flex-col items-center justify-between py-1.5 px-1 transition-transform ${
+                          pedalHandbrake || keyHandbrakeVisual
+                            ? 'scale-95 bg-amber-500/25 border-amber-400 text-amber-300'
+                            : 'bg-slate-900 border-slate-600 text-slate-300 hover:border-amber-500/60'
+                        }`}
+                      >
+                        <div className="w-full flex flex-col gap-0.5 px-1 opacity-60" aria-hidden="true">
+                          <span className="h-0.5 w-full bg-current rounded" />
+                          <span className="h-0.5 w-full bg-current rounded" />
+                        </div>
+                        <span className="text-[8px] font-mono font-bold tracking-tight">H-BRK</span>
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      data-hud-btn="true"
+                      data-testid="pedal-brake"
+                      tabIndex={-1}
+                      aria-label="Brake Pedal [S]"
+                      onPointerDown={(e) => {
+                        e.preventDefault();
+                        try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+                        setPedalBrake(true);
+                      }}
+                      onPointerUp={() => setPedalBrake(false)}
+                      onPointerCancel={() => setPedalBrake(false)}
+                      onPointerLeave={() => setPedalBrake(false)}
+                      className={`touch-none select-none w-[52px] sm:w-[60px] h-[54px] rounded-lg border flex flex-col items-center justify-between py-1.5 px-1.5 transition-transform ${
+                        pedalBrake || keyBrakeVisual
+                          ? 'scale-95 bg-rose-500/30 border-rose-400 text-rose-200'
+                          : 'bg-slate-800/90 border-slate-600 text-slate-200 hover:border-rose-500/60'
+                      }`}
+                    >
+                      <div className="w-full grid grid-cols-3 gap-0.5 opacity-60" aria-hidden="true">
+                        <span className="h-1 bg-current rounded-full" />
+                        <span className="h-1 bg-current rounded-full" />
+                        <span className="h-1 bg-current rounded-full" />
+                      </div>
+                      <span className="text-[9px] font-mono font-bold tracking-wider">BRAKE</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      data-hud-btn="true"
+                      data-testid="pedal-gas"
+                      tabIndex={-1}
+                      aria-label="Gas Pedal [W]"
+                      onPointerDown={(e) => {
+                        e.preventDefault();
+                        try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+                        setPedalGas(true);
+                      }}
+                      onPointerUp={() => setPedalGas(false)}
+                      onPointerCancel={() => setPedalGas(false)}
+                      onPointerLeave={() => setPedalGas(false)}
+                      className={`touch-none select-none w-[48px] sm:w-[56px] h-[64px] rounded-lg border flex flex-col items-center justify-between py-1.5 px-1.5 transition-transform ${
+                        pedalGas || keyGasVisual
+                          ? 'scale-95 bg-cyan-500/30 border-cyan-300 text-cyan-200'
+                          : 'bg-slate-800/95 border-slate-500 text-slate-100 hover:border-cyan-400/70'
+                      }`}
+                    >
+                      <div className="w-full flex flex-col gap-1 opacity-60" aria-hidden="true">
+                        <span className="h-1 w-full bg-current rounded-full" />
+                        <span className="h-1 w-full bg-current rounded-full" />
+                        <span className="h-1 w-full bg-current rounded-full" />
+                      </div>
+                      <span className="text-[9px] font-mono font-bold tracking-wider">GAS</span>
                     </button>
                   </div>
                 </div>
@@ -1613,7 +2203,7 @@ export default function App() {
                 className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-850 border border-cyan-500/40 hover:border-cyan-400 text-xs font-mono flex items-center justify-between gap-2 shadow-lg transition-all active:scale-[0.98]"
               >
                 <div className="flex items-center gap-2 min-w-0">
-                  <span className="text-base text-amber-400 animate-pulse">🎵</span>
+                  <span className="text-base text-amber-400">🎵</span>
                   <div className="text-left min-w-0">
                     <div className="text-white font-bold truncate text-[11px] sm:text-xs">
                       {audioDeck.currentTrack?.title || audioDeck.activeTrackTitle}
@@ -1678,12 +2268,16 @@ export default function App() {
             style={{ backgroundColor: '#090e1a' }}
           >
             <div className="text-center">
-              <p className="text-xs font-semibold tracking-wider text-rose-400">
+              <p className={`text-xs font-semibold tracking-wider ${lastRunStats.isVictory ? 'text-emerald-400' : 'text-rose-400'}`}>
                 {(telemetry.biomeName || resolveRoadBiome(roadMode, lastRunStats.distance).name).toUpperCase()} ·{' '}
                 {(lastRunStats.crashReason || 'GUARDRAIL BREACHED').toUpperCase()}
               </p>
               <h2 className="text-2xl sm:text-3xl font-bold font-display text-white mt-0.5">
-                {gameMode === 'highway_traffic' && lastRunStats.crashReason !== 'Guardrail Breached'
+                {lastRunStats.isVictory
+                  ? 'Parking Mastery Complete!'
+                  : gameMode === 'parking'
+                  ? 'Parking Test Failed'
+                  : gameMode === 'highway_traffic' && lastRunStats.crashReason !== 'Guardrail Breached'
                   ? 'Highway Pileup!'
                   : 'Wrecked in the Abyss'}
               </h2>
@@ -1691,11 +2285,13 @@ export default function App() {
                 const rankInfo = getDriftRank(lastRunStats.score);
                 return (
                   <div className="mt-2 inline-flex items-center gap-2 px-3 py-1 rounded-lg bg-slate-950 border border-slate-800 text-xs font-mono">
-                    <span className="font-bold text-sm" style={{ color: rankInfo.color }}>
-                      RANK {rankInfo.rank}
+                    <span className="font-bold text-sm" style={{ color: lastRunStats.isVictory ? '#34d399' : rankInfo.color }}>
+                      {lastRunStats.isVictory ? 'VALET MASTER' : `RANK ${rankInfo.rank}`}
                     </span>
                     <span className="text-slate-400">·</span>
-                    <span className="text-slate-200">{rankInfo.title}</span>
+                    <span className="text-slate-200">
+                      {lastRunStats.isVictory ? '6/6 Precision Stages Cleared' : rankInfo.title}
+                    </span>
                   </div>
                 );
               })()}
@@ -1740,6 +2336,88 @@ export default function App() {
               </div>
             </div>
 
+            {/* Live Wrecked Car Damage Report & Pit Repair Controls */}
+            {activeDamageCounts.totalDamaged > 0 && (
+              <div
+                className={`p-3 rounded-xl border space-y-2.5 ${
+                  activeIsTotaled
+                    ? 'bg-rose-950/35 border-rose-500/60'
+                    : 'bg-amber-950/25 border-amber-500/45'
+                }`}
+                data-testid="gameover-damage-card"
+              >
+                <div className="flex items-center gap-3">
+                  <WreckedCarPreviewCanvas
+                    car={selectedCar}
+                    customization={activeCarCustom}
+                    damage={activeCarDamage}
+                  />
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span
+                        className={`text-[10px] font-mono font-bold uppercase tracking-wider ${
+                          activeIsTotaled ? 'text-rose-300' : 'text-amber-300'
+                        }`}
+                      >
+                        {activeIsTotaled ? 'CHASSIS TOTALED' : 'BODY DAMAGE DETECTED'}
+                      </span>
+                      <span className="text-xs font-mono font-bold text-white tabular-nums">
+                        {activeOverallIntegrity}% INTACT
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap gap-1">
+                      {CAR_PARTS_META.filter((m) => {
+                        const st = activeCarDamage[m.id];
+                        return st.detached || st.integrity < 90;
+                      })
+                        .slice(0, 6)
+                        .map((m) => {
+                          const st = activeCarDamage[m.id];
+                          return (
+                            <span
+                              key={m.id}
+                              className={`px-1.5 py-0.2 rounded text-[9px] font-mono font-bold border ${
+                                st.detached
+                                  ? 'bg-rose-500/25 border-rose-500/50 text-rose-200'
+                                  : 'bg-amber-500/20 border-amber-500/45 text-amber-200'
+                              }`}
+                            >
+                              {m.shortLabel}: {st.detached ? 'LOST' : `BENT ${st.integrity}%`}
+                            </span>
+                          );
+                        })}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    data-testid="gameover-btn-fix-all"
+                    onClick={() => handleRepairAll(selectedCar.id, coins < activeRepairCost)}
+                    className={`min-h-[38px] px-3 py-1.5 rounded-lg font-display font-bold text-xs tracking-wide transition-colors whitespace-nowrap ${
+                      coins >= activeRepairCost
+                        ? 'bg-amber-400 hover:bg-amber-300 text-slate-950'
+                        : 'bg-cyan-400 hover:bg-cyan-300 text-slate-950'
+                    }`}
+                  >
+                    {coins >= activeRepairCost
+                      ? `🔧 Fix All (${activeRepairCost} CR)`
+                      : '🔧 Free Pit-Crew Patch'}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="gameover-btn-repair-bay"
+                    onClick={() => openGarageTab('repair')}
+                    className="min-h-[38px] px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-100 font-semibold text-xs whitespace-nowrap"
+                  >
+                    Inspect Parts
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Progressive Car Unlock Progress Bar */}
             {nextLockedCar && (
               <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800">
@@ -1772,11 +2450,11 @@ export default function App() {
               </div>
             )}
 
-            {/* Compact Daily Missions Progress Card */}
+            {/* Compact Daily + Technical Missions Progress Card */}
             {(() => {
-              const dailyMissions = getDailyMissions();
-              const completedCount = dailyMissions.filter((m) => m.completed).length;
-              const claimableCount = dailyMissions.filter((m) => m.completed && !m.claimed).length;
+              const allMissions = [...getDailyMissions(), ...getTechnicalMissions()];
+              const completedCount = allMissions.filter((m) => m.completed).length;
+              const claimableCount = allMissions.filter((m) => m.completed && !m.claimed).length;
 
               return (
                 <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between gap-3">
@@ -1786,21 +2464,24 @@ export default function App() {
                     </div>
                     <div>
                       <div className="flex items-center gap-1.5">
-                        <span className="text-xs font-bold text-slate-200">Daily Missions</span>
+                        <span className="text-xs font-bold text-slate-200">Missions &amp; Car Craft</span>
                         {claimableCount > 0 && (
-                          <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-400 text-slate-950 font-bold uppercase tracking-wider animate-pulse">
+                          <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-400 text-slate-950 font-bold uppercase tracking-wider">
                             {claimableCount} Claimable
                           </span>
                         )}
                       </div>
                       <p className="text-[10px] text-slate-400 font-mono">
-                        {completedCount}/{dailyMissions.length} Complete
+                        {completedCount}/{allMissions.length} Complete
                       </p>
                     </div>
                   </div>
                   <button
                     type="button"
-                    onClick={() => setIsMissionsOpen(true)}
+                    onClick={() => {
+                      setMissionModalTab(gameMode === 'parking' ? 'tech' : 'daily');
+                      setIsMissionsOpen(true);
+                    }}
                     className="min-h-[36px] px-3 py-1.5 rounded-lg bg-purple-600/30 hover:bg-purple-600/50 border border-purple-500/60 text-purple-200 text-xs font-semibold whitespace-nowrap transition-colors"
                   >
                     View Missions
@@ -1815,9 +2496,15 @@ export default function App() {
                 type="button"
                 data-start="true"
                 onClick={handleStartRun}
-                className="w-full min-h-[50px] py-3 px-6 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-display font-bold text-lg tracking-wide transition-colors whitespace-nowrap"
+                className={`w-full min-h-[50px] py-3 px-6 rounded-xl font-display font-bold text-lg tracking-wide transition-colors whitespace-nowrap ${
+                  activeIsTotaled
+                    ? 'bg-rose-500 hover:bg-rose-400 text-white'
+                    : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                }`}
               >
-                Try Again (Space / Tap)
+                {activeIsTotaled
+                  ? `🔧 Repair Car to Race Again (${activeOverallIntegrity}%)`
+                  : 'Try Again (Space / Tap)'}
               </button>
 
               <button
@@ -1832,10 +2519,10 @@ export default function App() {
               <div className="grid grid-cols-2 gap-2.5">
                 <button
                   type="button"
-                  onClick={() => setIsGarageOpen(true)}
+                  onClick={() => openGarageTab(activeDamageCounts.totalDamaged > 0 ? 'repair' : 'body')}
                   className="min-h-[44px] py-2.5 px-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold whitespace-nowrap"
                 >
-                  Garage &amp; Upgrades
+                  {activeDamageCounts.totalDamaged > 0 ? 'Repair Bay & Garage' : 'Garage & Upgrades'}
                 </button>
                 <button
                   type="button"
@@ -1860,6 +2547,8 @@ export default function App() {
           unlockedCarIds={unlockedCarIds}
           carUpgrades={carUpgrades}
           carCustomizations={carCustomizations}
+          carDamageMap={carDamageMap}
+          initialTab={garageInitialTab}
           customSpriteUrl={customSpriteUrl}
           onSelectCar={(carId) => {
             setSelectedCarId(carId);
@@ -1875,6 +2564,8 @@ export default function App() {
           }}
           onUnlockCar={handleUnlockCar}
           onUpgradeStat={handleUpgradeStat}
+          onRepairPart={handleRepairPart}
+          onRepairAll={handleRepairAll}
           onUpdateCustomization={(carId, nextCustom) => {
             const updated = { ...carCustomizations, [carId]: nextCustom };
             setCarCustomizations(updated);
@@ -1930,6 +2621,7 @@ export default function App() {
           isOpen={isMissionsOpen}
           onClose={() => setIsMissionsOpen(false)}
           onClaimReward={handleClaimReward}
+          initialTab={missionModalTab}
         />
       )}
 

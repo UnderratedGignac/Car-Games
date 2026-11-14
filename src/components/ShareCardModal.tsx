@@ -232,7 +232,9 @@ export const ShareCardModal: React.FC<ShareCardModalProps> = ({
 
     // Mode Tag
     const modeLabel =
-      gameMode === 'highway_traffic'
+      gameMode === 'parking'
+        ? 'PRECISION PARKING · VALET & GYMKHANA'
+        : gameMode === 'highway_traffic'
         ? 'HIGHWAY TRAFFIC · OVERTAKE CLASH'
         : 'TOKYO TOUGE · S-CURVE DRIFT';
     ctx.shadowBlur = 0;

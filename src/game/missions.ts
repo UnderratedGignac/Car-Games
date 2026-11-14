@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -11,7 +11,15 @@ export type MissionType =
   | 'near_misses'
   | 'coins'
   | 'top_speed'
-  | 'touge_runs';
+  | 'touge_runs'
+  | 'parking_clears'
+  | 'parallel_parks'
+  | 'reverse_parks'
+  | 'zero_hit_parks'
+  | 'gymkhana_parks'
+  | 'precision_aligns'
+  | 'slalom_clears'
+  | 'flash_yields';
 
 export interface Mission {
   id: string;
@@ -37,6 +45,7 @@ export interface MissionTemplate {
 }
 
 export const DAILY_MISSIONS_STORAGE_KEY = 'neon_daily_missions_v1';
+export const TECHNICAL_MISSIONS_STORAGE_KEY = 'neon_tech_missions_v1';
 
 export const MISSION_POOL: MissionTemplate[] = [
   {
@@ -128,6 +137,117 @@ export const MISSION_POOL: MissionTemplate[] = [
     reward: 2500,
     type: 'overtakes',
     icon: 'crosshair',
+  },
+  {
+    id: 'daily_valet_ace',
+    title: 'Daily Valet Ace',
+    description: 'Complete 3 Parking Mode bay clears',
+    target: 3,
+    reward: 1600,
+    type: 'parking_clears',
+    icon: 'parking',
+  },
+  {
+    id: 'daily_parallel_pro',
+    title: 'Curbside Threader',
+    description: 'Nail 2 tight Parallel Parking bays',
+    target: 2,
+    reward: 1800,
+    type: 'parallel_parks',
+    icon: 'sliders',
+  },
+  {
+    id: 'daily_clean_parking',
+    title: 'Zero-Scrape Valet',
+    description: 'Clear 2 Parking stages with zero cone or car hits',
+    target: 2,
+    reward: 2100,
+    type: 'zero_hit_parks',
+    icon: 'cone',
+  },
+  {
+    id: 'daily_beam_courtesy',
+    title: 'Passing Lane Signal',
+    description: 'Signal 5 traffic cars to yield using High-Beams or Horn',
+    target: 5,
+    reward: 1300,
+    type: 'flash_yields',
+    icon: 'zap',
+  },
+];
+
+export const TECHNICAL_MISSIONS_POOL: MissionTemplate[] = [
+  {
+    id: 'tech_valet_apprentice',
+    title: 'Valet Apprentice',
+    description: 'Complete 3 bays in Precision Parking Mode using R/D gears and pedals',
+    target: 3,
+    reward: 1800,
+    type: 'parking_clears',
+    icon: 'parking',
+  },
+  {
+    id: 'tech_parallel_perfection',
+    title: 'Parallel Perfection',
+    description: 'Execute 2 tight street-side Parallel Parks between parked cars',
+    target: 2,
+    reward: 2400,
+    type: 'parallel_parks',
+    icon: 'sliders',
+  },
+  {
+    id: 'tech_reverse_master',
+    title: 'Reverse Gear Master',
+    description: 'Back your car into 3 Reverse Bays using Gear R & ultrasonic radar',
+    target: 3,
+    reward: 2200,
+    type: 'reverse_parks',
+    icon: 'rotate',
+  },
+  {
+    id: 'tech_zero_scratch_valet',
+    title: 'Zero-Scratch Valet',
+    description: 'Lock 4 Parking stages without clipping a cone, barrier, or parked car',
+    target: 4,
+    reward: 3000,
+    type: 'zero_hit_parks',
+    icon: 'trophy',
+  },
+  {
+    id: 'tech_slalom_technician',
+    title: 'Cone Slalom Technician',
+    description: 'Thread 6 slalom gates cleanly before locking into the target bay',
+    target: 6,
+    reward: 2000,
+    type: 'slalom_clears',
+    icon: 'cone',
+  },
+  {
+    id: 'tech_gymkhana_180',
+    title: 'Gymkhana 180° Driver',
+    description: 'Pull a handbrake J-turn spin-in finish in Parking Mode Stage 6',
+    target: 1,
+    reward: 3500,
+    type: 'gymkhana_parks',
+    icon: 'flame',
+  },
+  {
+    id: 'tech_laser_alignment',
+    title: 'Laser Alignment',
+    description: 'Park 2 times within 0.35m center offset and under 4° yaw error',
+    target: 2,
+    reward: 2600,
+    type: 'precision_aligns',
+    icon: 'crosshair',
+  },
+  {
+    id: 'tech_highbeam_tactician',
+    title: 'High-Beam Tactician',
+    description: 'Flash headlamps or sound horn to yield 8 Highway Traffic cars',
+    target: 8,
+    reward: 1700,
+    type: 'flash_yields',
+    icon: 'zap',
   },
 ];
 
@@ -245,16 +365,58 @@ export function getDailyMissions(dateOverride?: string): Mission[] {
 }
 
 /**
- * Feeds progress deltas or run maximums into the daily missions.
- * Single-run stats (drift_score, combo, top_speed) use high-water mark.
- * Cumulative stats (distance, overtakes, near_misses, coins, touge_runs) increment.
+ * Retrieves persistent Parking & Complex Car Craft mastery missions.
  */
-export function recordMissionProgress(
-  event: Partial<Record<Mission['type'], number>>,
-  dateOverride?: string
-): { newlyCompleted: Mission[] } {
-  const dateStr = dateOverride || getCurrentUtcDateString();
-  const missions = getDailyMissions(dateStr);
+export function getTechnicalMissions(): Mission[] {
+  const raw = getStorageItem(TECHNICAL_MISSIONS_STORAGE_KEY);
+  let storedMap: Record<string, Mission> = {};
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (item && typeof item.id === 'string') {
+            storedMap[item.id] = item;
+          }
+        }
+      }
+    } catch {
+      storedMap = {};
+    }
+  }
+
+  const synced: Mission[] = TECHNICAL_MISSIONS_POOL.map((tmpl) => {
+    const prev = storedMap[tmpl.id];
+    if (prev && typeof prev.current === 'number') {
+      return {
+        ...tmpl,
+        current: Math.min(tmpl.target, Math.max(0, prev.current)),
+        completed: Boolean(prev.completed || prev.current >= tmpl.target),
+        claimed: Boolean(prev.claimed),
+      };
+    }
+    return {
+      id: tmpl.id,
+      title: tmpl.title,
+      description: tmpl.description,
+      target: tmpl.target,
+      current: 0,
+      reward: tmpl.reward,
+      completed: false,
+      claimed: false,
+      type: tmpl.type,
+      icon: tmpl.icon,
+    };
+  });
+
+  setStorageItem(TECHNICAL_MISSIONS_STORAGE_KEY, JSON.stringify(synced));
+  return synced;
+}
+
+function applyEventToMissionList(
+  missions: Mission[],
+  event: Partial<Record<Mission['type'], number>>
+): { changed: boolean; newlyCompleted: Mission[] } {
   const newlyCompleted: Mission[] = [];
   let changed = false;
 
@@ -287,7 +449,21 @@ export function recordMissionProgress(
     }
   }
 
-  if (changed) {
+  return { changed, newlyCompleted };
+}
+
+/**
+ * Feeds progress deltas or run maximums into both Daily Missions and Technical Car Craft Missions.
+ */
+export function recordMissionProgress(
+  event: Partial<Record<Mission['type'], number>>,
+  dateOverride?: string
+): { newlyCompleted: Mission[] } {
+  const dateStr = dateOverride || getCurrentUtcDateString();
+  const missions = getDailyMissions(dateStr);
+  const dailyRes = applyEventToMissionList(missions, event);
+
+  if (dailyRes.changed) {
     const state: StoredMissionsState = {
       date: dateStr,
       missions,
@@ -295,7 +471,15 @@ export function recordMissionProgress(
     setStorageItem(DAILY_MISSIONS_STORAGE_KEY, JSON.stringify(state));
   }
 
-  return { newlyCompleted };
+  const techMissions = getTechnicalMissions();
+  const techRes = applyEventToMissionList(techMissions, event);
+  if (techRes.changed) {
+    setStorageItem(TECHNICAL_MISSIONS_STORAGE_KEY, JSON.stringify(techMissions));
+  }
+
+  return {
+    newlyCompleted: [...dailyRes.newlyCompleted, ...techRes.newlyCompleted],
+  };
 }
 
 /**
@@ -328,7 +512,23 @@ export function claimMission(
 }
 
 /**
- * Returns true if at least one mission is completed and uncollected.
+ * Claims the reward for a completed Parking & Car Craft mastery mission.
+ */
+export function claimTechnicalMission(
+  missionId: string
+): { success: boolean; reward: number } {
+  const techMissions = getTechnicalMissions();
+  const target = techMissions.find((m) => m.id === missionId);
+  if (!target || !target.completed || target.claimed) {
+    return { success: false, reward: 0 };
+  }
+  target.claimed = true;
+  setStorageItem(TECHNICAL_MISSIONS_STORAGE_KEY, JSON.stringify(techMissions));
+  return { success: true, reward: target.reward };
+}
+
+/**
+ * Returns true if at least one daily mission is completed and uncollected.
  */
 export function hasClaimableMissions(dateOverride?: string): boolean {
   const missions = getDailyMissions(dateOverride);
@@ -336,11 +536,23 @@ export function hasClaimableMissions(dateOverride?: string): boolean {
 }
 
 /**
- * Returns count of completed but uncollected missions.
+ * Returns count of completed but uncollected daily missions.
  */
 export function getClaimableMissionsCount(dateOverride?: string): number {
   const missions = getDailyMissions(dateOverride);
   return missions.filter((m) => m.completed && !m.claimed).length;
+}
+
+export function hasClaimableTechnicalMissions(): boolean {
+  return getTechnicalMissions().some((m) => m.completed && !m.claimed);
+}
+
+export function getClaimableTechnicalMissionsCount(): number {
+  return getTechnicalMissions().filter((m) => m.completed && !m.claimed).length;
+}
+
+export function getTotalClaimableMissionsCount(dateOverride?: string): number {
+  return getClaimableMissionsCount(dateOverride) + getClaimableTechnicalMissionsCount();
 }
 
 /**
@@ -386,6 +598,16 @@ export function resetDailyMissionsStorage(): void {
   if (typeof window !== 'undefined' && window.localStorage) {
     try {
       window.localStorage.removeItem(DAILY_MISSIONS_STORAGE_KEY);
+      window.localStorage.removeItem(TECHNICAL_MISSIONS_STORAGE_KEY);
+    } catch {}
+  }
+}
+
+export function resetTechnicalMissionsStorage(): void {
+  delete memoryStorage[TECHNICAL_MISSIONS_STORAGE_KEY];
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      window.localStorage.removeItem(TECHNICAL_MISSIONS_STORAGE_KEY);
     } catch {}
   }
 }

@@ -50,7 +50,7 @@ test('Ghost Run Engine - normalizeAngle wraps angles within (-PI, PI]', () => {
 });
 
 test('Ghost Run Engine - generateDevRivalGhost creates challenging rival runs for each mode', () => {
-  const modes = ['drift', 'highway_traffic', 'zen'] as const;
+  const modes = ['drift', 'highway_traffic', 'parking'] as const;
 
   for (const mode of modes) {
     const rival = generateDevRivalGhost(mode);

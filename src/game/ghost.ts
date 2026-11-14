@@ -190,7 +190,7 @@ export function sampleGhostPosition(
  */
 export function generateDevRivalGhost(mode: string): GhostRun {
   const isHighway = mode === 'highway_traffic';
-  const isZen = mode === 'zen';
+  const isParking = mode === 'parking';
 
   const durationSec = 75; // 75 seconds run
   const dt = 0.1; // 10 Hz sampling
@@ -198,11 +198,11 @@ export function generateDevRivalGhost(mode: string): GhostRun {
   const frames: GhostFrame[] = new Array(frameCount);
 
   let curDist = 0;
-  let curSpeedKmh = 80;
-  const targetSpeedKmh = isHighway ? 210 : isZen ? 120 : 185;
+  let curSpeedKmh = isParking ? 45 : 80;
+  const targetSpeedKmh = isHighway ? 210 : isParking ? 78 : 185;
 
-  const carId = isHighway ? 't40_spectre' : isZen ? 't10_stratos' : 't30_raptor';
-  const carColor = isHighway ? '#06b6d4' : isZen ? '#22d3ee' : '#ec4899';
+  const carId = isHighway ? 't40_spectre' : isParking ? 't10_stratos' : 't30_raptor';
+  const carColor = isHighway ? '#06b6d4' : isParking ? '#10b981' : '#ec4899';
 
   for (let i = 0; i < frameCount; i++) {
     const t = Number((i * dt).toFixed(2));
@@ -210,7 +210,7 @@ export function generateDevRivalGhost(mode: string): GhostRun {
     // Smooth launch acceleration in first 6 seconds
     if (t < 6.0) {
       const ramp = t / 6.0;
-      curSpeedKmh = 75 + (targetSpeedKmh - 75) * Math.sin(ramp * (Math.PI / 2));
+      curSpeedKmh = (isParking ? 45 : 75) + (targetSpeedKmh - (isParking ? 45 : 75)) * Math.sin(ramp * (Math.PI / 2));
     } else {
       // Natural racing speed micro-modulations (cornering braking and straight line boost)
       const wave = Math.sin(t * 0.4) * 8 + Math.cos(t * 0.18) * 12;
@@ -232,10 +232,10 @@ export function generateDevRivalGhost(mode: string): GhostRun {
       // Slight yaw during lane change
       const dLateral = Math.cos(t * 0.35) * 0.15;
       angle = -Math.PI / 2 + dLateral;
-    } else if (isZen) {
-      // Gentle cruise line
-      lateral = Math.sin(t * 0.25) * 1.4;
-      angle = -Math.PI / 2 + Math.cos(t * 0.25) * 0.08;
+    } else if (isParking) {
+      // Precision slalom line
+      lateral = Math.sin(t * 0.55) * 1.9;
+      angle = -Math.PI / 2 + Math.cos(t * 0.55) * 0.22;
     } else {
       // High-performance drift sweeping line
       const driftSweep = Math.sin(t * 0.72) * 2.4;
@@ -254,7 +254,7 @@ export function generateDevRivalGhost(mode: string): GhostRun {
     };
   }
 
-  const finalScore = isHighway ? 28500 : isZen ? 16400 : 34200;
+  const finalScore = isHighway ? 28500 : isParking ? 19200 : 34200;
 
   return {
     mode,

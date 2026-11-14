@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -41,7 +41,17 @@ import {
   stepTrafficCars,
   triggerTrafficFlashYield,
   compactInPlace,
+  sampleTerrainElevation,
 } from './rules';
+import {
+  CarDamageState,
+  CarPartId,
+  applyImpactToCarDamage,
+  computeDamagedStats,
+  createMintDamageState,
+  getDamageVisualCacheKey,
+  normalizeCarDamageState,
+} from './damage';
 import {
   GhostFrame,
   GhostRun,
@@ -56,13 +66,33 @@ import {
   Projected3D,
   RoadSlice3D,
   WorldProp3D,
+  computeDistanceFogAlpha,
+  renderBackgroundVista3D,
   renderBridgeTrussArch3D,
+  renderRealisticRoadsideLandmarks3D,
   renderReflectorBollard3D,
   renderTerrainMesh3D,
-  renderWeirdRoadsideLandmarks3D,
   renderWorldObject3D,
 } from './world3d';
 import { soundFX, triggerHaptic } from './audio';
+import { MissionType } from './missions';
+import {
+  ParkedObstacleCar,
+  ParkingGear,
+  ParkingPhysicsState,
+  ParkingProximity,
+  ParkingStageSpec,
+  createInitialParkingState,
+  createParkingStages,
+  evaluateParkingBayStatus,
+  evaluateParkingProximity,
+  stepParkingObstacles,
+  stepParkingPhysics,
+} from './parking';
+import {
+  renderParkingObstacleProps3D,
+  renderParkingPlazaGround3D,
+} from './parkingRender';
 import {
   ANIME_CLOUD_COUNT,
   SkyAtmosphereConfig,
@@ -70,11 +100,42 @@ import {
   renderAnimeCloudSprite,
   renderCelestialSprite,
   renderDynamicSkyAtmosphere,
-  renderMythicalDragonsAndSkyAnomalies,
   resolveSkyAtmosphere,
 } from './skyArt';
 
 export type GamePhase = 'title' | 'playing' | 'paused' | 'gameover';
+
+export interface ParkingTelemetry {
+  stageNum: number;
+  totalStages: number;
+  stageTitle: string;
+  subtitle: string;
+  instruction: string;
+  maneuverType: string;
+  gear: ParkingGear;
+  distM: number;
+  angleErrDeg: number;
+  hits: number;
+  maxHits: number;
+  lockProgress: number;
+  isInsideBox: boolean;
+  isAligned: boolean;
+  gatesCleared: number;
+  gatesTotal: number;
+  proximity: ParkingProximity;
+  carX: number;
+  carZ: number;
+  carHeading: number;
+  steerAngle: number;
+  bayX: number;
+  bayZ: number;
+  bayHeading: number;
+  bayW: number;
+  bayL: number;
+  nearbyCars: { x: number; z: number; heading: number; hw: number; hl: number }[];
+  nearbyCones: { x: number; z: number; knocked: boolean }[];
+  nearbyBarriers: { x: number; z: number; hw: number; hl: number; heading: number }[];
+}
 
 export interface LiveTelemetry {
   score: number;
@@ -91,6 +152,7 @@ export interface LiveTelemetry {
   biomeName?: string;
   overtakes?: number;
   nearMisses?: number;
+  parking?: ParkingTelemetry;
 }
 
 interface SceneCanvasProps {
@@ -103,6 +165,12 @@ interface SceneCanvasProps {
   roadMode?: RoadSelectionMode;
   skyMode?: SkyThemeId;
   steerHold?: number; // -1 left, 0 neutral, +1 right from UI buttons or steering wheel
+  pedalGas?: boolean;
+  pedalBrake?: boolean;
+  pedalHandbrake?: boolean;
+  parkingGear?: ParkingGear;
+  onParkingGearChange?: (gear: ParkingGear) => void;
+  onMissionEvent?: (event: Partial<Record<MissionType, number>>) => void;
   flipTriggerCount: number;
   boostTriggerCount: number;
   restartTriggerCount: number;
@@ -111,6 +179,8 @@ interface SceneCanvasProps {
   screenShakeIntensity?: number; // 0.0 (no shake, accessibility safe) to 1.0 (default 1.0)
   screenShakeMultiplier?: number;
   controlScheme?: 'classic' | 'wheel' | 'swipe'; // default 'classic'
+  carDamage?: CarDamageState;
+  onCarDamageChange?: (nextDamage: CarDamageState) => void;
   onTelemetryUpdate: (telemetry: LiveTelemetry) => void;
   onGameOver: (finalStats: {
     score: number;
@@ -120,6 +190,7 @@ interface SceneCanvasProps {
     overtakes?: number;
     nearMisses?: number;
     crashReason?: string;
+    isVictory?: boolean;
   }) => void;
 }
 
@@ -147,8 +218,25 @@ interface SmokePuff {
   maxRadius: number;
   life: number;
   maxLife: number;
-  tint: 'white' | 'cyan' | 'fire' | 'dark' | 'pink' | 'aqua' | 'warm';
+  tint: 'white' | 'cyan' | 'dust' | 'steam' | 'dark' | 'pink' | 'aqua' | 'warm';
   overCar?: boolean;
+}
+
+interface DetachedPartDebris {
+  active: boolean;
+  partId: CarPartId;
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  rot: number;
+  vRot: number;
+  floorY: number;
+  color: string;
+  accentColor: string;
+  life: number;
 }
 
 interface DebrisChunk {
@@ -220,6 +308,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
   roadMode = 'tour',
   skyMode = 'auto',
   steerHold = 0,
+  pedalGas = false,
+  pedalBrake = false,
+  pedalHandbrake = false,
+  parkingGear = 'D',
+  onParkingGearChange,
+  onMissionEvent,
   flipTriggerCount,
   boostTriggerCount,
   restartTriggerCount,
@@ -228,6 +322,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
   screenShakeIntensity,
   screenShakeMultiplier = 1.0,
   controlScheme = 'classic',
+  carDamage,
+  onCarDamageChange,
   onTelemetryUpdate,
   onGameOver,
 }) => {
@@ -267,11 +363,35 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
   const steerHoldRef = useRef<number>(steerHold);
   steerHoldRef.current = steerHold;
 
+  const pedalGasRef = useRef<boolean>(pedalGas);
+  pedalGasRef.current = pedalGas;
+
+  const pedalBrakeRef = useRef<boolean>(pedalBrake);
+  pedalBrakeRef.current = pedalBrake;
+
+  const pedalHandbrakeRef = useRef<boolean>(pedalHandbrake);
+  pedalHandbrakeRef.current = pedalHandbrake;
+
+  const parkingGearRef = useRef<ParkingGear>(parkingGear);
+  parkingGearRef.current = parkingGear;
+
+  const onParkingGearChangeRef = useRef(onParkingGearChange);
+  onParkingGearChangeRef.current = onParkingGearChange;
+
+  const onMissionEventRef = useRef(onMissionEvent);
+  onMissionEventRef.current = onMissionEvent;
+
   const onTelemetryRef = useRef(onTelemetryUpdate);
   onTelemetryRef.current = onTelemetryUpdate;
 
   const onGameOverRef = useRef(onGameOver);
   onGameOverRef.current = onGameOver;
+
+  const carDamageRef = useRef<CarDamageState>(carDamage || createMintDamageState());
+  carDamageRef.current = carDamage || createMintDamageState();
+
+  const onCarDamageChangeRef = useRef(onCarDamageChange);
+  onCarDamageChangeRef.current = onCarDamageChange;
 
   const pendingFlipRef = useRef(false);
   const pendingBoostRef = useRef(false);
@@ -336,12 +456,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let pxH = 340;
     let cachedSkyGrad: CanvasGradient | null = null;
     let cachedMeadowGrad: CanvasGradient | null = null;
+    let cachedHorizonMistGrad: CanvasGradient | null = null;
     let cachedSkyKey: string | null = null;
     let cachedHorizonY = Math.round(pxH * 0.35);
 
     const ensureBiomeLayers = (biome: RoadBiomeConfig, sky: SkyAtmosphereConfig) => {
       const nextSkyKey = `${biome.id}:${sky.id}:${pxW}`;
-      if (cachedSkyKey === nextSkyKey && cachedSkyGrad && cachedMeadowGrad) return;
+      if (cachedSkyKey === nextSkyKey && cachedSkyGrad && cachedMeadowGrad && cachedHorizonMistGrad) return;
       cachedSkyKey = nextSkyKey;
       cachedSkyGrad = ctx.createLinearGradient(0, 0, 0, cachedHorizonY + 14);
       cachedSkyGrad.addColorStop(0.0, sky.skyStops[0]);
@@ -353,6 +474,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       cachedMeadowGrad.addColorStop(0.35, biome.valleyStops[1]);
       cachedMeadowGrad.addColorStop(1.0, biome.valleyStops[2]);
 
+      cachedHorizonMistGrad = ctx.createLinearGradient(0, Math.max(0, cachedHorizonY - 6), 0, cachedHorizonY + 22);
+      cachedHorizonMistGrad.addColorStop(0.0, 'rgba(0, 0, 0, 0)');
+      cachedHorizonMistGrad.addColorStop(0.35, sky.horizonGlowColor);
+      cachedHorizonMistGrad.addColorStop(0.68, biome.valleyStops[0]);
+      cachedHorizonMistGrad.addColorStop(1.0, 'rgba(0, 0, 0, 0)');
+
       // Pre-render sculpted Shinkai-style anime cloud sprites and celestial Sun/Moon disc offscreen
       const sunRightBias = sky.celestialXRatio >= 0.5;
       for (let i = 0; i < ANIME_CLOUD_COUNT; i++) {
@@ -360,7 +487,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       }
       renderCelestialSprite(celestialCanvas, sky);
 
-      // Pre-render distant skyline / mesas / mountains onto horizonCanvas (with 160px parallax overscan)
+      // Pre-render multi-layer realistic skyline / canyon mesas / alpine peaks onto horizonCanvas
       const overscan = 160;
       const hw = pxW + overscan * 2;
       const hh = cachedHorizonY + 14;
@@ -369,32 +496,70 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       if (horizonCtx) {
         horizonCtx.clearRect(0, 0, hw, hh);
         if (biome.propStyle === 'tower') {
+          const farTower = sky.id === 'red_moon' ? '#2c0a18' : sky.isNight ? biome.mtnFar : '#475569';
+          const midTower = sky.id === 'red_moon' ? '#1f0710' : sky.isNight ? '#1e293b' : '#334155';
+          const nearTower = sky.id === 'red_moon' ? '#120309' : sky.isNight ? biome.mtnNear : '#1e293b';
+
+          // Depth layer 1: Distant hazy skyline towers
+          horizonCtx.globalAlpha = 0.55;
+          let fx = 0;
+          let fi = 0;
+          const farW = [22, 16, 26, 18, 24, 20, 28, 16];
+          const farH = [38, 28, 50, 32, 44, 30, 48, 26];
+          while (fx < hw) {
+            const bw = farW[fi % farW.length];
+            const bh = farH[fi % farH.length];
+            const by = cachedHorizonY - bh + 8;
+            horizonCtx.fillStyle = farTower;
+            horizonCtx.fillRect(fx, by, bw - 2, bh + 6);
+            if (fi % 3 === 0) {
+              horizonCtx.fillRect(fx + Math.floor((bw - 4) * 0.5), by - 8, 2, 8);
+            }
+            fx += bw - 4;
+            fi++;
+          }
+          horizonCtx.globalAlpha = 1.0;
+
+          // Subtle suspension bridge silhouette across the bay
+          const brX = Math.round(overscan + pxW * 0.66);
+          const brTopY = Math.round(cachedHorizonY * 0.36);
+          horizonCtx.strokeStyle = midTower;
+          horizonCtx.lineWidth = 2;
+          horizonCtx.beginPath();
+          horizonCtx.moveTo(brX - 38, cachedHorizonY + 4);
+          horizonCtx.lineTo(brX - 38, brTopY);
+          horizonCtx.moveTo(brX + 38, cachedHorizonY + 4);
+          horizonCtx.lineTo(brX + 38, brTopY);
+          horizonCtx.moveTo(brX - 75, cachedHorizonY - 3);
+          horizonCtx.quadraticCurveTo(brX - 55, brTopY + 12, brX - 38, brTopY);
+          horizonCtx.quadraticCurveTo(brX, brTopY + 18, brX + 38, brTopY);
+          horizonCtx.quadraticCurveTo(brX + 55, brTopY + 12, brX + 75, cachedHorizonY - 3);
+          horizonCtx.stroke();
+
+          // Depth layer 2: Crisp waterfront architectural high-rises with stepped tops & lit interior windows
           const bWidths = [18, 24, 16, 28, 20, 22, 16, 26, 18, 22];
-          const bHeights = [26, 40, 22, 48, 30, 36, 24, 44, 28, 34];
-          const farTower = sky.id === 'red_moon' ? '#2c0a18' : sky.isNight ? biome.mtnFar : '#334155';
-          const nearTower = sky.id === 'red_moon' ? '#17040c' : sky.isNight ? biome.mtnNear : '#1e293b';
+          const bHeights = [22, 36, 18, 42, 26, 32, 20, 38, 24, 30];
           let bx = 0;
           let b = 0;
           while (bx < hw) {
             const bw = bWidths[b % bWidths.length];
             const bh = bHeights[b % bHeights.length];
             const by = cachedHorizonY - bh + 8;
-            horizonCtx.fillStyle = b % 2 === 0 ? farTower : nearTower;
+            horizonCtx.fillStyle = b % 2 === 0 ? midTower : nearTower;
             horizonCtx.fillRect(bx, by, bw - 2, bh + 6);
-            horizonCtx.fillStyle = sky.id === 'red_moon' ? '#fb7185' : b % 3 === 0 ? '#22d3ee' : '#ec4899';
-            horizonCtx.fillRect(bx, by, bw - 2, 1);
+            if (b % 4 === 1) {
+              horizonCtx.fillRect(bx + 3, by - 4, bw - 8, 4);
+            }
             for (let wy = by + 4; wy < cachedHorizonY + 2; wy += 5) {
               for (let wx = bx + 3; wx < bx + bw - 5; wx += 4) {
-                if ((wx + wy + b) % 3 !== 0) {
+                if ((wx + wy + b) % 4 !== 0) {
                   horizonCtx.fillStyle =
                     sky.id === 'red_moon'
-                      ? (wx + b) % 4 === 0
+                      ? (wx + b) % 3 === 0
                         ? '#fda4af'
                         : '#fbbf24'
-                      : (wx + b) % 4 === 0
-                      ? '#22d3ee'
-                      : (wy + b) % 5 === 0
-                      ? '#f472b6'
+                      : (wx + b) % 5 === 0
+                      ? '#bae6fd'
                       : '#fef08a';
                   horizonCtx.fillRect(wx, wy, 2, 2);
                 }
@@ -404,45 +569,62 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             b++;
           }
         } else if (biome.propStyle === 'cactus') {
+          // Depth layer 1: Distant atmospheric haze canyon range
+          horizonCtx.globalAlpha = 0.65;
           horizonCtx.fillStyle = sky.mtnFar;
           horizonCtx.beginPath();
           horizonCtx.moveTo(0, hh);
           horizonCtx.lineTo(0, Math.round(cachedHorizonY * 0.72));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.14), Math.round(cachedHorizonY * 0.56));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.30), Math.round(cachedHorizonY * 0.56));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.40), Math.round(cachedHorizonY * 0.80));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.65), Math.round(cachedHorizonY * 0.80));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.74), Math.round(cachedHorizonY * 0.52));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.94), Math.round(cachedHorizonY * 0.52));
-          horizonCtx.lineTo(hw, Math.round(cachedHorizonY * 0.76));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.10), Math.round(cachedHorizonY * 0.54));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.28), Math.round(cachedHorizonY * 0.54));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.38), Math.round(cachedHorizonY * 0.78));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.58), Math.round(cachedHorizonY * 0.76));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.70), Math.round(cachedHorizonY * 0.48));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.92), Math.round(cachedHorizonY * 0.48));
+          horizonCtx.lineTo(hw, Math.round(cachedHorizonY * 0.72));
+          horizonCtx.lineTo(hw, hh);
+          horizonCtx.closePath();
+          horizonCtx.fill();
+          horizonCtx.globalAlpha = 1.0;
+
+          // Depth layer 2: Sculpted sandstone mesas & flat-top Monument Valley buttes
+          horizonCtx.fillStyle = sky.mtnNear;
+          horizonCtx.beginPath();
+          horizonCtx.moveTo(0, hh);
+          horizonCtx.lineTo(0, Math.round(cachedHorizonY * 0.84));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.12), Math.round(cachedHorizonY * 0.68));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.23), Math.round(cachedHorizonY * 0.68));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.34), Math.round(cachedHorizonY * 0.88));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.48), Math.round(cachedHorizonY * 0.76));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.56), Math.round(cachedHorizonY * 0.76));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.64), Math.round(cachedHorizonY * 0.88));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.86), Math.round(cachedHorizonY * 0.62));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 1.02), Math.round(cachedHorizonY * 0.62));
+          horizonCtx.lineTo(hw, Math.round(cachedHorizonY * 0.80));
           horizonCtx.lineTo(hw, hh);
           horizonCtx.closePath();
           horizonCtx.fill();
 
-          horizonCtx.fillStyle = sky.mtnNear;
-          horizonCtx.beginPath();
-          horizonCtx.moveTo(0, hh);
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.12), Math.round(cachedHorizonY * 0.70));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.24), Math.round(cachedHorizonY * 0.70));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.34), Math.round(cachedHorizonY * 0.90));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.78), Math.round(cachedHorizonY * 0.88));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.88), Math.round(cachedHorizonY * 0.64));
-          horizonCtx.lineTo(hw, Math.round(cachedHorizonY * 0.64));
-          horizonCtx.lineTo(hw, hh);
-          horizonCtx.closePath();
-          horizonCtx.fill();
+          // Sedimentary rim highlight line along near mesas
+          horizonCtx.fillStyle = sky.isNight ? 'rgba(148, 163, 184, 0.25)' : 'rgba(253, 186, 116, 0.42)';
+          horizonCtx.fillRect(Math.round(overscan + pxW * 0.12), Math.round(cachedHorizonY * 0.68), Math.round(pxW * 0.11), 2);
+          horizonCtx.fillRect(Math.round(overscan + pxW * 0.86), Math.round(cachedHorizonY * 0.62), Math.round(pxW * 0.16), 2);
         } else {
+          // Depth layer 1: Distant hazy mountain range
+          horizonCtx.globalAlpha = 0.68;
           horizonCtx.fillStyle = sky.mtnFar;
           horizonCtx.beginPath();
           horizonCtx.moveTo(0, hh);
           const ridgePts: [number, number][] = [
-            [-0.45, 0.76],
-            [0.08, 0.62],
-            [0.24, 0.80],
-            [0.45, 0.88],
-            [0.65, 0.78],
-            [0.86, 0.56],
-            [1.45, 0.75],
+            [-0.45, 0.74],
+            [-0.12, 0.58],
+            [0.08, 0.56],
+            [0.24, 0.76],
+            [0.44, 0.84],
+            [0.64, 0.74],
+            [0.84, 0.48],
+            [1.06, 0.72],
+            [1.45, 0.74],
           ];
           for (let r = 0; r < ridgePts.length; r++) {
             horizonCtx.lineTo(
@@ -453,34 +635,50 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           horizonCtx.lineTo(hw, hh);
           horizonCtx.closePath();
           horizonCtx.fill();
+          horizonCtx.globalAlpha = 1.0;
 
-          if (biome.id === 'sakura') {
-            const peakX = Math.round(overscan + 0.86 * pxW);
-            const peakY = Math.round(cachedHorizonY * 0.56);
-            horizonCtx.fillStyle =
-              sky.id === 'red_moon'
-                ? '#fda4af'
-                : sky.id === 'golden_sunset'
-                ? '#fed7aa'
-                : sky.id === 'aurora_night'
-                ? '#cffafe'
-                : '#fdf2f8';
+          // Snowcaps on highest alpine / Fuji summits
+          const snowCol =
+            sky.id === 'red_moon'
+              ? '#fda4af'
+              : sky.id === 'golden_sunset'
+              ? '#fed7aa'
+              : sky.id === 'aurora_night'
+              ? '#cffafe'
+              : '#f8fafc';
+          const peakX = Math.round(overscan + 0.84 * pxW);
+          const peakY = Math.round(cachedHorizonY * 0.48);
+          horizonCtx.fillStyle = snowCol;
+          horizonCtx.beginPath();
+          horizonCtx.moveTo(peakX, peakY);
+          horizonCtx.lineTo(peakX + 16, peakY + 13);
+          horizonCtx.lineTo(peakX + 4, peakY + 10);
+          horizonCtx.lineTo(peakX - 4, peakY + 14);
+          horizonCtx.lineTo(peakX - 16, peakY + 12);
+          horizonCtx.closePath();
+          horizonCtx.fill();
+
+          if (biome.id !== 'sakura') {
+            const leftPeakX = Math.round(overscan + 0.08 * pxW);
+            const leftPeakY = Math.round(cachedHorizonY * 0.56);
             horizonCtx.beginPath();
-            horizonCtx.moveTo(peakX, peakY);
-            horizonCtx.lineTo(peakX + 14, peakY + 11);
-            horizonCtx.lineTo(peakX - 14, peakY + 11);
+            horizonCtx.moveTo(leftPeakX, leftPeakY);
+            horizonCtx.lineTo(leftPeakX + 12, leftPeakY + 10);
+            horizonCtx.lineTo(leftPeakX - 12, leftPeakY + 10);
             horizonCtx.closePath();
             horizonCtx.fill();
           }
 
+          // Depth layer 2: Grounded mid-range foothills
           horizonCtx.fillStyle = sky.mtnNear;
           horizonCtx.beginPath();
           horizonCtx.moveTo(0, hh);
           horizonCtx.lineTo(0, Math.round(cachedHorizonY * 0.84));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.18), Math.round(cachedHorizonY * 0.68));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.36), Math.round(cachedHorizonY * 0.90));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.18), Math.round(cachedHorizonY * 0.66));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.36), Math.round(cachedHorizonY * 0.88));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.54), Math.round(cachedHorizonY * 0.82));
           horizonCtx.lineTo(Math.round(overscan + pxW * 0.70), Math.round(cachedHorizonY * 0.89));
-          horizonCtx.lineTo(Math.round(overscan + pxW * 0.94), Math.round(cachedHorizonY * 0.66));
+          horizonCtx.lineTo(Math.round(overscan + pxW * 0.94), Math.round(cachedHorizonY * 0.64));
           horizonCtx.lineTo(hw, Math.round(cachedHorizonY * 0.82));
           horizonCtx.lineTo(hw, hh);
           horizonCtx.closePath();
@@ -502,6 +700,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       cachedHorizonY = Math.round(pxH * 0.35);
       cachedSkyGrad = null;
       cachedMeadowGrad = null;
+      cachedHorizonMistGrad = null;
       cachedSkyKey = null;
     };
     resize();
@@ -557,9 +756,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let fallVelY = 0;
     let fallVelZ = 0;
     let fallRotation = 0;
+    let crashRoll = 0;
     let breachedSliceIdx = -1;
     let breachedSide = 1;
-    let explodedInFall = false;
+    let groundImpacted = false;
+    let groundRestTimer = 0;
+    let crashGroundY = VALLEY_FLOOR_Y;
 
     // 2-Lane Highway Traffic Mode & Dopamine Rush state
     let trafficCars: TrafficCarState[] = [];
@@ -577,6 +779,21 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let overtakeChainTimer = 0;
     let nextMilestoneDist = 250;
     let lastRankCode = 'D';
+
+    // Precision Parking & Gymkhana Mode State
+    let parkingStages: ParkingStageSpec[] = [];
+    let parkingStageIdx = 0;
+    let parkingState: ParkingPhysicsState | null = null;
+    let parkingHits = 0;
+    let parkingStageHits = 0;
+    const PARKING_MAX_HITS = 3;
+    let parkingHitCooldown = 0;
+    let parkingLockTimer = 0;
+    let parkingClearDelay = 0;
+    let parkingStageClearedBanner = false;
+    let parkingReverseHoldTimer = 0;
+    let parkingGearOverride: ParkingGear | null = null;
+    let parkingLastSyncedPropGear: ParkingGear = parkingGearRef.current;
 
     // Juice & Biome Transition
     let hitstopTimer = 0;
@@ -706,6 +923,61 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     const valleyProps: WorldProp3D[] = [];
     let propSpawnCursorZ = 24;
 
+    const MAX_DETACHED_PARTS = 12;
+    const detachedPartPool: DetachedPartDebris[] = Array.from({ length: MAX_DETACHED_PARTS }, () => ({
+      active: false,
+      partId: 'front_bumper',
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      rot: 0,
+      vRot: 0,
+      floorY: VALLEY_FLOOR_Y,
+      color: '#ef4444',
+      accentColor: '#38bdf8',
+      life: 0,
+    }));
+
+    const spawnDetachedPart = (
+      partId: CarPartId,
+      x: number,
+      y: number,
+      z: number,
+      vxBase: number,
+      vzBase: number,
+      floorY: number,
+      color: string,
+      accentColor: string,
+      sideBias = 1
+    ) => {
+      let slot = detachedPartPool.find((p) => !p.active);
+      if (!slot) slot = detachedPartPool[0];
+      const angleSpread = (Math.random() - 0.5) * 2.2;
+      const sideImpulse =
+        partId === 'left_door'
+          ? -4.8
+          : partId === 'right_door'
+          ? 4.8
+          : sideBias * (2.2 + Math.random() * 4.5);
+      slot.active = true;
+      slot.partId = partId;
+      slot.x = x + (Math.random() - 0.5) * 0.5;
+      slot.y = y + 0.55;
+      slot.z = z + (Math.random() - 0.5) * 0.5;
+      slot.vx = vxBase * 0.55 + sideImpulse + Math.cos(angleSpread) * 2.5;
+      slot.vy = 5.4 + Math.random() * 5.2;
+      slot.vz = vzBase * 0.55 + (partId === 'front_bumper' ? -3.0 : partId === 'rear_bumper' || partId === 'spoiler' ? 2.5 : (Math.random() - 0.5) * 3.0);
+      slot.rot = (Math.random() - 0.5) * 0.8;
+      slot.vRot = (Math.random() > 0.5 ? 1 : -1) * (5.5 + Math.random() * 7.5);
+      slot.floorY = floorY;
+      slot.color = color;
+      slot.accentColor = accentColor;
+      slot.life = 2.6;
+    };
+
     const pushSmokePuff = (puff: SmokePuff) => {
       if (smokePuffs.length >= MAX_SMOKE) return;
       smokePuffs.push(puff);
@@ -800,6 +1072,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       isHero: boolean;
       proj: Projected3D;
       traffic?: TrafficCarState;
+      parked?: ParkedObstacleCar;
       isGhost?: boolean;
       ghostFrame?: GhostFrame;
       ghostColor?: string;
@@ -809,6 +1082,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       isHero: false,
       proj: makeEmptyProj(),
       traffic: undefined,
+      parked: undefined,
       isGhost: false,
       ghostFrame: undefined,
       ghostColor: undefined,
@@ -897,24 +1171,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     function resetSimulation() {
       seed = Math.floor(Math.random() * 1000) + 17;
       const isHighway = gameModeRef.current === 'highway_traffic';
-      track = isHighway
-        ? generateHighwayTrack(75, STEP_DIST, seed)
-        : generateSCurveTrack(65, STEP_DIST, seed);
-      const startPt = track[0];
-      const spawnOffset = isHighway ? HIGHWAY_LANE_OFFSET : 0;
-      driftState = createInitialDriftState(
-        startPt.x + startPt.nx * spawnOffset,
-        startPt.z + startPt.nz * spawnOffset,
-        startPt.y,
-        startPt.heading,
-        carRef.current.baseSpeed * 0.78
-      );
-
-      camFocusX = driftState.x;
-      camFocusY = driftState.y;
-      camFocusZ = driftState.z;
-      camHeading = startPt.heading;
-      visualDriftAngle = isHighway ? 0.0 : 0.25;
+      const isParking = gameModeRef.current === 'parking';
 
       score = 0;
       distance = 0;
@@ -923,8 +1180,6 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       runElapsedSec = 0;
       ghostOvertakenTriggered = false;
       wasGhostAhead = false;
-      const savedGhost = loadBestGhostRun(gameModeRef.current);
-      activeGhost = savedGhost || generateDevRivalGhost(gameModeRef.current);
       combo = 1;
       maxCombo = 1;
       wasDrifting = false;
@@ -940,17 +1195,18 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       nearMissText = '';
       nearMissTimer = 0;
       activeDir = 'right';
-
       isFalling = false;
       fallTimer = 0;
       fallVelX = 0;
       fallVelY = 0;
       fallVelZ = 0;
       fallRotation = 0;
+      crashRoll = 0;
       breachedSliceIdx = -1;
       breachedSide = 1;
-      explodedInFall = false;
-
+      groundImpacted = false;
+      groundRestTimer = 0;
+      crashGroundY = VALLEY_FLOOR_Y;
       trafficCars = [];
       nextTrafficId = 1;
       trafficSpawnCursor = 62;
@@ -966,18 +1222,68 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       overtakeChainTimer = 0;
       nextMilestoneDist = 250;
       lastRankCode = 'D';
-      if (isHighway) {
-        const batch = generateTrafficBatch({
-          startS: 58,
-          endS: 270,
-          nextIdStart: nextTrafficId,
-          seed,
-          existingCars: trafficCars,
-          difficultyProgress: 0,
-        });
-        trafficCars = batch.cars;
-        nextTrafficId = batch.nextId;
-        trafficSpawnCursor = 270;
+      parkingStages = [];
+      parkingStageIdx = 0;
+      parkingState = null;
+      parkingHits = 0;
+      parkingStageHits = 0;
+      parkingHitCooldown = 0;
+      parkingLockTimer = 0;
+      parkingClearDelay = 0;
+      parkingStageClearedBanner = false;
+      parkingReverseHoldTimer = 0;
+      parkingGearOverride = null;
+
+      if (isParking) {
+        track = [];
+        parkingStages = createParkingStages();
+        const st0 = parkingStages[0];
+        parkingState = createInitialParkingState(st0);
+        parkingLastSyncedPropGear = st0.spawn.gear;
+        onParkingGearChangeRef.current?.(st0.spawn.gear);
+        driftState = createInitialDriftState(st0.spawn.x, st0.spawn.z, 0, st0.spawn.heading, 0);
+        camFocusX = st0.spawn.x * 0.65;
+        camFocusY = 0;
+        camFocusZ = st0.spawn.z - 6;
+        camHeading = -Math.PI / 2;
+        visualDriftAngle = 0;
+        activeGhost = null;
+      } else {
+        track = isHighway
+          ? generateHighwayTrack(75, STEP_DIST, seed)
+          : generateSCurveTrack(65, STEP_DIST, seed);
+        const startPt = track[0];
+        const spawnOffset = isHighway ? HIGHWAY_LANE_OFFSET : 0;
+        driftState = createInitialDriftState(
+          startPt.x + startPt.nx * spawnOffset,
+          startPt.z + startPt.nz * spawnOffset,
+          startPt.y,
+          startPt.heading,
+          carRef.current.baseSpeed * 0.78
+        );
+
+        camFocusX = driftState.x;
+        camFocusY = driftState.y;
+        camFocusZ = driftState.z;
+        camHeading = startPt.heading;
+        visualDriftAngle = isHighway ? 0.0 : 0.25;
+
+        const savedGhost = loadBestGhostRun(gameModeRef.current);
+        activeGhost = savedGhost || generateDevRivalGhost(gameModeRef.current);
+
+        if (isHighway) {
+          const batch = generateTrafficBatch({
+            startS: 58,
+            endS: 270,
+            nextIdStart: nextTrafficId,
+            seed,
+            existingCars: trafficCars,
+            difficultyProgress: 0,
+          });
+          trafficCars = batch.cars;
+          nextTrafficId = batch.nextId;
+          trafficSpawnCursor = 270;
+        }
       }
 
       hitstopTimer = 0;
@@ -1000,6 +1306,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       debrisChunks.length = 0;
       shockwaves.length = 0;
       callouts.length = 0;
+      for (let i = 0; i < MAX_DETACHED_PARTS; i++) {
+        detachedPartPool[i].active = false;
+      }
       for (let i = 0; i < MAX_FLOATING_TEXTS; i++) {
         floatingTextPool[i].active = false;
         floatingTextPool[i].life = 0;
@@ -1009,8 +1318,11 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       turboChirpCooldown = 0;
       valleyProps.length = 0;
       propSpawnCursorZ = driftState.z + 22;
-      populateTreesAround(driftState.z);
+      if (!isParking) {
+        populateTreesAround(driftState.z);
+      }
 
+      const pStage = isParking ? parkingStages[0] : null;
       onTelemetryRef.current({
         score: 0,
         distance: 0,
@@ -1019,13 +1331,63 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         coinsRun: 0,
         fever: 0,
         isFever: false,
-        speedKmh: Math.round(carRef.current.baseSpeed * 7.2),
+        speedKmh: isParking ? 0 : Math.round(carRef.current.baseSpeed * 7.2),
         direction: activeDir,
         nearMissText: '',
         isDrifting: false,
         biomeName: startBiome.name,
         overtakes: 0,
         nearMisses: 0,
+        parking:
+          isParking && pStage && parkingState
+            ? {
+                stageNum: 1,
+                totalStages: parkingStages.length,
+                stageTitle: pStage.title,
+                subtitle: pStage.subtitle,
+                instruction: pStage.instruction,
+                maneuverType: pStage.maneuverType,
+                gear: parkingState.gear,
+                distM: evaluateParkingBayStatus(parkingState, pStage).centerDistM,
+                angleErrDeg: evaluateParkingBayStatus(parkingState, pStage).headingErrorDeg,
+                hits: 0,
+                maxHits: PARKING_MAX_HITS,
+                lockProgress: 0,
+                isInsideBox: false,
+                isAligned: false,
+                gatesCleared: 0,
+                gatesTotal: pStage.slalomGates.length,
+                proximity: evaluateParkingProximity(parkingState, pStage),
+                carX: parkingState.x,
+                carZ: parkingState.z,
+                carHeading: parkingState.heading,
+                steerAngle: 0,
+                bayX: pStage.targetBay.x,
+                bayZ: pStage.targetBay.z,
+                bayHeading: pStage.targetBay.heading,
+                bayW: pStage.targetBay.width,
+                bayL: pStage.targetBay.length,
+                nearbyCars: pStage.parkedCars.map((c) => ({
+                  x: c.x,
+                  z: c.z,
+                  heading: c.heading,
+                  hw: c.halfWidth,
+                  hl: c.halfLength,
+                })),
+                nearbyCones: pStage.cones.map((c) => ({
+                  x: c.x,
+                  z: c.z,
+                  knocked: c.knocked,
+                })),
+                nearbyBarriers: pStage.barriers.map((b) => ({
+                  x: b.x,
+                  z: b.z,
+                  hw: b.halfW,
+                  hl: b.halfL,
+                  heading: b.heading,
+                })),
+              }
+            : undefined,
       });
     }
 
@@ -1107,6 +1469,17 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       if (e.code === 'ArrowDown' || e.code === 'KeyS') keyDown = true;
       if (e.code === 'Space' || e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
         keyHandbrake = true;
+      }
+      if (gameModeRef.current === 'parking' && parkingState) {
+        if (e.code === 'KeyG' || e.code === 'KeyQ') {
+          parkingGearOverride = parkingState.gear === 'R' ? 'D' : 'R';
+        } else if (e.code === 'Digit1') {
+          parkingGearOverride = 'P';
+        } else if (e.code === 'Digit2') {
+          parkingGearOverride = 'R';
+        } else if (e.code === 'Digit3') {
+          parkingGearOverride = 'D';
+        }
       }
     };
 
@@ -1212,12 +1585,18 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       }
     }
 
-    // Cached car appearance & stats (recomputed only when car/upgrades/custom refs change)
+    // Cached car appearance & stats (recomputed only when car/upgrades/custom/damage refs change)
     let cachedCarObj = carRef.current;
     let cachedUpgradesObj = upgradesRef.current;
     let cachedCustomObj = carCustomRef.current;
+    let cachedDamageObj = carDamageRef.current;
+    let cachedDamageKey = getDamageVisualCacheKey(cachedDamageObj);
+    let activeDamageState: CarDamageState = normalizeCarDamageState(cachedDamageObj);
     let cachedAppearance = resolveCarAppearance(cachedCarObj, cachedCustomObj);
-    let cachedStats = computeEffectiveCarStats(cachedCarObj, cachedUpgradesObj, cachedCustomObj);
+    let cachedStats = computeDamagedStats(
+      computeEffectiveCarStats(cachedCarObj, cachedUpgradesObj, cachedCustomObj),
+      activeDamageState
+    );
 
     let lastHudScore = -1;
     let lastHudDist = -1;
@@ -1245,22 +1624,36 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       const currentCar = carRef.current;
       const currentUpgrades = upgradesRef.current;
       const currentCustom = carCustomRef.current;
+      const extDamage = carDamageRef.current;
+      const extDamageKey = getDamageVisualCacheKey(extDamage);
+
+      if (extDamage !== cachedDamageObj && extDamageKey !== cachedDamageKey) {
+        cachedDamageObj = extDamage;
+        activeDamageState = normalizeCarDamageState(extDamage);
+      }
+
+      const activeDmgKey = getDamageVisualCacheKey(activeDamageState);
       if (
         currentCar !== cachedCarObj ||
         currentUpgrades !== cachedUpgradesObj ||
-        currentCustom !== cachedCustomObj
+        currentCustom !== cachedCustomObj ||
+        activeDmgKey !== cachedDamageKey
       ) {
         cachedCarObj = currentCar;
         cachedUpgradesObj = currentUpgrades;
         cachedCustomObj = currentCustom;
+        cachedDamageKey = activeDmgKey;
         cachedAppearance = resolveCarAppearance(currentCar, currentCustom);
-        cachedStats = computeEffectiveCarStats(currentCar, currentUpgrades, currentCustom);
+        cachedStats = computeDamagedStats(
+          computeEffectiveCarStats(currentCar, currentUpgrades, currentCustom),
+          activeDamageState
+        );
       }
       const currentAppearance = cachedAppearance;
       const stats = cachedStats;
 
-      const finalizeGameOver = (reason: string) => {
-        if (recordedGhostFrameCount > 10) {
+      const finalizeGameOver = (reason: string, isVictory = false) => {
+        if (recordedGhostFrameCount > 10 && gameModeRef.current !== 'parking') {
           const runToSave: GhostRun = {
             mode: gameModeRef.current,
             carId: carRef.current.id,
@@ -1280,6 +1673,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           overtakes,
           nearMisses,
           crashReason: reason,
+          isVictory,
         });
       };
 
@@ -1321,6 +1715,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       }
 
       const isHighwayMode = gameModeRef.current === 'highway_traffic';
+      const isParkingMode = gameModeRef.current === 'parking';
 
       if (phase !== 'playing') {
         soundFX.stopEngineSound();
@@ -1335,9 +1730,17 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         });
       }
 
-      // Title Showcase Cruise along the continuous S-curve viaduct or 2-lane highway!
+      // Title Showcase Cruise along the continuous S-curve viaduct, 2-lane highway, or Parking plaza preview!
       if (phase === 'title') {
         const speed = isHighwayMode ? 17.0 : 13.0;
+        if (isParkingMode && parkingStages.length > 0 && parkingState) {
+          const st = parkingStages[parkingStageIdx];
+          camFocusX += (Math.sin(now * 0.00055) * 1.6 - camFocusX) * Math.min(1, 3.0 * dt);
+          camFocusY = 0;
+          camFocusZ += ((st.targetBay.z + 11) - camFocusZ) * Math.min(1, 3.0 * dt);
+          camHeading = -Math.PI / 2;
+          visualDriftAngle = 0;
+        } else {
         const roadEval = evaluateCarOnSCurveRoad(driftState.x, driftState.z, track, 2.0);
         const targetHeading = roadEval.closestPoint ? roadEval.closestPoint.heading : -Math.PI / 2;
 
@@ -1452,6 +1855,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           camFocusY += (driftState.y - camFocusY) * Math.min(1, 8 * dt);
           camFocusZ += (driftState.z - camFocusZ) * Math.min(1, 8 * dt);
         }
+        }
       } else if (phase === 'playing') {
         if (hitstopTimer > 0) hitstopTimer = Math.max(0, hitstopTimer - dt);
         const simDt = hitstopTimer > 0 ? 0 : dt;
@@ -1462,9 +1866,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           if (fever >= 40 && !isFever && !isFalling) {
             isFever = true;
             feverTimer = 5.0;
-            cameraTrauma = Math.min(1, cameraTrauma + 0.45);
-            screenFlashAlpha = 0.28;
-            screenFlashColor = '#22d3ee';
+            cameraTrauma = Math.min(1, cameraTrauma + 0.32);
             soundFX.playFeverBurst();
             triggerHaptic('fever');
             pushShockwave({
@@ -1491,7 +1893,287 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         if (steerInput === 0 && steerHoldRef.current !== 0) steerInput = steerHoldRef.current;
         if (steerInput === 0 && tapImpulseTimer > 0) steerInput = tapImpulseDir;
 
-        if (!isFalling && !isTrafficCrash && simDt > 0) {
+        if (isParkingMode && parkingState && parkingStages.length > 0 && simDt > 0) {
+          const curStage = parkingStages[parkingStageIdx];
+          if (parkingHitCooldown > 0) parkingHitCooldown = Math.max(0, parkingHitCooldown - simDt);
+
+          // Sync external UI gear selector (P / R / D) or keyboard override
+          if (parkingGearOverride !== null) {
+            parkingState.gear = parkingGearOverride;
+            parkingLastSyncedPropGear = parkingGearOverride;
+            onParkingGearChangeRef.current?.(parkingGearOverride);
+            parkingGearOverride = null;
+          } else if (parkingGearRef.current !== parkingLastSyncedPropGear) {
+            parkingLastSyncedPropGear = parkingGearRef.current;
+            parkingState.gear = parkingGearRef.current;
+            soundFX.playGearShift();
+          }
+
+          let rawGas = (keyUp || pedalGasRef.current) ? 1 : 0;
+          let rawBrake = (keyDown || pedalBrakeRef.current) ? 1 : 0;
+          const rawHandbrake = Boolean(keyHandbrake || pedalHandbrakeRef.current);
+
+          // Casual keyboard ergonomic assist: holding Brake/S when stopped in 'D' shifts into 'R' and reverses smoothly
+          if (rawBrake > 0 && rawGas === 0 && parkingState.gear === 'D' && Math.abs(parkingState.speed) < 0.22) {
+            parkingReverseHoldTimer += simDt;
+            if (parkingReverseHoldTimer >= 0.28) {
+              parkingState.gear = 'R';
+              parkingLastSyncedPropGear = 'R';
+              onParkingGearChangeRef.current?.('R');
+              soundFX.playGearShift();
+              rawGas = 0.72;
+              rawBrake = 0;
+            }
+          } else {
+            parkingReverseHoldTimer = 0;
+          }
+
+          // Flash / Horn handlers inside Parking mode (visual & audio feedback!)
+          const wantFlash = pendingFlashRef.current;
+          const wantHorn = pendingHornRef.current;
+          pendingFlashRef.current = false;
+          pendingHornRef.current = false;
+          if (wantFlash) {
+            highBeamTimer = 0.56;
+            soundFX.playHeadlightFlash();
+            screenFlashAlpha = Math.max(screenFlashAlpha, 0.05);
+            screenFlashColor = currentAppearance.headlightBeamHex;
+          }
+          if (wantHorn) {
+            soundFX.playHorn(currentAppearance.horn);
+            pushShockwave({
+              x: parkingState.x,
+              y: 0.4,
+              z: parkingState.z,
+              radius: 0.5,
+              maxRadius: 3.4,
+              color: '#fef08a',
+              life: 0.28,
+              maxLife: 0.28,
+            });
+          }
+
+          if (!parkingStageClearedBanner) {
+            parkingState = stepParkingPhysics(
+              parkingState,
+              {
+                steerInput,
+                gasInput: rawGas,
+                brakeInput: rawBrake,
+                handbrake: rawHandbrake,
+                gear: parkingState.gear,
+              },
+              {
+                topSpeed: stats.topSpeed,
+                handlingRate: stats.handlingRate,
+              },
+              {
+                halfPlazaWidth: curStage.plazaWidth * 0.5,
+                minZ: curStage.endZ - 5,
+                maxZ: curStage.startZ + 5,
+              },
+              simDt
+            );
+
+            const hitRes = stepParkingObstacles(parkingState, curStage, simDt);
+            const stepMove = Math.hypot(parkingState.vx, parkingState.vz) * simDt;
+            distance += stepMove;
+            wheelSpinPhase += (parkingState.speed >= 0 ? 1 : -1) * stepMove * 0.75;
+
+            if (hitRes.newlyClearedGates > 0) {
+              score += 250 * hitRes.newlyClearedGates;
+              soundFX.playCoinPickup(2);
+              triggerHaptic('light');
+              pushCallout(
+                parkingState.x,
+                1.8,
+                parkingState.z,
+                `GATE CLEAR! +${250 * hitRes.newlyClearedGates}`,
+                '#22d3ee',
+                0.85
+              );
+              onMissionEventRef.current?.({ slalom_clears: hitRes.newlyClearedGates });
+            }
+
+            if (hitRes.coneHitsDelta > 0) {
+              parkingHits += hitRes.coneHitsDelta;
+              parkingStageHits += hitRes.coneHitsDelta;
+              soundFX.playGuardrailSpark();
+              triggerHaptic('medium');
+              cameraTrauma = Math.min(1, cameraTrauma + 0.35);
+              nearMissText = `CONE CLIPPED! (${parkingHits}/${PARKING_MAX_HITS})`;
+              nearMissTimer = 1.1;
+              pushCallout(parkingState.x, 1.8, parkingState.z, 'CONE HIT!', '#f97316', 0.9);
+            }
+
+            if ((hitRes.carBump || hitRes.barrierHit) && parkingHitCooldown <= 0) {
+              parkingHits += 1;
+              parkingStageHits += 1;
+              parkingHitCooldown = 0.65;
+              soundFX.playTrafficCrunch(0.55);
+              triggerHaptic('heavy');
+              cameraTrauma = Math.min(1, cameraTrauma + 0.45);
+              screenFlashAlpha = 0.14;
+              screenFlashColor = '#e2e8f0';
+
+              const impactDir = parkingState.gear === 'R' ? 'rear' : 'front';
+              const pkDmg = applyImpactToCarDamage({
+                damage: activeDamageState,
+                impactZone: impactDir,
+                severity: 0.44,
+                sideBias: steerInput < 0 ? -1 : 1,
+              });
+              activeDamageState = pkDmg.nextDamage;
+              onCarDamageChangeRef.current?.(activeDamageState);
+              if (pkDmg.newlyDetached.length > 0) {
+                soundFX.playPartDetach(pkDmg.newlyDetached.length);
+                for (let dp = 0; dp < pkDmg.newlyDetached.length; dp++) {
+                  spawnDetachedPart(
+                    pkDmg.newlyDetached[dp],
+                    parkingState.x,
+                    0,
+                    parkingState.z,
+                    parkingState.vx,
+                    parkingState.vz,
+                    0.06,
+                    currentAppearance.primaryColor,
+                    currentCar.accentColor,
+                    steerInput < 0 ? -1 : 1
+                  );
+                }
+              }
+
+              const lbl = hitRes.carBump ? 'BUMPER BENT!' : 'BARRIER IMPACT!';
+              nearMissText = `${lbl} (${parkingHits}/${PARKING_MAX_HITS})`;
+              nearMissTimer = 1.2;
+              pushCallout(parkingState.x, 1.9, parkingState.z, lbl, '#ef4444', 0.95);
+            }
+
+            if (parkingHits >= PARKING_MAX_HITS) {
+              finalizeGameOver('Parking Test Failed (3 Strikes)', false);
+            }
+
+            // Emit tire marks & smoke on fast handbrake J-turns in Stage 6 or peel-outs!
+            if (parkingState.isDrifting || (rawHandbrake && Math.abs(parkingState.speed) > 4.0)) {
+              tireEmitMode = 'drift';
+              tireSlipIntensity = Math.max(0.45, parkingState.driftFactor);
+              tireGassingNow = rawGas > 0;
+              tireBrakingNow = rawHandbrake;
+            }
+
+            const bayStatus = evaluateParkingBayStatus(parkingState, curStage);
+            if (bayStatus.readyToLock) {
+              parkingLockTimer =
+                parkingState.gear === 'P'
+                  ? 1.0
+                  : Math.min(1.0, parkingLockTimer + simDt * 1.15);
+              if (parkingLockTimer >= 1.0) {
+                parkingStageClearedBanner = true;
+                parkingClearDelay = 1.25;
+                const cleanBonus = parkingStageHits === 0 ? 800 : 0;
+                const stagePts = 1500 + parkingStageIdx * 400 + cleanBonus;
+                const stageCoins = 40 + parkingStageIdx * 10;
+                score += stagePts;
+                coinsRun += stageCoins;
+                soundFX.playFeverBurst();
+                triggerHaptic('fever');
+                nearMissText =
+                  parkingStageHits === 0
+                    ? `CLEAN BAY LOCKED! +${stagePts} PTS`
+                    : `BAY LOCKED! +${stagePts} PTS`;
+                nearMissTimer = 1.4;
+                pushShockwave({
+                  x: curStage.targetBay.x,
+                  y: 0.12,
+                  z: curStage.targetBay.z,
+                  radius: 0.5,
+                  maxRadius: 4.5,
+                  color: '#10b981',
+                  life: 0.45,
+                  maxLife: 0.45,
+                });
+                pushCallout(
+                  curStage.targetBay.x,
+                  2.0,
+                  curStage.targetBay.z,
+                  `BAY CLEARED! +${stageCoins} CR`,
+                  '#10b981',
+                  1.2
+                );
+
+                const mEv: Partial<Record<MissionType, number>> = { parking_clears: 1 };
+                if (parkingStageHits === 0) mEv.zero_hit_parks = 1;
+                if (curStage.maneuverType === 'parallel') mEv.parallel_parks = 1;
+                if (
+                  curStage.maneuverType === 'reverse_bay' ||
+                  curStage.maneuverType === 'slalom_reverse'
+                ) {
+                  mEv.reverse_parks = 1;
+                }
+                if (curStage.maneuverType === 'gymkhana_180') mEv.gymkhana_parks = 1;
+                if (bayStatus.centerDistM <= 0.35 && bayStatus.headingErrorDeg <= 4.0) {
+                  mEv.precision_aligns = 1;
+                }
+                onMissionEventRef.current?.(mEv);
+              }
+            } else {
+              parkingLockTimer = Math.max(0, parkingLockTimer - simDt * 1.8);
+            }
+          } else {
+            parkingClearDelay -= simDt;
+            if (parkingClearDelay <= 0) {
+              if (parkingStageIdx + 1 < parkingStages.length) {
+                parkingStageIdx += 1;
+                const nextSt = parkingStages[parkingStageIdx];
+                parkingState = createInitialParkingState(nextSt);
+                parkingStageHits = 0;
+                parkingLockTimer = 0;
+                parkingStageClearedBanner = false;
+                parkingLastSyncedPropGear = nextSt.spawn.gear;
+                onParkingGearChangeRef.current?.(nextSt.spawn.gear);
+                skidHead = 0;
+                skidCount = 0;
+                frontSkidHead = 0;
+                frontSkidCount = 0;
+                nearMissText = `STAGE ${nextSt.stageNumber}: ${nextSt.subtitle.toUpperCase()}`;
+                nearMissTimer = 1.8;
+              } else {
+                finalizeGameOver('Parking Mastery Complete!', true);
+              }
+            }
+          }
+
+          // Sync driftState mirror for camera & tire smoke/lights helpers
+          driftState.x = parkingState.x;
+          driftState.z = parkingState.z;
+          driftState.y = 0;
+          driftState.vx = parkingState.vx;
+          driftState.vz = parkingState.vz;
+          driftState.heading = parkingState.heading;
+          driftState.isDrifting = parkingState.isDrifting;
+          driftState.driftFactor = parkingState.driftFactor;
+          visualDriftAngle = 0;
+
+          const pSpeedMag = Math.hypot(parkingState.vx, parkingState.vz);
+          const pSpeedRatio = Math.min(1, pSpeedMag / 16);
+          soundFX.updateEngineSound({
+            active: true,
+            speedRatio: Math.max(0.08, pSpeedRatio),
+            isGassing: rawGas > 0 && parkingState.gear !== 'P',
+            isBraking: rawBrake > 0 || rawHandbrake,
+            isFever: false,
+            soundProfile: currentAppearance.sound,
+          });
+          soundFX.updateMusicEffects({
+            phase: 'playing',
+            speedRatio: pSpeedRatio,
+            isDrifting: parkingState.isDrifting,
+            driftFactor: parkingState.driftFactor,
+            isFever: false,
+            isBraking: rawBrake > 0,
+            isNearEdge: false,
+          });
+        } else if (!isFalling && !isTrafficCrash && simDt > 0) {
           if (isFever) {
             feverTimer -= simDt;
             fever = Math.max(0, (feverTimer / 5.0) * 100);
@@ -1522,8 +2204,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             (isFever ? 1.28 : 1.0) +
             (slipstreamBoostTimer > 0 ? 0.18 : slipstreamCharge * 0.14) +
             Math.min(0.25, distance * 0.00025);
-          const brakeInput = keyDown ? 1 : 0;
+          const brakeInput = keyDown || pedalBrakeRef.current ? 1 : 0;
           const accelInput = brakeInput > 0 ? 0 : 1;
+          const effectiveHandbrake = Boolean(keyHandbrake || pedalHandbrakeRef.current);
 
           if (isHighwayMode) {
             driftState = stepHighwayPhysics(
@@ -1532,7 +2215,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 steerInput,
                 accelInput,
                 brakeInput,
-                handbrake: keyHandbrake,
+                handbrake: effectiveHandbrake,
                 roadTangentAngle: roadTangent,
               },
               {
@@ -1662,9 +2345,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             const mCoins = 20;
             coinsRun += mCoins;
             score += 400;
-            cameraTrauma = Math.min(1, cameraTrauma + 0.25);
-            screenFlashAlpha = 0.2;
-            screenFlashColor = '#fbbf24';
+            cameraTrauma = Math.min(1, cameraTrauma + 0.16);
             soundFX.playMilestone();
             nearMissText = `${reached}m MILESTONE! +${mCoins} CR`;
             nearMissTimer = 1.6;
@@ -1692,8 +2373,6 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           if (curRank.rank !== lastRankCode) {
             lastRankCode = curRank.rank;
             if (curRank.rank !== 'D') {
-              screenFlashAlpha = 0.24;
-              screenFlashColor = curRank.color;
               soundFX.playMilestone();
               nearMissText = `RANK UP · ${curRank.rank} ${curRank.title}!`;
               nearMissTimer = 1.8;
@@ -1755,93 +2434,59 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
           // Check Road / Guardrail Bounds
           if (!roadCheck.onRoad) {
-            if (gameModeRef.current === 'zen') {
-              // ZEN MODE: NEVER FALL OR BREACH! Soft rebound & boundary clamping
-              const halfW = roadCheck.halfWidth || 4.9;
-              const maxLat = Math.max(0.5, halfW - 0.20);
-              const clampedLat = Math.max(-maxLat, Math.min(maxLat, roadCheck.signedPerpOffset));
-
-              if (roadCheck.closestPoint) {
-                driftState.x = roadCheck.closestPoint.x + roadCheck.closestPoint.nx * clampedLat;
-                driftState.z = roadCheck.closestPoint.z + roadCheck.closestPoint.nz * clampedLat;
-
-                const vFwd = driftState.vx * roadCheck.closestPoint.tx + driftState.vz * roadCheck.closestPoint.tz;
-                const vLat = driftState.vx * roadCheck.closestPoint.nx + driftState.vz * roadCheck.closestPoint.nz;
-                const bounceSign = clampedLat >= 0 ? -1 : 1;
-                const reboundVLat = bounceSign * Math.abs(vLat) * 0.4;
-
-                driftState.vx = roadCheck.closestPoint.tx * vFwd + roadCheck.closestPoint.nx * reboundVLat;
-                driftState.vz = roadCheck.closestPoint.tz * vFwd + roadCheck.closestPoint.nz * reboundVLat;
-              }
-
-              soundFX.playGearShift();
-              triggerHaptic('light');
-              cameraTrauma = Math.min(0.25, cameraTrauma + 0.12);
-              pushCallout(driftState.x, driftState.y + 1.6, driftState.z, 'CHILL FLOW', '#38bdf8', 0.65);
-
-              // Soft dust and gentle sparks
-              for (let i = 0; i < 4; i++) {
-                const ang = Math.random() * Math.PI * 2;
-                pushDebrisChunk({
-                  x: driftState.x,
-                  y: driftState.y + 0.35,
-                  z: driftState.z,
-                  vx: Math.cos(ang) * (1.5 + Math.random() * 2.5),
-                  vy: 1.2 + Math.random() * 1.8,
-                  vz: Math.sin(ang) * (1.5 + Math.random() * 2.5),
-                  size: 0.18,
-                  w: 0.25,
-                  h: 0.15,
-                  gravity: 10,
-                  rot: Math.random() * 4,
-                  vRot: (Math.random() - 0.5) * 6,
-                  life: 0.4,
-                  color: '#93c5fd',
-                });
-              }
-              pushSmokePuff({
-                x: driftState.x,
-                y: driftState.y + 0.2,
-                z: driftState.z,
-                vx: (Math.random() - 0.5) * 1.2,
-                vy: 0.8 + Math.random() * 0.6,
-                vz: (Math.random() - 0.5) * 1.2,
-                radius: 0.3,
-                maxRadius: 0.9,
-                life: 0.35,
-                maxLife: 0.35,
-                tint: 'cyan',
-              });
-            } else {
-              // STAGE 1: BREACHED GUARDRAIL -> Shatter Steel Rail, Flash, Shockwave & Launch Over Edge!
+            {
+              // STAGE 1: BREACHED GUARDRAIL -> Shatter Steel Rail, Bend Side Panels & Launch Into Valley Drop (NO Explosion)
               isFalling = true;
               fallTimer = 0;
-              explodedInFall = false;
+              groundImpacted = false;
+              groundRestTimer = 0;
               breachedSliceIdx = roadCheck.closestPoint ? roadCheck.closestPoint.index : -1;
               breachedSide = roadCheck.signedPerpOffset >= 0 ? 1 : -1;
-              fallVelX = driftState.vx * 0.86 + breachedSide * 3.8;
-              fallVelZ = driftState.vz * 0.86;
-              fallVelY = 5.4; // Dramatic vault over guardrail
-              hitstopTimer = 0.08;
-              cameraTrauma = 1.0;
-              screenFlashAlpha = 0.72;
-              screenFlashColor = '#fef08a';
+              crashRoll = breachedSide * 0.22;
+              fallVelX = driftState.vx * 0.84 + breachedSide * 3.8;
+              fallVelZ = driftState.vz * 0.84;
+              fallVelY = 3.2; // Brief launch over broken steel rail before rapid gravity drop
+              hitstopTimer = 0.07;
+              cameraTrauma = 0.88;
+              screenFlashAlpha = 0.25;
+              screenFlashColor = '#e2e8f0';
               soundFX.playFallAndDestroy();
               triggerHaptic('heavy');
 
-              pushShockwave({
-                x: driftState.x,
-                y: driftState.y + 0.4,
-                z: driftState.z,
-                radius: 0.4,
-                maxRadius: 4.8,
-                color: '#fbbf24',
-                life: 0.36,
-                maxLife: 0.36,
+              // Apply initial guardrail scrape damage (bends doors/bumpers on breached side)
+              const railDmg = applyImpactToCarDamage({
+                damage: activeDamageState,
+                impactZone: breachedSide < 0 ? 'left' : 'right',
+                severity: 0.48,
+                sideBias: breachedSide,
               });
+              activeDamageState = railDmg.nextDamage;
+              onCarDamageChangeRef.current?.(activeDamageState);
+              if (railDmg.newlyDetached.length > 0) {
+                soundFX.playPartDetach(railDmg.newlyDetached.length);
+                const anchorStart = roadCheck.closestPoint;
+                const curBiomeStart = resolveRoadBiome(roadModeRef.current, distance).id;
+                const latStart = anchorStart ? roadCheck.signedPerpOffset : breachedSide * 10;
+                const initFloorY = sampleTerrainElevation(latStart, driftState.z, curBiomeStart) + 0.15;
+                for (let dp = 0; dp < railDmg.newlyDetached.length; dp++) {
+                  spawnDetachedPart(
+                    railDmg.newlyDetached[dp],
+                    driftState.x,
+                    driftState.y,
+                    driftState.z,
+                    fallVelX,
+                    fallVelZ,
+                    initFloorY,
+                    currentAppearance.primaryColor,
+                    currentCar.accentColor,
+                    breachedSide
+                  );
+                }
+              }
+
               pushCallout(driftState.x, driftState.y + 1.6, driftState.z, 'GUARDRAIL BREACH!', '#fbbf24', 0.85);
 
-              // Shatter Twisted Steel Guardrail Beam Chunks + Blazing Sparks!
+              // Shatter Twisted Steel Guardrail Beams + Metallic Sparks (No fire!)
               const activeBiomeNow = resolveRoadBiome(roadModeRef.current, distance);
               for (let i = 0; i < 8; i++) {
                 const ang = Math.random() * Math.PI * 2;
@@ -1856,29 +2501,29 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   size: 0.5,
                   w: 1.4,
                   h: 0.24,
-                  gravity: 22,
+                  gravity: 24,
                   rot: Math.random() * 6,
                   vRot: (Math.random() - 0.5) * 16,
-                  life: 1.05,
-                  color: i % 2 === 0 ? activeBiomeNow.railLight : '#334155',
+                  life: 1.4,
+                  color: i % 2 === 0 ? activeBiomeNow.railLight : '#475569',
                 });
               }
-              for (let i = 0; i < 24; i++) {
+              for (let i = 0; i < 18; i++) {
                 const ang = Math.random() * Math.PI * 2;
-                const spd = 5 + Math.random() * 12;
+                const spd = 5 + Math.random() * 11;
                 pushDebrisChunk({
                   x: driftState.x,
                   y: driftState.y + 0.6,
                   z: driftState.z,
                   vx: Math.cos(ang) * spd,
-                  vy: 3 + Math.random() * 7,
+                  vy: 3 + Math.random() * 6,
                   vz: Math.sin(ang) * spd,
-                  size: 0.24 + Math.random() * 0.28,
-                  gravity: 18,
+                  size: 0.22 + Math.random() * 0.24,
+                  gravity: 22,
                   rot: Math.random() * 6,
                   vRot: (Math.random() - 0.5) * 18,
                   life: 0.65,
-                  color: i % 3 === 0 ? '#fef08a' : i % 3 === 1 ? '#fbbf24' : '#f97316',
+                  color: i % 2 === 0 ? '#fef08a' : '#fbbf24',
                 });
               }
             }
@@ -2003,8 +2648,6 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               if (fever >= 100) {
                 isFever = true;
                 feverTimer = 5.0;
-                screenFlashAlpha = 0.26;
-                screenFlashColor = '#22d3ee';
                 soundFX.playFeverBurst();
                 triggerHaptic('fever');
                 pushShockwave({
@@ -2017,17 +2660,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   life: 0.42,
                   maxLife: 0.42,
                 });
-                nearMissText = gameModeRef.current === 'zen' ? 'ZEN FLOW BOOST!' : 'OVERDRIVE FEVER x2.5!';
+                nearMissText = 'OVERDRIVE FEVER x2.5!';
                 nearMissTimer = 1.6;
               }
             }
 
             if (hardRailScrape) {
               if (nearMissTimer <= 0) {
-                nearMissText =
-                  gameModeRef.current === 'zen'
-                    ? 'ZEN FLOW'
-                    : `RAIL SCRAPE! +${Math.round(scoreDelta * 4)}`;
+                nearMissText = `RAIL SCRAPE! +${Math.round(scoreDelta * 4)}`;
                 nearMissTimer = 0.65;
               }
               if (Math.random() < 0.75) {
@@ -2056,8 +2696,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             // Record Interactive Tire State (applied after camera lock-in so marks & smoke match exact pixel tires!)
             const simSpeedNow = Math.hypot(driftState.vx, driftState.vz);
             const activeTireId = currentCustom?.tires || 'stock';
-            const isGasInputNow = (phase === 'playing' && !keyDown) || isFever;
-            const isBrakeInputNow = keyDown && simSpeedNow > 4.5;
+            const isGasInputNow = (phase === 'playing' && !(keyDown || pedalBrakeRef.current)) || isFever;
+            const isBrakeInputNow = (keyDown || pedalBrakeRef.current) && simSpeedNow > 4.5;
             const isLaunchBurnout =
               isGasInputNow &&
               ((simSpeedNow > 2.5 && simSpeedNow < 13.5) ||
@@ -2257,9 +2897,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   pt.boostTriggered = true;
                   fever = Math.min(100, fever + 45);
                   score += 150 * combo;
-                  cameraTrauma = Math.min(1, cameraTrauma + 0.35);
-                  screenFlashAlpha = 0.22;
-                  screenFlashColor = '#22d3ee';
+                  cameraTrauma = Math.min(1, cameraTrauma + 0.22);
                   soundFX.playFeverBurst();
                   triggerHaptic('fever');
                   pushShockwave({
@@ -2300,7 +2938,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             if (wantFlash) {
               highBeamTimer = 0.56;
               soundFX.playHeadlightFlash();
-              screenFlashAlpha = Math.max(screenFlashAlpha, 0.12);
+              screenFlashAlpha = Math.max(screenFlashAlpha, 0.06);
               screenFlashColor = currentAppearance.headlightBeamHex;
               if (isHighwayMode && roadCheck.closestPoint) {
                 const playerSNow =
@@ -2317,6 +2955,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   soundFX.playTrafficYieldChime();
                   if (res.newlyFlashedCount > 0) {
                     score += 60 * res.newlyFlashedCount * combo;
+                    onMissionEventRef.current?.({ flash_yields: res.newlyFlashedCount });
                   }
                   nearMissText = 'HIGH-BEAM FLASH · TRAFFIC YIELDING!';
                   nearMissTimer = 1.2;
@@ -2357,6 +2996,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 });
                 if (res.yieldedCars.length > 0) {
                   soundFX.playTrafficYieldChime();
+                  if (res.newlyFlashedCount > 0) {
+                    onMissionEventRef.current?.({ flash_yields: res.newlyFlashedCount });
+                  }
                   nearMissText = 'HORN CLEAR · PASSING LANE!';
                   nearMissTimer = 1.1;
                 }
@@ -2380,130 +3022,108 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
               if (trafficEval.collidedCar) {
                 const hit = trafficEval.collidedCar;
-                if (gameModeRef.current === 'zen') {
-                  // ZEN MODE: Gentle deflection occurs without wrecking
-                  const defSide: -1 | 1 = roadCheck.signedPerpOffset >= hit.lateralOffset ? 1 : -1;
-                  const halfW = roadCheck.halfWidth || 4.9;
-                  const maxLat = Math.max(0.5, halfW - 0.20);
-                  const targetOffset = hit.lateralOffset + defSide * (0.90 + hit.halfWidth + 0.35);
-                  const clampedLat = Math.max(-maxLat, Math.min(maxLat, targetOffset));
-
-                  if (roadCheck.closestPoint) {
-                    driftState.x = roadCheck.closestPoint.x + roadCheck.closestPoint.nx * clampedLat;
-                    driftState.z = roadCheck.closestPoint.z + roadCheck.closestPoint.nz * clampedLat;
-
-                    const vFwd = driftState.vx * roadCheck.closestPoint.tx + driftState.vz * roadCheck.closestPoint.tz;
-                    const reboundVLat = defSide * Math.max(1.5, Math.abs(driftState.vx * roadCheck.closestPoint.nx + driftState.vz * roadCheck.closestPoint.nz) * 0.4);
-                    driftState.vx = roadCheck.closestPoint.tx * vFwd + roadCheck.closestPoint.nx * reboundVLat;
-                    driftState.vz = roadCheck.closestPoint.tz * vFwd + roadCheck.closestPoint.nz * reboundVLat;
-                  }
-
-                  soundFX.playGearShift();
-                  triggerHaptic('light');
-                  cameraTrauma = Math.min(0.2, cameraTrauma + 0.1);
-                  pushCallout(driftState.x, driftState.y + 1.8, driftState.z, 'SMOOTH DEFLECT', '#38bdf8', 0.65);
-
-                  for (let k = 0; k < 5; k++) {
-                    const ang = Math.random() * Math.PI * 2;
-                    pushDebrisChunk({
-                      x: driftState.x,
-                      y: driftState.y + 0.35,
-                      z: driftState.z,
-                      vx: Math.cos(ang) * (1.8 + Math.random() * 2),
-                      vy: 1.2 + Math.random() * 1.5,
-                      vz: Math.sin(ang) * (1.8 + Math.random() * 2),
-                      size: 0.18,
-                      w: 0.2,
-                      h: 0.2,
-                      gravity: 10,
-                      rot: Math.random() * 4,
-                      vRot: (Math.random() - 0.5) * 6,
-                      life: 0.35,
-                      color: '#67e8f9',
-                    });
-                  }
-                } else {
+                {
                   isTrafficCrash = true;
                   trafficCrashTimer = 0;
                   crashReason = hit.isOncoming ? 'Head-On Collision' : 'Traffic Impact';
-                  hitstopTimer = 0.09;
+                  crashGroundY = driftState.y + 0.04;
+                  const sideBias = roadCheck.signedPerpOffset >= 0 ? 1 : -1;
+                  crashRoll = sideBias * (hit.isOncoming ? 0.34 : 0.24);
+                  hitstopTimer = 0.085;
                   cameraTrauma = 1.0;
-                  screenFlashAlpha = 0.85;
-                  screenFlashColor = hit.isOncoming ? '#fef08a' : '#ef4444';
-                  soundFX.playFallAndDestroy();
+                  screenFlashAlpha = 0.32;
+                  screenFlashColor = '#f8fafc';
+                  soundFX.playTrafficCrunch(hit.isOncoming ? 1.25 : 0.95);
                   triggerHaptic('heavy');
+
+                  const tDmg = applyImpactToCarDamage({
+                    damage: activeDamageState,
+                    impactZone: 'front',
+                    severity: hit.isOncoming ? 1.28 : 0.95,
+                    sideBias,
+                  });
+                  activeDamageState = tDmg.nextDamage;
+                  onCarDamageChangeRef.current?.(activeDamageState);
+                  if (tDmg.newlyDetached.length > 0) {
+                    soundFX.playPartDetach(tDmg.newlyDetached.length);
+                    for (let dp = 0; dp < tDmg.newlyDetached.length; dp++) {
+                      spawnDetachedPart(
+                        tDmg.newlyDetached[dp],
+                        driftState.x,
+                        driftState.y,
+                        driftState.z,
+                        driftState.vx * 0.35,
+                        driftState.vz * 0.35,
+                        crashGroundY,
+                        currentAppearance.primaryColor,
+                        currentCar.accentColor,
+                        sideBias
+                      );
+                    }
+                  }
 
                   pushShockwave({
                     x: driftState.x,
-                    y: driftState.y + 0.3,
-                    z: driftState.z,
-                    radius: 0.5,
-                    maxRadius: 7.2,
-                    color: '#fef08a',
-                    life: 0.5,
-                    maxLife: 0.5,
-                  });
-                  pushShockwave({
-                    x: driftState.x,
-                    y: driftState.y + 0.3,
+                    y: driftState.y + 0.25,
                     z: driftState.z,
                     radius: 0.4,
                     maxRadius: 5.5,
-                    color: '#ef4444',
-                    life: 0.4,
-                    maxLife: 0.4,
+                    color: '#cbd5e1',
+                    life: 0.38,
+                    maxLife: 0.38,
                   });
                   pushCallout(
                     driftState.x,
                     driftState.y + 2.1,
                     driftState.z,
-                    hit.isOncoming ? 'HEAD-ON CRASH!' : 'TRAFFIC WRECK!',
-                    '#ef4444',
-                    0.9
+                    hit.isOncoming ? 'HEAD-ON CRASH!' : 'HEAVY IMPACT!',
+                    '#fbbf24',
+                    0.95
                   );
 
-                  const wreckColors = [
-                    currentCar.primaryColor,
+                  // Glass shards, steel sparks & painted trim bits (Zero explosion fireballs!)
+                  const crashChips = [
+                    currentAppearance.primaryColor,
                     hit.color,
-                    '#1e293b',
-                    '#ef4444',
-                    '#f97316',
+                    '#94a3b8',
+                    '#bae6fd',
                     '#fef08a',
+                    '#475569',
                   ];
-                  for (let k = 0; k < 44; k++) {
+                  for (let k = 0; k < 34; k++) {
                     const ang = Math.random() * Math.PI * 2;
-                    const spd = 4 + Math.random() * 14;
-                    const isPanel = k < 12;
+                    const spd = 4 + Math.random() * 12;
+                    const isShard = k < 10;
                     pushDebrisChunk({
                       x: driftState.x,
                       y: driftState.y + 0.5,
                       z: driftState.z,
                       vx: Math.cos(ang) * spd,
-                      vy: 5 + Math.random() * 11,
+                      vy: 4 + Math.random() * 8,
                       vz: Math.sin(ang) * spd,
-                      size: isPanel ? 0.52 : 0.36 + Math.random() * 0.4,
-                      w: isPanel ? 0.85 : undefined,
-                      h: isPanel ? 0.42 : undefined,
-                      gravity: 23,
+                      size: isShard ? 0.32 : 0.24 + Math.random() * 0.26,
+                      w: isShard ? 0.55 : undefined,
+                      h: isShard ? 0.28 : undefined,
+                      gravity: 24,
                       rot: Math.random() * 6,
-                      vRot: (Math.random() - 0.5) * 18,
-                      life: 0.95,
-                      color: wreckColors[k % wreckColors.length],
+                      vRot: (Math.random() - 0.5) * 16,
+                      life: 1.0,
+                      color: crashChips[k % crashChips.length],
                     });
                   }
-                  for (let k = 0; k < 18; k++) {
+                  for (let k = 0; k < 12; k++) {
                     pushSmokePuff({
-                      x: driftState.x + (Math.random() - 0.5) * 2.0,
-                      y: driftState.y + 0.5,
-                      z: driftState.z + (Math.random() - 0.5) * 2.0,
-                      vx: (Math.random() - 0.5) * 6,
-                      vy: 3.0 + Math.random() * 5.5,
-                      vz: (Math.random() - 0.5) * 6,
-                      radius: 0.85,
-                      maxRadius: 2.9,
-                      life: 0.8,
-                      maxLife: 0.8,
-                      tint: k % 3 === 0 ? 'dark' : 'fire',
+                      x: driftState.x + (Math.random() - 0.5) * 1.4,
+                      y: driftState.y + 0.4,
+                      z: driftState.z + (Math.random() - 0.5) * 1.4,
+                      vx: (Math.random() - 0.5) * 4.5,
+                      vy: 2.2 + Math.random() * 3.8,
+                      vz: (Math.random() - 0.5) * 4.5,
+                      radius: 0.65,
+                      maxRadius: 2.3,
+                      life: 0.78,
+                      maxLife: 0.78,
+                      tint: k % 3 === 0 ? 'dark' : 'steam',
                     });
                   }
                 }
@@ -2550,24 +3170,17 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                     triggerHaptic('double');
                   }
                   cameraTrauma = Math.min(1, cameraTrauma + 0.18);
-                  if (gameModeRef.current === 'zen') {
-                    const zenPhrases = ['CHILL VIBES', 'SMOOTH FLOW', 'SERENITY CRUISE'];
-                    const phrase = zenPhrases[Math.floor(Math.random() * zenPhrases.length)];
-                    nearMissText = `${phrase}! +${bonus}`;
-                    pushCallout(driftState.x, driftState.y + 1.85, driftState.z, phrase, '#38bdf8', 0.95);
-                  } else {
-                    nearMissText = nm.isOncoming
-                      ? `ONCOMING DODGE! +${bonus}`
-                      : `CLOSE PASS! +${bonus}`;
-                    pushCallout(
-                      driftState.x,
-                      driftState.y + 1.85,
-                      driftState.z,
-                      nm.isOncoming ? `ONCOMING DODGE! +${bonus}` : `NEAR MISS! +${bonus}`,
-                      nm.isOncoming ? '#f472b6' : '#22d3ee',
-                      0.95
-                    );
-                  }
+                  nearMissText = nm.isOncoming
+                    ? `ONCOMING DODGE! +${bonus}`
+                    : `CLOSE PASS! +${bonus}`;
+                  pushCallout(
+                    driftState.x,
+                    driftState.y + 1.85,
+                    driftState.z,
+                    nm.isOncoming ? `ONCOMING DODGE! +${bonus}` : `NEAR MISS! +${bonus}`,
+                    nm.isOncoming ? '#f472b6' : '#22d3ee',
+                    0.95
+                  );
                   nearMissTimer = 1.2;
                   pushShockwave({
                     x: driftState.x,
@@ -2602,9 +3215,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                     slipstreamBoostTimer = 1.35;
                     slipstreamCharge = 0;
                     slipstreamCarId = null;
-                    cameraTrauma = Math.min(1, cameraTrauma + 0.24);
-                    screenFlashAlpha = 0.18;
-                    screenFlashColor = '#22d3ee';
+                    cameraTrauma = Math.min(1, cameraTrauma + 0.16);
                     soundFX.playSlipstreamPass(combo);
                     nearMissText = `SLIPSTREAM PASS! +${ovBonus}`;
                     nearMissTimer = 1.25;
@@ -2654,180 +3265,227 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 }
               }
             }
-          }
         }
-
-        const finalizeGameOver = (reason: string) => {
-          if (recordedGhostFrameCount > 10) {
-            const appearance = resolveCarAppearance(carRef.current, carCustomRef.current);
-            const runToSave: GhostRun = {
-              mode: gameModeRef.current,
-              carId: carRef.current.id,
-              carColor: appearance.primaryColor,
-              score: Math.round(score),
-              distance: Math.round(distance),
-              createdAt: Date.now(),
-              frames: recordedGhostFrames.slice(0, recordedGhostFrameCount).map((f) => ({ ...f })),
-            };
-            saveBestGhostRun(runToSave);
-          }
-          onGameOverRef.current({
-            score: Math.round(score),
-            distance: Math.round(distance),
-            maxCombo,
-            coinsCollected: coinsRun,
-            overtakes,
-            nearMisses,
-            crashReason: reason,
-          });
-        };
+        }
+        // End of Drift/Highway branch; Parking branch handled above.
 
         if (isFalling && simDt > 0) {
-          // STAGE 2 & 3: Dramatic Fall Off Viaduct, Fire Smoke Trail & Valley Impact Explosion!
+          // STAGE 2 & 3: Realistic Gravity Drop -> Heavy Ground Slam -> Suspension Bounce & Skid (Zero Explosions)
           fallTimer += simDt;
-          fallVelY -= 24.0 * simDt;
+          fallVelY -= 29.0 * simDt;
           driftState.x += fallVelX * simDt;
           driftState.y += fallVelY * simDt;
           driftState.z += fallVelZ * simDt;
-          fallRotation += breachedSide * simDt * 7.8;
 
-          // Continuous billowing fire & dark crash smoke trail while airborne
-          if (!explodedInFall && Math.random() < 0.85) {
-            pushSmokePuff({
-              x: driftState.x + (Math.random() - 0.5) * 0.6,
-              y: driftState.y + 0.2,
-              z: driftState.z + (Math.random() - 0.5) * 0.6,
-              vx: (Math.random() - 0.5) * 2.5,
-              vy: 1.5 + Math.random() * 2.5,
-              vz: (Math.random() - 0.5) * 2.5,
-              radius: 0.4,
-              maxRadius: 1.4,
-              life: 0.45,
-              maxLife: 0.45,
-              tint: Math.random() > 0.45 ? 'fire' : 'dark',
-            });
-          }
+          const anchorNow = findClosestTrackAnchor(driftState.z);
+          const curBiomeNow = resolveRoadBiome(roadModeRef.current, distance);
+          const latOffsetNow = anchorNow
+            ? (driftState.x - anchorNow.x) * anchorNow.nx + (driftState.z - anchorNow.z) * anchorNow.nz
+            : breachedSide * 10;
+          crashGroundY = sampleTerrainElevation(latOffsetNow, driftState.z, curBiomeNow.id) + 0.18;
 
-          if (fallTimer >= 0.42 && !explodedInFall) {
-            explodedInFall = true;
-            hitstopTimer = 0.06;
-            cameraTrauma = 1.0;
-            screenFlashAlpha = 0.85;
-            screenFlashColor = '#ef4444';
+          if (!groundImpacted) {
+            crashRoll += breachedSide * simDt * 1.45;
+            fallRotation = Math.sin(fallTimer * 5.5) * 0.25 + crashRoll * 0.55;
 
-            pushShockwave({
-              x: driftState.x,
-              y: driftState.y + 0.2,
-              z: driftState.z,
-              radius: 0.6,
-              maxRadius: 7.5,
-              color: '#fef08a',
-              life: 0.52,
-              maxLife: 0.52,
-            });
-            pushShockwave({
-              x: driftState.x,
-              y: driftState.y + 0.2,
-              z: driftState.z,
-              radius: 0.4,
-              maxRadius: 5.8,
-              color: '#ef4444',
-              life: 0.42,
-              maxLife: 0.42,
-            });
-            pushCallout(driftState.x, driftState.y + 2.2, driftState.z, 'TOTAL WRECK!', '#ef4444', 0.75);
+            if (driftState.y <= crashGroundY) {
+              driftState.y = crashGroundY;
+              groundImpacted = true;
+              groundRestTimer = 0;
 
-            const wreckPalette = [
-              currentCar.primaryColor,
-              currentCar.accentColor,
-              '#1e293b',
-              '#ef4444',
-              '#f97316',
-              '#fef08a',
-            ];
-            for (let i = 0; i < 48; i++) {
-              const ang = Math.random() * Math.PI * 2;
-              const spd = 4 + Math.random() * 16;
-              const isPanel = i < 12;
-              pushDebrisChunk({
+              // Heavy ground bounce & skid friction
+              fallVelY = Math.max(3.6, Math.abs(fallVelY) * 0.22);
+              fallVelX *= 0.44;
+              fallVelZ *= 0.44;
+              crashRoll = breachedSide * 0.34;
+              fallRotation = crashRoll;
+
+              hitstopTimer = 0.065;
+              cameraTrauma = 1.0;
+              screenFlashAlpha = 0.28;
+              screenFlashColor = '#e2e8f0';
+              soundFX.playGroundSlam(1.2);
+              triggerHaptic('heavy');
+
+              const slamDmg = applyImpactToCarDamage({
+                damage: activeDamageState,
+                impactZone: 'ground_slam',
+                severity: 1.32,
+                sideBias: breachedSide,
+              });
+              activeDamageState = slamDmg.nextDamage;
+              onCarDamageChangeRef.current?.(activeDamageState);
+              if (slamDmg.newlyDetached.length > 0) {
+                soundFX.playPartDetach(slamDmg.newlyDetached.length);
+                for (let dp = 0; dp < slamDmg.newlyDetached.length; dp++) {
+                  spawnDetachedPart(
+                    slamDmg.newlyDetached[dp],
+                    driftState.x,
+                    driftState.y,
+                    driftState.z,
+                    fallVelX,
+                    fallVelZ,
+                    crashGroundY,
+                    currentAppearance.primaryColor,
+                    currentCar.accentColor,
+                    breachedSide
+                  );
+                }
+              }
+
+              // Earthy dust shockwave ring on ground impact
+              const dustRingCol = curBiomeNow.id === 'canyon' ? '#ea580c' : '#d6d3d1';
+              pushShockwave({
                 x: driftState.x,
-                y: driftState.y + 0.3,
+                y: crashGroundY + 0.15,
                 z: driftState.z,
-                vx: Math.cos(ang) * spd,
-                vy: 5 + Math.random() * 12,
-                vz: Math.sin(ang) * spd,
-                size: isPanel ? 0.55 : 0.42 + Math.random() * 0.5,
-                w: isPanel ? 0.9 : undefined,
-                h: isPanel ? 0.45 : undefined,
-                gravity: 24,
-                rot: Math.random() * 6,
-                vRot: (Math.random() - 0.5) * 18,
-                life: 0.95,
-                color: wreckPalette[i % wreckPalette.length],
+                radius: 0.7,
+                maxRadius: 8.4,
+                color: dustRingCol,
+                life: 0.56,
+                maxLife: 0.56,
               });
-            }
-            for (let i = 0; i < 22; i++) {
-              pushSmokePuff({
-                x: driftState.x + (Math.random() - 0.5) * 2.4,
-                y: driftState.y + 0.5,
-                z: driftState.z + (Math.random() - 0.5) * 2.4,
-                vx: (Math.random() - 0.5) * 7,
-                vy: 3.5 + Math.random() * 6.5,
-                vz: (Math.random() - 0.5) * 7,
-                radius: 0.95,
-                maxRadius: 3.2,
-                life: 0.85,
-                maxLife: 0.85,
-                tint: i % 3 === 0 ? 'dark' : 'fire',
-              });
-            }
-          }
+              pushCallout(driftState.x, driftState.y + 2.2, driftState.z, 'GROUND IMPACT!', '#f8fafc', 0.9);
 
-          if (fallTimer >= 1.10) {
-            finalizeGameOver('Guardrail Breached');
+              // Gravel, dirt clods, bent scrap & crisp white metallic sparks
+              const groundPalette = [
+                currentAppearance.primaryColor,
+                currentCar.accentColor,
+                '#78716c',
+                '#475569',
+                '#fef08a',
+                '#94a3b8',
+              ];
+              for (let i = 0; i < 42; i++) {
+                const ang = Math.random() * Math.PI * 2;
+                const spd = 4 + Math.random() * 14;
+                const isScrap = i < 10;
+                pushDebrisChunk({
+                  x: driftState.x,
+                  y: crashGroundY + 0.35,
+                  z: driftState.z,
+                  vx: Math.cos(ang) * spd,
+                  vy: 4 + Math.random() * 9.5,
+                  vz: Math.sin(ang) * spd,
+                  size: isScrap ? 0.45 : 0.28 + Math.random() * 0.34,
+                  w: isScrap ? 0.78 : undefined,
+                  h: isScrap ? 0.36 : undefined,
+                  gravity: 26,
+                  rot: Math.random() * 6,
+                  vRot: (Math.random() - 0.5) * 16,
+                  life: 1.15,
+                  color: groundPalette[i % groundPalette.length],
+                });
+              }
+
+              // Billowing earthy impact dust + white coolant steam puffs
+              for (let i = 0; i < 20; i++) {
+                pushSmokePuff({
+                  x: driftState.x + (Math.random() - 0.5) * 2.4,
+                  y: crashGroundY + 0.4,
+                  z: driftState.z + (Math.random() - 0.5) * 2.4,
+                  vx: (Math.random() - 0.5) * 7.5,
+                  vy: 1.8 + Math.random() * 4.5,
+                  vz: (Math.random() - 0.5) * 7.5,
+                  radius: 0.85,
+                  maxRadius: 3.1,
+                  life: 0.92,
+                  maxLife: 0.92,
+                  tint: i % 3 === 0 ? 'steam' : 'dust',
+                });
+              }
+            }
+          } else {
+            groundRestTimer += simDt;
+            // Skid friction along terrain floor & damped suspension settle bounce
+            const drag = Math.exp(-3.4 * simDt);
+            fallVelX *= drag;
+            fallVelZ *= drag;
+            if (driftState.y <= crashGroundY) {
+              driftState.y = crashGroundY;
+              if (fallVelY < -1.8) {
+                fallVelY = Math.abs(fallVelY) * 0.25;
+                soundFX.playGroundSlam(0.45);
+              } else {
+                fallVelY = 0;
+              }
+            }
+            // Radiator steam rising from buckled hood while resting wrecked on ground
+            if (Math.random() < 0.45) {
+              pushSmokePuff({
+                x: driftState.x + (Math.random() - 0.5) * 0.8,
+                y: driftState.y + 0.55,
+                z: driftState.z + (Math.random() - 0.5) * 0.8,
+                vx: (Math.random() - 0.5) * 1.4,
+                vy: 2.2 + Math.random() * 2.2,
+                vz: (Math.random() - 0.5) * 1.4,
+                radius: 0.35,
+                maxRadius: 1.45,
+                life: 0.65,
+                maxLife: 0.65,
+                tint: 'steam',
+              });
+            }
+            if (groundRestTimer >= 0.95) {
+              finalizeGameOver('Guardrail Breached');
+            }
           }
         } else if (isTrafficCrash && simDt > 0) {
           trafficCrashTimer += simDt;
-          fallRotation += simDt * 5.2;
-          driftState.x += driftState.vx * 0.18 * simDt;
-          driftState.z += driftState.vz * 0.18 * simDt;
-          if (Math.random() < 0.7) {
+          const skidDrag = Math.exp(-4.2 * simDt);
+          driftState.vx *= skidDrag;
+          driftState.vz *= skidDrag;
+          driftState.x += driftState.vx * 0.35 * simDt;
+          driftState.z += driftState.vz * 0.35 * simDt;
+          fallRotation += (crashRoll - fallRotation) * Math.min(1, 10 * simDt);
+          if (Math.random() < 0.55) {
             pushSmokePuff({
-              x: driftState.x + (Math.random() - 0.5) * 0.9,
-              y: driftState.y + 0.35,
-              z: driftState.z + (Math.random() - 0.5) * 0.9,
-              vx: (Math.random() - 0.5) * 2.5,
-              vy: 2.0 + Math.random() * 2.5,
-              vz: (Math.random() - 0.5) * 2.5,
-              radius: 0.45,
-              maxRadius: 1.7,
-              life: 0.48,
-              maxLife: 0.48,
-              tint: Math.random() > 0.4 ? 'fire' : 'dark',
+              x: driftState.x + (Math.random() - 0.5) * 0.8,
+              y: driftState.y + 0.45,
+              z: driftState.z + (Math.random() - 0.5) * 0.8,
+              vx: (Math.random() - 0.5) * 1.8,
+              vy: 2.1 + Math.random() * 2.4,
+              vz: (Math.random() - 0.5) * 1.8,
+              radius: 0.40,
+              maxRadius: 1.55,
+              life: 0.56,
+              maxLife: 0.56,
+              tint: Math.random() > 0.3 ? 'steam' : 'dark',
             });
           }
-          if (trafficCrashTimer >= 0.92) {
+          if (trafficCrashTimer >= 1.05) {
             finalizeGameOver(crashReason);
           }
         }
 
-        // Smooth camera follow (frame both highway lanes while keeping hero car cleanly inside 390px portrait!)
-        const camEval = isHighwayMode
-          ? evaluateCarOnSCurveRoad(driftState.x, driftState.z, track, 5)
-          : null;
-        const targetCamX =
-          isHighwayMode && camEval?.closestPoint
-            ? camEval.closestPoint.x * 0.42 + driftState.x * 0.58
-            : driftState.x;
-        const targetCamZ =
-          isHighwayMode && camEval?.closestPoint
-            ? camEval.closestPoint.z * 0.42 + driftState.z * 0.58
-            : driftState.z;
-        camFocusX += (targetCamX - camFocusX) * Math.min(1, 9 * dt);
-        if (!isFalling) {
-          camFocusY += (driftState.y - camFocusY) * Math.min(1, 10 * dt);
+        // Smooth camera follow (frame highway, parking lot, drifting apex, AND follow falling car down to the ground!)
+        if (isParkingMode && parkingState && parkingStages.length > 0) {
+          camFocusX += (parkingState.x * 0.72 - camFocusX) * Math.min(1, 5.5 * dt);
+          camFocusY += (0 - camFocusY) * Math.min(1, 8 * dt);
+          camFocusZ += ((parkingState.z - 2.0) - camFocusZ) * Math.min(1, 6.2 * dt);
+          const headingYawLead = Math.max(-0.22, Math.min(0.22, Math.sin(parkingState.heading + Math.PI * 0.5) * 0.14));
+          camHeading += ((-Math.PI / 2 + headingYawLead) - camHeading) * Math.min(1, 4.5 * dt);
+        } else {
+          const camEval = isHighwayMode
+            ? evaluateCarOnSCurveRoad(driftState.x, driftState.z, track, 5)
+            : null;
+          const targetCamX =
+            isHighwayMode && camEval?.closestPoint
+              ? camEval.closestPoint.x * 0.42 + driftState.x * 0.58
+              : driftState.x;
+          const targetCamZ =
+            isHighwayMode && camEval?.closestPoint
+              ? camEval.closestPoint.z * 0.42 + driftState.z * 0.58
+              : driftState.z;
+          camFocusX += (targetCamX - camFocusX) * Math.min(1, 9 * dt);
+          if (isFalling) {
+            const targetFallCamY = Math.max(crashGroundY + 0.4, driftState.y + 0.75);
+            camFocusY += (targetFallCamY - camFocusY) * Math.min(1, 7.5 * dt);
+          } else {
+            camFocusY += (driftState.y - camFocusY) * Math.min(1, 10 * dt);
+          }
+          camFocusZ += (targetCamZ - camFocusZ) * Math.min(1, 11 * dt);
         }
-        camFocusZ += (targetCamZ - camFocusZ) * Math.min(1, 11 * dt);
 
         if (nearMissTimer > 0) {
           nearMissTimer = Math.max(0, nearMissTimer - dt);
@@ -2841,8 +3499,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           const sRounded = Math.round(score);
           const dRounded = Math.round(distance);
           const fRounded = Math.round(fever);
-          const kmhRounded = Math.round(speedNow * 7.2);
+          const kmhRounded = Math.round(speedNow * (isParkingMode ? 3.6 : 7.2));
           if (
+            isParkingMode ||
             sRounded !== lastHudScore ||
             dRounded !== lastHudDist ||
             combo !== lastHudCombo ||
@@ -2867,6 +3526,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             lastHudOvertakes = overtakes;
             lastHudNearMisses = nearMisses;
             const activeBiome = resolveRoadBiome(roadModeRef.current, distance);
+            const curSt = isParkingMode && parkingStages.length > 0 ? parkingStages[parkingStageIdx] : null;
+            const baySt = curSt && parkingState ? evaluateParkingBayStatus(parkingState, curSt) : null;
+            const prox = curSt && parkingState ? evaluateParkingProximity(parkingState, curSt) : null;
             onTelemetryRef.current({
               score: sRounded,
               distance: dRounded,
@@ -2882,6 +3544,56 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               biomeName: activeBiome.name,
               overtakes,
               nearMisses,
+              parking:
+                curSt && parkingState && baySt && prox
+                  ? {
+                      stageNum: parkingStageIdx + 1,
+                      totalStages: parkingStages.length,
+                      stageTitle: curSt.title,
+                      subtitle: curSt.subtitle,
+                      instruction: curSt.instruction,
+                      maneuverType: curSt.maneuverType,
+                      gear: parkingState.gear,
+                      distM: baySt.centerDistM,
+                      angleErrDeg: baySt.headingErrorDeg,
+                      hits: parkingHits,
+                      maxHits: PARKING_MAX_HITS,
+                      lockProgress: parkingLockTimer,
+                      isInsideBox: baySt.isInsideBox,
+                      isAligned: baySt.isAligned,
+                      gatesCleared: curSt.slalomGates.filter((g) => g.passed).length,
+                      gatesTotal: curSt.slalomGates.length,
+                      proximity: prox,
+                      carX: parkingState.x,
+                      carZ: parkingState.z,
+                      carHeading: parkingState.heading,
+                      steerAngle: parkingState.steerAngle,
+                      bayX: curSt.targetBay.x,
+                      bayZ: curSt.targetBay.z,
+                      bayHeading: curSt.targetBay.heading,
+                      bayW: curSt.targetBay.width,
+                      bayL: curSt.targetBay.length,
+                      nearbyCars: curSt.parkedCars.map((c) => ({
+                        x: c.x,
+                        z: c.z,
+                        heading: c.heading,
+                        hw: c.halfWidth,
+                        hl: c.halfLength,
+                      })),
+                      nearbyCones: curSt.cones.map((c) => ({
+                        x: c.x,
+                        z: c.z,
+                        knocked: c.knocked,
+                      })),
+                      nearbyBarriers: curSt.barriers.map((b) => ({
+                        x: b.x,
+                        z: b.z,
+                        hw: b.halfW,
+                        hl: b.halfL,
+                        heading: b.heading,
+                      })),
+                    }
+                  : undefined,
             });
           }
         }
@@ -2923,9 +3635,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       const rightX = -fwdZ;
       const rightZ = fwdX;
 
-      const camDistBack = (isHighwayMode ? 9.4 : 8.4) + camSpeedZoom * 0.85;
-      const camHeight = isHighwayMode ? 4.35 : 3.85;
-      const camSideSwing = isHighwayMode ? -camDiagBias * 0.65 : -camDiagBias * 1.55;
+      const camDistBack = isParkingMode ? 12.4 : (isHighwayMode ? 9.4 : 8.4) + camSpeedZoom * 0.85;
+      const camHeight = isParkingMode ? 5.05 : isHighwayMode ? 4.35 : 3.85;
+      const camSideSwing = isParkingMode ? 0 : isHighwayMode ? -camDiagBias * 0.65 : -camDiagBias * 1.55;
       const camWorldX = camFocusX - fwdX * camDistBack + rightX * camSideSwing;
       const camWorldY = camFocusY + camHeight;
       const camWorldZ = camFocusZ - fwdZ * camDistBack + rightZ * camSideSwing;
@@ -3195,16 +3907,6 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         Math.round(sunY - celestialCanvas.height * 0.5)
       );
 
-      // Render Soaring Mythical Dragons & Weird Celestial Anomalies (UFO, Sky Whale, Blimp)
-      renderMythicalDragonsAndSkyAnomalies({
-        ctx,
-        pxW,
-        horizonY,
-        nowMs: now,
-        camHeading,
-        sky,
-      });
-
       // B. Pre-Rendered 4-Layer Cel-Shaded Shinkai Anime Clouds
       const cloudDrift = (camHeading + Math.PI / 2) * 32;
       const drawAnimeCloud = (
@@ -3226,10 +3928,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       drawAnimeCloud(1, 0.88, 0.58, 0.44, 0.0015);
       drawAnimeCloud(2, 0.46, 0.78, 0.32, 0.0026);
 
-      // C. Offscreen Cached Horizon Skyline / Mesas / Alpine Peaks
+      // C. Distant atmospheric horizon silhouette (soft depth backdrop behind 3D vistas)
       const mtnShift = (camHeading + Math.PI / 2) * 44;
       const clampedShift = Math.max(-155, Math.min(155, Math.round(mtnShift * 0.55)));
+      ctx.globalAlpha = 0.34;
       ctx.drawImage(horizonCanvas, -160 - clampedShift, 0);
+      ctx.globalAlpha = 1.0;
 
       // D. Collect Visible Road Slices into pre-allocated pool & sort far-to-near in place
       let visibleCount = 0;
@@ -3270,9 +3974,26 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         slicePool[j + 1] = key;
       }
 
-      // Base valley sky-horizon backdrop + True 3D Contoured Terrain Mesh
+      // Base valley sky-horizon backdrop + True 3D Distant Mountains/Skyline/Mesas + Contoured Terrain Mesh
       ctx.fillStyle = cachedMeadowGrad || biome.valleyStops[1];
       ctx.fillRect(0, horizonY, pxW, pxH - horizonY);
+
+      renderBackgroundVista3D({
+        ctx,
+        camWorldX,
+        camWorldZ,
+        fwdX,
+        fwdZ,
+        rightX,
+        rightZ,
+        biome,
+        skyIsNight: sky.isNight,
+        skyId: sky.id,
+        mtnFarColor: sky.mtnFar,
+        mtnNearColor: sky.mtnNear,
+        pxW,
+        projectInto,
+      });
 
       renderTerrainMesh3D({
         ctx,
@@ -3325,16 +4046,45 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         ctx.fillRect(0, horizonY, pxW, pxH - horizonY);
       }
 
-      // F. Continuous Elevated Viaduct Overpass (Painter's Algorithm: Far to Near with Distance LOD & Batched Strokes)
-      for (let i = 0; i < visibleCount - 1; ) {
-        const far = slicePool[i];
-        const step = far.rawZ > 72 && i + 2 < visibleCount ? 2 : 1;
-        const near = slicePool[i + step];
-        i += step;
-        if (Math.abs(far.pt.index - near.pt.index) > step + 1) continue;
+      // Soft atmospheric horizon mist blending sky backdrop seamlessly into distant terrain
+      if (cachedHorizonMistGrad) {
+        ctx.fillStyle = cachedHorizonMistGrad;
+        ctx.fillRect(0, Math.max(0, horizonY - 6), pxW, 28);
+      }
 
-        const isNearMid = far.rawZ < 58;
-        const strokeWalls = far.rawZ < 54 ? '#1e293b' : undefined;
+      // F. Parking Plaza Proving Ground OR Continuous Elevated Viaduct Overpass
+      if (isParkingMode && parkingStages.length > 0 && parkingState) {
+        const curStage = parkingStages[parkingStageIdx];
+        const bayStNow = evaluateParkingBayStatus(parkingState, curStage);
+        renderParkingPlazaGround3D({
+          ctx,
+          stage: curStage,
+          bayStatus: bayStNow,
+          biome,
+          nowMs: now,
+          projectInto,
+        });
+        renderParkingObstacleProps3D({
+          ctx,
+          stage: curStage,
+          camWorldX,
+          camWorldZ,
+          fwdX,
+          fwdZ,
+          projectInto,
+        });
+      } else {
+      for (let i = 0; i < visibleCount - 1; i++) {
+        const far = slicePool[i];
+        const near = slicePool[i + 1];
+        if (Math.abs(far.pt.index - near.pt.index) > 2) continue;
+
+        const roadFog = computeDistanceFogAlpha(far.rawZ, 108, 152);
+        if (roadFog <= 0.02) continue;
+        ctx.globalAlpha = roadFog;
+
+        const isNearMid = far.rawZ < 64;
+        const strokeWalls = far.rawZ < 68 ? '#1e293b' : undefined;
 
         // 1. Tall Shaded Concrete Viaduct Support Pillars + Arched Pier Cap
         if (far.pt.index % 7 === 0 && far.rawZ > 2.2) {
@@ -3359,8 +4109,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         drawQuadPts(far.pR, near.pR, near.uR, far.uR, biome.wallRight, strokeWalls, 1);
         drawQuadPts(far.uL, far.uR, near.uR, near.uL, biome.underside);
 
-        // 3. Multi-Layer Textured Asphalt Road Ribbon
-        const asphaltColor = Math.floor(far.pt.index / step) % 2 === 0 ? biome.asphaltEven : biome.asphaltOdd;
+        // 3. Multi-Layer Textured Asphalt Road Ribbon (immutable index parity eliminates distant flicker)
+        const asphaltColor = Math.floor(far.pt.index / 2) % 2 === 0 ? biome.asphaltEven : biome.asphaltOdd;
         drawQuadPts(far.pL, far.pR, near.pR, near.pL, asphaltColor);
 
         if (isNearMid && far.pt.index % 4 === 0) {
@@ -3579,17 +4329,17 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           ctx.stroke();
 
           ctx.fillStyle = biome.lampColor;
-          ctx.globalAlpha = biome.isNight ? 0.32 : 0.16;
+          ctx.globalAlpha = roadFog * (biome.isNight ? 0.30 : 0.14);
           ctx.beginPath();
           ctx.arc(bulbX, pyTop + 1, Math.min(7, Math.max(2, Math.round(0.45 * far.cM.scale))), 0, Math.PI * 2);
           ctx.fill();
-          ctx.globalAlpha = 1.0;
+          ctx.globalAlpha = roadFog;
           ctx.fillStyle = '#ffffff';
           ctx.fillRect(bulbX - 1, pyTop, Math.max(2, Math.round(0.22 * far.cM.scale)), 2);
         }
 
         // 5d. Overhead Highway Steel Gantries with Illuminated Biome Signboard!
-        if (far.pt.index >= 10 && far.pt.index % 26 === 14 && far.rawZ > 7 && far.rawZ < 110) {
+        if (far.pt.index >= 10 && far.pt.index % 26 === 14 && far.rawZ > 7 && far.rawZ < 118) {
           const gantryH = Math.max(10, Math.round(3.6 * far.cM.scale));
           const leftX = Math.round(far.gL.x);
           const leftY = Math.round(far.gL.y);
@@ -3633,11 +4383,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           }
         }
 
-        // 5e. 3D Roadside Reflector Bollards, Truss Bridges & Weird Landmarks (Dragon Skull, Torii, Monolith, Arcade)
+        // 5e. 3D Roadside Reflector Bollards, Truss Bridges & Biome-Authentic Roadside Landmarks
         renderReflectorBollard3D({ ctx, far, biome });
         renderBridgeTrussArch3D({ ctx, far, biome, projectInto });
-        renderWeirdRoadsideLandmarks3D({ ctx, far, biome, projectInto, nowMs: now });
+        renderRealisticRoadsideLandmarks3D({ ctx, far, biome, projectInto, nowMs: now });
+        ctx.globalAlpha = 1.0;
       }
+      }
+      ctx.globalAlpha = 1.0;
 
       // G. Persistent Dual Tire Skid Marks & Brake Lockup Streaks anchored to Car Tires (Ring Buffers!)
       const renderSkidRing = (buf: SkidSegment[], head: number, count: number, cap: number) => {
@@ -3831,8 +4584,10 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             ? '#db2777'
             : p.tint === 'warm'
             ? '#94a3b8'
-            : p.tint === 'fire'
-            ? '#dc2626'
+            : p.tint === 'dust'
+            ? '#78716c'
+            : p.tint === 'steam'
+            ? '#94a3b8'
             : p.tint === 'dark'
             ? '#1e293b'
             : '#cbd5e1';
@@ -3850,8 +4605,10 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             ? '#fbcfe8'
             : p.tint === 'warm'
             ? '#fef3c7'
-            : p.tint === 'fire'
-            ? '#fef08a'
+            : p.tint === 'dust'
+            ? '#d6d3d1'
+            : p.tint === 'steam'
+            ? '#f8fafc'
             : p.tint === 'dark'
             ? '#475569'
             : '#ffffff';
@@ -3905,7 +4662,24 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       // J. Depth-Sorted Traffic Vehicles + Oncoming Headlight Cones + Hero Pixel-Art Car!
       let vehicleCount = 0;
 
-      if (isHighwayMode) {
+      if (isParkingMode && parkingStages.length > 0) {
+        const curStage = parkingStages[parkingStageIdx];
+        for (let i = 0; i < curStage.parkedCars.length && vehicleCount < vehicleDrawBuf.length - 1; i++) {
+          const pc = curStage.parkedCars[i];
+          const rawZ = (pc.x - camWorldX) * fwdX + (pc.z - camWorldZ) * fwdZ;
+          if (rawZ < 3.8 || rawZ > 120) continue;
+          const slot = vehicleDrawBuf[vehicleCount];
+          if (projectInto(pc.x, 0, pc.z, slot.proj)) {
+            slot.rawZ = rawZ;
+            slot.isHero = false;
+            slot.isGhost = false;
+            slot.ghostFrame = undefined;
+            slot.traffic = undefined;
+            slot.parked = pc;
+            vehicleCount++;
+          }
+        }
+      } else if (isHighwayMode) {
         for (let i = 0; i < trafficCars.length && vehicleCount < vehicleDrawBuf.length - 1; i++) {
           const tc = trafficCars[i];
           const sample = sampleTrackAtS(track, tc.s, STEP_DIST);
@@ -3951,6 +4725,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             slot.isHero = false;
             slot.isGhost = false;
             slot.ghostFrame = undefined;
+            slot.parked = undefined;
             slot.traffic = tc;
             vehicleCount++;
           }
@@ -3966,12 +4741,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           heroSlot.isGhost = false;
           heroSlot.ghostFrame = undefined;
           heroSlot.traffic = undefined;
+          heroSlot.parked = undefined;
           vehicleCount++;
         }
       }
 
       // Sample and project Holographic Rival Ghost into 3D world space
-      if (activeGhost && vehicleCount < vehicleDrawBuf.length) {
+      if (!isParkingMode && activeGhost && vehicleCount < vehicleDrawBuf.length) {
         const curGhost = sampleGhostPosition(activeGhost, runElapsedSec, ghostSampleScratch);
         if (curGhost) {
           const gSample = sampleTrackAtS(track, curGhost.distance, STEP_DIST);
@@ -3986,6 +4762,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 gSlot.rawZ = gRawZ;
                 gSlot.isHero = false;
                 gSlot.traffic = undefined;
+                gSlot.parked = undefined;
                 gSlot.isGhost = true;
                 gSlot.ghostFrame = curGhost;
                 gSlot.ghostColor = activeGhost.carColor;
@@ -4057,25 +4834,30 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           } else {
             const activePedalMode: 'coast' | 'gas' | 'brake' =
               phase === 'playing'
-                ? keyDown
+                ? keyDown || pedalBrakeRef.current || (isParkingMode && Boolean(pedalHandbrakeRef.current || keyHandbrake))
                   ? 'brake'
-                  : 'gas'
+                  : !isParkingMode || keyUp || pedalGasRef.current
+                  ? 'gas'
+                  : 'coast'
                 : 'coast';
-            const isWrecked =
-              gameModeRef.current === 'zen'
-                ? false
-                : (isFalling && explodedInFall) || isTrafficCrash;
+            const heroYawOverride =
+              isParkingMode && parkingState
+                ? Math.round(normalizeAngle(parkingState.heading - camViewAngle) * 28) / 28
+                : undefined;
             const spriteCanvas = getPixelCarCanvas(
               currentCar,
               visualDriftAngle,
               isFever,
-              isWrecked,
+              false, // Show real paint & visible bent/detached damage instead of uniform grey tint
               wheelSpinPhase,
               carCustomRef.current,
               activePedalMode,
-              isHighBeamPulse
+              isHighBeamPulse,
+              heroYawOverride,
+              0.37,
+              activeDamageState
             );
-            if ((isFalling || isTrafficCrash) && gameModeRef.current !== 'zen') {
+            if (isFalling || isTrafficCrash) {
               ctx.save();
               ctx.translate(cx, cy);
               ctx.rotate(fallRotation);
@@ -4091,6 +4873,26 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               );
             }
           }
+        } else if (item.parked) {
+          const pc = item.parked;
+          const sizeScale = pc.kind === 'box_truck' ? 5.9 : pc.kind === 'van' ? 5.4 : 5.1;
+          const drawW = Math.max(8, Math.round(sizeScale * item.proj.scale));
+          const drawH = Math.max(6, Math.round(drawW * (84 / 112)));
+          const tx = Math.round(item.proj.x);
+          const ty = Math.round(item.proj.y - drawH * 0.34);
+          const yawRelCam = normalizeAngle(pc.heading - camViewAngle);
+          const trSprite = getTrafficVehicleCanvas(
+            pc.kind,
+            pc.color,
+            false,
+            0,
+            biome.isNight,
+            yawRelCam
+          );
+          const nearFade = Math.min(1, Math.max(0, (item.rawZ - 3.8) / 1.4));
+          ctx.globalAlpha = nearFade;
+          ctx.drawImage(trSprite, tx - Math.round(drawW * 0.5), ty - Math.round(drawH * 0.5), drawW, drawH);
+          ctx.globalAlpha = 1.0;
         } else if (item.isGhost && item.ghostFrame) {
           const gf = item.ghostFrame;
           const ghostDrawW = Math.max(8, Math.round(5.4 * item.proj.scale));
@@ -4191,7 +4993,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       }
       ctx.globalAlpha = 1.0;
 
-      // K. Shattered Guardrail Beams, Wreckage Panels & Spark Chunks (O(1) swap-remove)
+      // K. Shattered Guardrail Beams, Ground Gravel, Sparks & Flying Shaped Car Parts (O(1) swap-remove)
       for (let i = debrisChunks.length - 1; i >= 0; i--) {
         const d = debrisChunks[i];
         d.life -= dt;
@@ -4206,6 +5008,21 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         d.z += d.vz * dt;
         d.rot += d.vRot * dt;
 
+        if ((isFalling || groundImpacted) && d.y <= crashGroundY) {
+          d.y = crashGroundY;
+          if (d.vy < -1.5) {
+            d.vy = Math.abs(d.vy) * 0.32;
+            d.vx *= 0.65;
+            d.vz *= 0.65;
+            d.vRot *= 0.6;
+          } else {
+            d.vy = 0;
+            d.vx *= 0.92;
+            d.vz *= 0.92;
+            d.vRot = 0;
+          }
+        }
+
         if (!projectInto(d.x, d.y, d.z, pScratchTmp)) continue;
         const maxPx = d.w ? 10 : 6;
         const wPx = Math.min(maxPx, Math.max(2, Math.round((d.w ?? d.size) * pScratchTmp.scale)));
@@ -4215,6 +5032,95 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         ctx.rotate(d.rot);
         ctx.fillStyle = d.color;
         ctx.fillRect(-wPx * 0.5, -hPx * 0.5, wPx, hPx);
+        ctx.restore();
+      }
+
+      // K1. Flying & Bouncing Shaped Detached Car Parts (Bumpers, Hood, Doors, Wing, Roof, Windshield)
+      for (let i = 0; i < MAX_DETACHED_PARTS; i++) {
+        const dp = detachedPartPool[i];
+        if (!dp.active) continue;
+        dp.life -= dt;
+        if (dp.life <= 0) {
+          dp.active = false;
+          continue;
+        }
+        dp.vy -= 26 * dt;
+        dp.x += dp.vx * dt;
+        dp.y += dp.vy * dt;
+        dp.z += dp.vz * dt;
+        dp.rot += dp.vRot * dt;
+
+        if (dp.y <= dp.floorY) {
+          dp.y = dp.floorY;
+          if (dp.vy < -1.6) {
+            dp.vy = Math.abs(dp.vy) * 0.36;
+            dp.vx *= 0.68;
+            dp.vz *= 0.68;
+            dp.vRot *= 0.55;
+          } else {
+            dp.vy = 0;
+            dp.vx *= 0.88;
+            dp.vz *= 0.88;
+            dp.vRot *= 0.82;
+          }
+        }
+
+        if (!projectInto(dp.x, dp.y, dp.z, pScratchTmp)) continue;
+        const sc = pScratchTmp.scale;
+        const sx = Math.round(pScratchTmp.x);
+        const sy = Math.round(pScratchTmp.y);
+        const partFade = Math.min(1, dp.life / 0.45);
+        ctx.save();
+        ctx.globalAlpha = partFade;
+        ctx.translate(sx, sy);
+        ctx.rotate(dp.rot);
+
+        if (dp.partId === 'front_bumper' || dp.partId === 'rear_bumper') {
+          const w = Math.min(30, Math.max(6, Math.round(0.76 * sc)));
+          const h = Math.min(10, Math.max(3, Math.round(0.24 * sc)));
+          ctx.fillStyle = '#090d16';
+          ctx.fillRect(-w * 0.5 - 1, -h * 0.5 - 1, w + 2, h + 2);
+          ctx.fillStyle = dp.color;
+          ctx.fillRect(-w * 0.5, -h * 0.5, w, h);
+          ctx.fillStyle = '#1e293b';
+          ctx.fillRect(-w * 0.35, -h * 0.15, w * 0.7, Math.max(1, Math.round(h * 0.45)));
+        } else if (dp.partId === 'hood' || dp.partId === 'roof') {
+          const w = Math.min(28, Math.max(6, Math.round(0.68 * sc)));
+          const h = Math.min(18, Math.max(4, Math.round(0.45 * sc)));
+          ctx.fillStyle = '#090d16';
+          ctx.fillRect(-w * 0.5 - 1, -h * 0.5 - 1, w + 2, h + 2);
+          ctx.fillStyle = dp.color;
+          ctx.fillRect(-w * 0.5, -h * 0.5, w, h);
+          ctx.fillStyle = 'rgba(255,255,255,0.28)';
+          ctx.fillRect(-w * 0.42, -h * 0.35, w * 0.84, Math.max(1, Math.round(h * 0.16)));
+        } else if (dp.partId === 'spoiler') {
+          const w = Math.min(32, Math.max(7, Math.round(0.82 * sc)));
+          const h = Math.min(7, Math.max(2, Math.round(0.16 * sc)));
+          ctx.fillStyle = '#0f172a';
+          ctx.fillRect(-w * 0.5, -h * 0.5, w, h);
+          ctx.fillStyle = dp.accentColor;
+          ctx.fillRect(-w * 0.5, -h * 0.8, 2, Math.max(2, h + 2));
+          ctx.fillRect(w * 0.5 - 2, -h * 0.8, 2, Math.max(2, h + 2));
+        } else if (dp.partId === 'windshield') {
+          const w = Math.min(24, Math.max(5, Math.round(0.60 * sc)));
+          const h = Math.min(11, Math.max(3, Math.round(0.28 * sc)));
+          ctx.fillStyle = '#38bdf8';
+          ctx.fillRect(-w * 0.5, -h * 0.5, w, h);
+          ctx.fillStyle = '#e0f2fe';
+          ctx.fillRect(-w * 0.3, -h * 0.3, w * 0.5, 1);
+        } else {
+          // Left / Right door
+          const w = Math.min(25, Math.max(5, Math.round(0.60 * sc)));
+          const h = Math.min(13, Math.max(4, Math.round(0.32 * sc)));
+          ctx.fillStyle = '#090d16';
+          ctx.fillRect(-w * 0.5 - 1, -h * 0.5 - 1, w + 2, h + 2);
+          ctx.fillStyle = dp.color;
+          ctx.fillRect(-w * 0.5, -h * 0.5, w, h);
+          ctx.fillStyle = '#1e293b';
+          ctx.fillRect(-w * 0.35, -h * 0.42, w * 0.7, Math.max(1, Math.round(h * 0.35)));
+          ctx.fillStyle = '#cbd5e1';
+          ctx.fillRect(0, 0, Math.max(2, Math.round(w * 0.25)), 1);
+        }
         ctx.restore();
       }
 
@@ -4370,60 +5276,32 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         ctx.stroke();
       }
 
-      // N. Dynamic Speed Vignette Border Glow (cyan in fever, amber/gold in high speed > 180 km/h)
+      // N. Calm Radial Velocity Vignette (steady glow in Fever / high speed, zero strobing border rects)
       const currentKmh = curSpeedNow * 7.2;
-      const showSpeedVignette = phase === 'playing' && (isFever || currentKmh > 180);
+      const showSpeedVignette = phase === 'playing' && (isFever || currentKmh > 185);
       if (showSpeedVignette) {
-        ctx.save();
-        const pulse = 0.65 + Math.sin(now * 0.009) * 0.25;
         const isFeverVignette = isFever;
-        const edgeColorCenter = isFeverVignette
-          ? 'rgba(34, 211, 238, 0)'
-          : 'rgba(251, 191, 36, 0)';
-        const edgeColorMid = isFeverVignette
-          ? `rgba(34, 211, 238, ${(0.14 * pulse).toFixed(3)})`
-          : `rgba(251, 191, 36, ${(0.12 * pulse).toFixed(3)})`;
-        const edgeColorOuter = isFeverVignette
-          ? `rgba(34, 211, 238, ${(0.38 * pulse).toFixed(3)})`
-          : `rgba(251, 191, 36, ${(0.32 * pulse).toFixed(3)})`;
-
-        // Soft radial vignette glow from screen center to perimeter
+        const speedStrength = isFeverVignette ? 1.0 : Math.min(1, (currentKmh - 185) / 90);
         const cx = pxW * 0.5;
         const cy = pxH * 0.5;
-        const rInner = Math.min(pxW, pxH) * 0.38;
+        const rInner = Math.min(pxW, pxH) * 0.44;
         const rOuter = Math.hypot(cx, cy);
         const vigGrad = ctx.createRadialGradient(cx, cy, rInner, cx, cy, rOuter);
-        vigGrad.addColorStop(0, edgeColorCenter);
-        vigGrad.addColorStop(0.68, edgeColorMid);
-        vigGrad.addColorStop(1, edgeColorOuter);
+        vigGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+        vigGrad.addColorStop(
+          0.72,
+          isFeverVignette
+            ? 'rgba(34, 211, 238, 0.08)'
+            : `rgba(251, 191, 36, ${(0.06 * speedStrength).toFixed(3)})`
+        );
+        vigGrad.addColorStop(
+          1,
+          isFeverVignette
+            ? 'rgba(34, 211, 238, 0.22)'
+            : `rgba(251, 191, 36, ${(0.18 * speedStrength).toFixed(3)})`
+        );
         ctx.fillStyle = vigGrad;
         ctx.fillRect(0, 0, pxW, pxH);
-
-        // Neon border edge pulse outline
-        ctx.strokeStyle = isFeverVignette
-          ? `rgba(34, 211, 238, ${(0.45 * pulse).toFixed(3)})`
-          : `rgba(251, 191, 36, ${(0.40 * pulse).toFixed(3)})`;
-        ctx.lineWidth = 2;
-        ctx.strokeRect(1, 1, pxW - 2, pxH - 2);
-
-        // Subtle corner glow accents
-        const cornerLen = 14;
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = isFeverVignette
-          ? `rgba(165, 243, 252, ${(0.65 * pulse).toFixed(3)})`
-          : `rgba(254, 240, 138, ${(0.60 * pulse).toFixed(3)})`;
-        ctx.beginPath();
-        // Top-left
-        ctx.moveTo(1, cornerLen); ctx.lineTo(1, 1); ctx.lineTo(cornerLen, 1);
-        // Top-right
-        ctx.moveTo(pxW - cornerLen - 1, 1); ctx.lineTo(pxW - 1, 1); ctx.lineTo(pxW - 1, cornerLen);
-        // Bottom-left
-        ctx.moveTo(1, pxH - cornerLen - 1); ctx.lineTo(1, pxH - 1); ctx.lineTo(cornerLen, pxH - 1);
-        // Bottom-right
-        ctx.moveTo(pxW - cornerLen - 1, pxH - 1); ctx.lineTo(pxW - 1, pxH - 1); ctx.lineTo(pxW - 1, pxH - 1 - cornerLen);
-        ctx.stroke();
-
-        ctx.restore();
       }
 
       // O. Impact & Overdrive Screen Flash Overlay

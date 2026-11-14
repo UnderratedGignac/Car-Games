@@ -7,7 +7,9 @@ import React, { useEffect, useState } from 'react';
 import {
   Mission,
   claimMission,
+  claimTechnicalMission,
   getDailyMissions,
+  getTechnicalMissions,
   getTimeUntilUtcMidnight,
 } from '../game/missions';
 import { soundFX, triggerHaptic } from '../game/audio';
@@ -16,6 +18,7 @@ export interface MissionModalProps {
   isOpen: boolean;
   onClose: () => void;
   onClaimReward: (rewardAmount: number, label: string) => void;
+  initialTab?: 'daily' | 'tech';
 }
 
 function renderMissionIcon(icon: string) {
@@ -62,6 +65,36 @@ function renderMissionIcon(icon: string) {
           <path d="M13.13 2.13a1 1 0 0 0-1.26 0C8.32 5.09 5.5 9.17 5 14c0 1.25.32 2.45.89 3.5L3 21l3.5-2.89A7.78 7.78 0 0 0 10 19c4.83-.5 8.91-3.32 11.87-6.87a1 1 0 0 0 0-1.26C18.91 7.32 14.83 2.5 13.13 2.13zM12 14a2 2 0 1 1 0-4 2 2 0 0 1 0 4z" />
         </svg>
       );
+    case 'parking':
+      return (
+        <svg viewBox="0 0 24 24" className="w-5 h-5 fill-current text-emerald-400">
+          <path d="M6 3h7a5 5 0 0 1 0 10H9v8H6V3zm3 3v4h4a2 2 0 0 0 0-4H9z" />
+        </svg>
+      );
+    case 'sliders':
+      return (
+        <svg viewBox="0 0 24 24" className="w-5 h-5 fill-current text-cyan-400">
+          <path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z" />
+        </svg>
+      );
+    case 'cone':
+      return (
+        <svg viewBox="0 0 24 24" className="w-5 h-5 fill-current text-orange-400">
+          <path d="M13.6 3h-3.2L6.5 19H4v2h16v-2h-2.5L13.6 3zm-1.1 3 .9 4H10.6l.9-4h1zm-2.4 6h3.8l.9 4H9.2l.9-4z" />
+        </svg>
+      );
+    case 'rotate':
+      return (
+        <svg viewBox="0 0 24 24" className="w-5 h-5 fill-current text-sky-400">
+          <path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z" />
+        </svg>
+      );
+    case 'crosshair':
+      return (
+        <svg viewBox="0 0 24 24" className="w-5 h-5 fill-current text-fuchsia-400">
+          <path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm8.94 3A8.994 8.994 0 0 0 13 3.06V1h-2v2.06A8.994 8.994 0 0 0 3.06 11H1v2h2.06A8.994 8.994 0 0 0 11 20.94V23h2v-2.06A8.994 8.994 0 0 0 20.94 13H23v-2h-2.06zM12 19c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z" />
+        </svg>
+      );
     case 'trophy':
     default:
       return (
@@ -76,16 +109,21 @@ export const MissionModal: React.FC<MissionModalProps> = ({
   isOpen,
   onClose,
   onClaimReward,
+  initialTab = 'daily',
 }) => {
-  const [missions, setMissions] = useState<Mission[]>([]);
+  const [activeTab, setActiveTab] = useState<'daily' | 'tech'>(initialTab);
+  const [dailyMissions, setDailyMissions] = useState<Mission[]>([]);
+  const [techMissions, setTechMissions] = useState<Mission[]>([]);
   const [countdownStr, setCountdownStr] = useState<string>('');
 
   const refreshMissions = () => {
-    setMissions(getDailyMissions());
+    setDailyMissions(getDailyMissions());
+    setTechMissions(getTechnicalMissions());
   };
 
   useEffect(() => {
     if (isOpen) {
+      setActiveTab(initialTab);
       refreshMissions();
       const tick = () => {
         const { formatted } = getTimeUntilUtcMidnight();
@@ -95,29 +133,39 @@ export const MissionModal: React.FC<MissionModalProps> = ({
       const interval = window.setInterval(tick, 1000);
       return () => window.clearInterval(interval);
     }
-  }, [isOpen]);
+  }, [isOpen, initialTab]);
 
   const handleClaim = (mission: Mission) => {
     if (!mission.completed || mission.claimed) return;
-    const result = claimMission(mission.id);
+    const result =
+      activeTab === 'daily'
+        ? claimMission(mission.id)
+        : claimTechnicalMission(mission.id);
     if (result.success) {
       soundFX.playFeverBurst();
       triggerHaptic('fever');
-      onClaimReward(result.reward, `Daily Mission: ${mission.title}`);
+      onClaimReward(
+        result.reward,
+        `${activeTab === 'daily' ? 'Daily Mission' : 'Car Craft Mission'}: ${mission.title}`
+      );
       refreshMissions();
     }
   };
 
   if (!isOpen) return null;
 
+  const dailyReadyCount = dailyMissions.filter((m) => m.completed && !m.claimed).length;
+  const techReadyCount = techMissions.filter((m) => m.completed && !m.claimed).length;
+  const displayedMissions = activeTab === 'daily' ? dailyMissions : techMissions;
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md pointer-events-auto"
       role="dialog"
       aria-modal="true"
-      aria-label="Daily Missions Modal"
+      aria-label="Missions Modal"
     >
-      <div className="relative w-full max-w-lg rounded-2xl bg-slate-950/95 border border-slate-700/80 shadow-[0_0_50px_rgba(168,85,247,0.15)] overflow-hidden flex flex-col p-4 sm:p-6 text-slate-100 max-h-[92vh] overflow-y-auto">
+      <div className="relative w-full max-w-xl rounded-2xl bg-slate-950/95 border border-slate-700/80 shadow-[0_0_50px_rgba(168,85,247,0.15)] overflow-hidden flex flex-col p-4 sm:p-6 text-slate-100 max-h-[92vh] overflow-y-auto">
         {/* Ambient Top Glow */}
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-64 h-12 bg-purple-500/20 blur-2xl pointer-events-none" />
 
@@ -126,27 +174,71 @@ export const MissionModal: React.FC<MissionModalProps> = ({
           type="button"
           onClick={onClose}
           className="absolute top-3.5 right-3.5 w-8 h-8 rounded-full bg-slate-900 border border-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
-          aria-label="Close Daily Missions"
+          aria-label="Close Missions"
         >
           ✕
         </button>
 
         {/* Header */}
         <div className="text-center mb-4">
-          <div className="inline-flex items-center gap-1.5 px-3 py-0.5 rounded-full bg-purple-500/10 border border-purple-500/30 text-purple-300 text-[10px] font-mono tracking-widest uppercase mb-1">
-            <span>📋 Daily Cyberpunk Challenges</span>
+          <div className="inline-flex items-center gap-1.5 px-3 py-0.5 rounded bg-purple-500/10 border border-purple-500/30 text-purple-300 text-[10px] font-mono tracking-widest uppercase mb-1">
+            <span>Driving &amp; Precision Mastery</span>
           </div>
           <h2 className="text-2xl sm:text-3xl font-display font-black text-white tracking-wide">
-            DAILY MISSIONS
+            MISSIONS
           </h2>
           <p className="text-xs text-cyan-400 font-mono mt-0.5">
-            Resets at Midnight UTC {countdownStr ? `(${countdownStr})` : ''}
+            {activeTab === 'daily'
+              ? `Daily Rotation Resets UTC ${countdownStr ? `(${countdownStr})` : ''}`
+              : 'Persistent Valet, Reverse, Parallel & Complex Maneuver Mastery'}
           </p>
         </div>
 
-        {/* 3 Mission Cards */}
+        {/* Category Tabs */}
+        <div className="grid grid-cols-2 gap-2 mb-4" role="tablist" aria-label="Mission Categories">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'daily'}
+            data-mission-tab="daily"
+            onClick={() => setActiveTab('daily')}
+            className={`min-h-[40px] px-3 py-2 rounded-xl border text-xs font-display font-bold tracking-wide flex items-center justify-center gap-2 transition-colors ${
+              activeTab === 'daily'
+                ? 'bg-purple-600/30 border-purple-400 text-white'
+                : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <span>Daily Missions</span>
+            {dailyReadyCount > 0 && (
+              <span className="px-1.5 py-0.5 rounded bg-amber-400 text-slate-950 font-mono text-[10px] font-bold">
+                {dailyReadyCount}
+              </span>
+            )}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'tech'}
+            data-mission-tab="tech"
+            onClick={() => setActiveTab('tech')}
+            className={`min-h-[40px] px-3 py-2 rounded-xl border text-xs font-display font-bold tracking-wide flex items-center justify-center gap-2 transition-colors ${
+              activeTab === 'tech'
+                ? 'bg-emerald-500/25 border-emerald-400 text-white'
+                : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <span>Parking &amp; Car Craft</span>
+            {techReadyCount > 0 && (
+              <span className="px-1.5 py-0.5 rounded bg-emerald-400 text-slate-950 font-mono text-[10px] font-bold">
+                {techReadyCount}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {/* Mission Cards */}
         <div className="space-y-3">
-          {missions.map((m) => {
+          {displayedMissions.map((m) => {
             const currentCapped = Math.min(m.current, m.target);
             const percent = Math.min(100, Math.floor((currentCapped / m.target) * 100));
 
@@ -171,7 +263,7 @@ export const MissionModal: React.FC<MissionModalProps> = ({
                         <span>{m.title}</span>
                         {m.completed && !m.claimed && (
                           <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-400 text-slate-950 font-bold uppercase tracking-wider">
-                            Ready!
+                            Ready
                           </span>
                         )}
                       </h4>
@@ -202,6 +294,8 @@ export const MissionModal: React.FC<MissionModalProps> = ({
                           ? 'bg-slate-600'
                           : m.completed
                           ? 'bg-gradient-to-r from-amber-400 to-yellow-300'
+                          : activeTab === 'tech'
+                          ? 'bg-gradient-to-r from-emerald-400 to-cyan-400'
                           : 'bg-gradient-to-r from-cyan-500 to-fuchsia-500'
                       }`}
                       style={{ width: `${percent}%` }}
@@ -223,7 +317,7 @@ export const MissionModal: React.FC<MissionModalProps> = ({
                     <button
                       type="button"
                       onClick={() => handleClaim(m)}
-                      className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-amber-400 via-yellow-400 to-amber-500 hover:from-amber-300 hover:to-yellow-300 text-slate-950 text-xs font-bold font-display tracking-wider shadow-[0_0_15px_rgba(251,191,36,0.6)] animate-pulse transition-all cursor-pointer"
+                      className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-amber-400 via-yellow-400 to-amber-500 hover:from-amber-300 hover:to-yellow-300 text-slate-950 text-xs font-bold font-display tracking-wider shadow-[0_0_15px_rgba(251,191,36,0.5)] transition-all cursor-pointer"
                     >
                       CLAIM REWARD
                     </button>
@@ -245,7 +339,7 @@ export const MissionModal: React.FC<MissionModalProps> = ({
         {/* Footer info note */}
         <div className="mt-4 pt-3 border-t border-slate-800/80 text-center">
           <p className="text-[11px] text-slate-400 font-mono">
-            💡 Missions track progress across all Touge drift & Highway traffic runs.
+            Tracks progress across Touge Drift, Highway Traffic &amp; Precision Parking runs.
           </p>
         </div>
       </div>

@@ -1,4 +1,4 @@
-﻿import test from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CAR_ROSTER,
@@ -33,12 +33,10 @@ import {
   stepTrafficCars,
   compactInPlace,
   ROAD_WIDTH,
-  evaluateZenGuardrailBounce,
-  evaluateZenTrafficDeflection,
-  calculateZenScoreStep,
 } from './rules';
 import { computeMixerVolume, SoundFXSystem, soundFX } from './audio';
-import { getPixelCarTireAnchors } from './pixelSprites';
+import { getPixelCarTireAnchors, resolveVehicleArchetype } from './pixelSprites';
+import { computeDistanceFogAlpha } from './world3d';
 import {
   AI_SFX_SLOTS,
   BIOME_MUSIC_PRESETS,
@@ -812,103 +810,7 @@ test('triggerHaptic safely handles SSR and invokes navigator.vibrate with exact 
   }
 });
 
-test('evaluateZenGuardrailBounce softly rebounds vehicle without wrecking and clamps to track boundary', () => {
-  const halfRoadWidth = 4.9; // 9.8m road half width
-
-  // 1. Exceeding right guardrail
-  const rightHit = evaluateZenGuardrailBounce({
-    lateralOffset: 5.2,
-    lateralVelocity: 3.5,
-    halfRoadWidth,
-  });
-  assert.equal(rightHit.bounced, true);
-  assert.equal(rightHit.clampedOffset, 4.7); // 4.9 - 0.20 padding
-  // Soft dampening rebound: -Math.abs(3.5) * 0.4 = -1.4
-  assert.ok(Math.abs(rightHit.reboundVelocity - (-1.4)) < 0.001);
-
-  // 2. Exceeding left guardrail
-  const leftHit = evaluateZenGuardrailBounce({
-    lateralOffset: -5.4,
-    lateralVelocity: -2.8,
-    halfRoadWidth,
-  });
-  assert.equal(leftHit.bounced, true);
-  assert.equal(leftHit.clampedOffset, -4.7);
-  // Inward rebound to the right: +Math.abs(-2.8) * 0.4 = +1.12
-  assert.ok(Math.abs(leftHit.reboundVelocity - 1.12) < 0.001);
-
-  // 3. Safe center driving (no bounce)
-  const safe = evaluateZenGuardrailBounce({
-    lateralOffset: 1.2,
-    lateralVelocity: 0.5,
-    halfRoadWidth,
-  });
-  assert.equal(safe.bounced, false);
-  assert.equal(safe.clampedOffset, 1.2);
-  assert.equal(safe.reboundVelocity, 0.5);
-
-  // 4. Custom boundary padding check
-  const custom = evaluateZenGuardrailBounce({
-    lateralOffset: 50,
-    lateralVelocity: 4.0,
-    halfRoadWidth: 50,
-    boundaryPadding: 20,
-  });
-  assert.equal(custom.bounced, true);
-  assert.equal(custom.clampedOffset, 30);
-  assert.ok(Math.abs(custom.reboundVelocity - (-1.6)) < 0.001);
-});
-
-test('evaluateZenTrafficDeflection gently deflects player around traffic without fatal wreck', () => {
-  // 1. Player in overlap with traffic car
-  const def = evaluateZenTrafficDeflection({
-    playerLateralOffset: 2.3,
-    trafficLateralOffset: 2.25,
-    playerHalfWidth: 0.90,
-    trafficHalfWidth: 0.94,
-    roadHalfWidth: 4.9,
-  });
-  assert.equal(def.deflected, true);
-  // Player was slightly to the right, gets safely pushed further right
-  assert.ok(def.newPlayerOffset > 2.3);
-  assert.ok(def.newPlayerOffset <= 4.7); // Clamped within road bounds
-  assert.ok(def.deflectionImpulse > 0);
-
-  // 2. Player well clear in adjacent lane (no deflection)
-  const clear = evaluateZenTrafficDeflection({
-    playerLateralOffset: -2.25,
-    trafficLateralOffset: 2.25,
-    playerHalfWidth: 0.90,
-    trafficHalfWidth: 0.94,
-    roadHalfWidth: 4.9,
-  });
-  assert.equal(clear.deflected, false);
-  assert.equal(clear.newPlayerOffset, -2.25);
-  assert.equal(clear.deflectionImpulse, 0);
-});
-
-test('Zen scoring accumulates smooth Chill Cruise Distance and Zen Flow points without timer stress', () => {
-  const zen1 = calculateZenScoreStep({ distanceDelta: 10, smoothFlowBonus: true });
-  assert.equal(zen1.distancePoints, 100); // 10 * 10
-  assert.equal(zen1.flowPoints, 60);       // 10 * 6
-  assert.equal(zen1.scoreDelta, 160);
-
-  const zen2 = calculateZenScoreStep({ distanceDelta: 10, smoothFlowBonus: false });
-  assert.equal(zen2.distancePoints, 100);
-  assert.equal(zen2.flowPoints, 0);
-  assert.equal(zen2.scoreDelta, 100);
-
-  // Integrated into calculateDriftScoreStep with gameMode === 'zen'
-  const driftScore = calculateDriftScoreStep({
-    distanceDelta: 5,
-    combo: 1,
-    isFever: false,
-    nearEdge: false,
-    gameMode: 'zen',
-  });
-  assert.ok(driftScore.scoreDelta > 0);
-  assert.equal(driftScore.feverDelta, 10); // 5 * 2.0
-});
+// Zen mode replaced by Precision Parking mode (covered in parking.test.ts)
 
 test('Audio Mixer Channels - volume multipliers, clamping and gain math', () => {
   const engine = new SoundFXSystem();
@@ -956,6 +858,77 @@ test('Audio Mixer Channels - volume multipliers, clamping and gain math', () => 
   assert.equal(snapshot.sfxVolume, 0.8);
   assert.equal(snapshot.engineVolume, 0.65);
 });
+
+test('resolveVehicleArchetype assigns distinct vehicle silhouettes instead of mere recolors', () => {
+  const byId = new Map(CAR_ROSTER.map((c) => [c.id, c]));
+  const expected: Record<string, string> = {
+    harley_drag_chopper: 'moto_chopper',
+    cyber_ronin_bike: 'moto_monobike',
+    neo_tokyo_kaneda: 'moto_lightcycle',
+    motocross_supermoto: 'moto_dirt',
+    cafe_racer_vintage: 'moto_cafe',
+    vintage_grand_prix: 'formula_cigar',
+    ground_effect_fan_car: 'formula_fan',
+    canam_shadow_prototype: 'formula_canam',
+    quantum_formula_x: 'formula_jet',
+    formula_e_lightning: 'formula_e',
+    cyber_titan_pickup: 'truck_cyber',
+    baja_trophy_truck: 'truck_baja',
+    slammed_c10_dually: 'truck_dually',
+    flatbed_hauler: 'truck_flatbed',
+    military_apc_hauler: 'truck_apc',
+    ford_f100_ratrod: 'truck_ratrod',
+    kenworth_behemoth: 'semi_cabover',
+    classic_woodie_wagon: 'wagon_woodie',
+    phantom_drift_hearse: 'wagon_hearse',
+    shelby_cobra_427: 'classic_cobra',
+    skyline_r34_gtr_vspec: 'jdm_skyline',
+    ae86_trueno_panda: 'jdm_popup',
+    delorean_dmc_time: 'interceptor_delorean',
+    cyber_spinner_runner: 'interceptor_spinner',
+    speedtail_streamliner: 'supercar_streamliner',
+    countach_lpi_revival: 'supercar_countach',
+    delica_overland_van: 'van_overland',
+    custom_aero_transit: 'van_aero',
+  };
+
+  for (const [id, expectedArch] of Object.entries(expected)) {
+    const car = byId.get(id);
+    assert.ok(car, `Expected ${id} in CAR_ROSTER`);
+    assert.equal(resolveVehicleArchetype(car), expectedArch);
+  }
+
+  // Ensure at least 35 distinct archetypes are actively produced across the 90-car roster
+  const uniqueArchetypes = new Set(CAR_ROSTER.map((c) => resolveVehicleArchetype(c)));
+  assert.ok(
+    uniqueArchetypes.size >= 35,
+    `Expected >= 35 distinct vehicle archetypes across 90 vehicles, got ${uniqueArchetypes.size}`
+  );
+});
+
+test('getPixelCarTireAnchors produces valid normalized ground-contact anchors for all 90 vehicles', () => {
+  for (const car of CAR_ROSTER) {
+    for (const driftAngle of [-0.65, 0, 0.65]) {
+      const anchors = getPixelCarTireAnchors(car, driftAngle);
+      for (const key of ['rearLeft', 'rearRight', 'frontLeft', 'frontRight'] as const) {
+        const pt = anchors[key];
+        assert.ok(Number.isFinite(pt.u) && pt.u > 0.05 && pt.u < 0.95, `${car.id} ${key}.u out of bounds: ${pt.u}`);
+        assert.ok(Number.isFinite(pt.v) && pt.v > 0.45 && pt.v <= 0.99, `${car.id} ${key}.v out of bounds: ${pt.v}`);
+      }
+      assert.ok(anchors.tireWidthScale > 0 && Number.isFinite(anchors.tireWidthScale));
+    }
+  }
+});
+
+test('computeDistanceFogAlpha smoothly attenuates distant 3D slices without hard pop-in cliffs', () => {
+  assert.equal(computeDistanceFogAlpha(20, 104, 152), 1);
+  assert.equal(computeDistanceFogAlpha(104, 104, 152), 1);
+  const mid = computeDistanceFogAlpha(128, 104, 152);
+  assert.ok(Math.abs(mid - 0.5) < 0.001, `Expected 0.5 mid fade, got ${mid}`);
+  assert.equal(computeDistanceFogAlpha(152, 104, 152), 0);
+  assert.equal(computeDistanceFogAlpha(180, 104, 152), 0);
+});
+
 
 
 

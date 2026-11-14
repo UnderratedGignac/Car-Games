@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -7,15 +7,22 @@ import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MISSION_POOL,
+  TECHNICAL_MISSIONS_POOL,
   claimMission,
+  claimTechnicalMission,
   generateDailyMissionsForDate,
   getClaimableMissionsCount,
+  getClaimableTechnicalMissionsCount,
   getDailyMissions,
+  getTechnicalMissions,
   getTimeUntilUtcMidnight,
+  getTotalClaimableMissionsCount,
   hasClaimableMissions,
+  hasClaimableTechnicalMissions,
   hashDateString,
   recordMissionProgress,
   resetDailyMissionsStorage,
+  resetTechnicalMissionsStorage,
 } from './missions';
 import {
   WHEEL_SEGMENTS,
@@ -30,6 +37,7 @@ import {
 describe('Daily Missions System (missions.ts)', () => {
   beforeEach(() => {
     resetDailyMissionsStorage();
+    resetTechnicalMissionsStorage();
   });
 
   it('MISSION_POOL contains at least 8 distinct cyberpunk arcade missions', () => {
@@ -230,5 +238,37 @@ describe('Daily Missions System (missions.ts)', () => {
     // When never spun, ready = true
     const defaultState = getDailyStreakState();
     assert.equal(defaultState.streakCount >= 1 && defaultState.streakCount <= 7, true);
+  });
+
+  it('TECHNICAL_MISSIONS_POOL defines 8 persistent parking & complex car craft challenges and tracks live telemetry', () => {
+    assert.equal(TECHNICAL_MISSIONS_POOL.length, 8);
+    const tech = getTechnicalMissions();
+    assert.equal(tech.length, 8);
+    assert.equal(hasClaimableTechnicalMissions(), false);
+    assert.equal(getClaimableTechnicalMissionsCount(), 0);
+
+    // Progress parallel parks, flash yields, and parking clears simultaneously
+    const res = recordMissionProgress({
+      parking_clears: 3,
+      parallel_parks: 2,
+      flash_yields: 8,
+    });
+    assert.ok(res.newlyCompleted.some((m) => m.id === 'tech_valet_apprentice'));
+    assert.ok(res.newlyCompleted.some((m) => m.id === 'tech_parallel_perfection'));
+    assert.ok(res.newlyCompleted.some((m) => m.id === 'tech_highbeam_tactician'));
+
+    assert.equal(hasClaimableTechnicalMissions(), true);
+    assert.equal(getClaimableTechnicalMissionsCount(), 3);
+    assert.ok(getTotalClaimableMissionsCount() >= 3);
+
+    // Claim parallel parker reward and guard against double claim
+    const claim = claimTechnicalMission('tech_parallel_perfection');
+    assert.equal(claim.success, true);
+    assert.equal(claim.reward, 2400);
+    assert.equal(getClaimableTechnicalMissionsCount(), 2);
+
+    const doubleClaim = claimTechnicalMission('tech_parallel_perfection');
+    assert.equal(doubleClaim.success, false);
+    assert.equal(doubleClaim.reward, 0);
   });
 });
