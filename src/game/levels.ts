@@ -42,9 +42,9 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
   {
     id: 'lvl_01',
     number: 1,
-    chapter: 'CH.1 · ALPINE DAWN',
-    title: 'Morning Hairpin',
-    subtitle: 'Learn weight transfer across crisp alpine switchbacks.',
+    chapter: 'CH.1 · FOREST & CAVES',
+    title: 'Pinewood Cavern Trail',
+    subtitle: 'Drift across timber river bridges and glowing crystal caves.',
     mode: 'drift',
     biome: 'alpine',
     sky: 'sun_day',

@@ -45,6 +45,11 @@ import {
 import confetti from 'canvas-confetti';
 import { SKY_THEME_OPTIONS, SkyThemeId } from './game/skyArt';
 import { AudioDeckSnapshot, JukeboxTrack, soundFX } from './game/audio';
+import {
+  loadInitialHeadlightsState,
+  saveHeadlightsState,
+  toggleHeadlightsState,
+} from './game/headlights';
 import { GarageModal, GarageTabId } from './components/GarageModal';
 import { LeaderboardEntry, LeaderboardModal } from './components/LeaderboardModal';
 import { ArtGalleryModal } from './components/ArtGalleryModal';
@@ -330,10 +335,22 @@ export default function App() {
   const [restartTriggerCount, setRestartTriggerCount] = useState<number>(0);
   const [flashTriggerCount, setFlashTriggerCount] = useState<number>(0);
   const [hornTriggerCount, setHornTriggerCount] = useState<number>(0);
+  const [headlightsOn, setHeadlightsOn] = useState<boolean>(() =>
+    loadInitialHeadlightsState(typeof window !== 'undefined' ? window.localStorage : null)
+  );
   const [flashPulse, setFlashPulse] = useState<boolean>(false);
   const [hornPulse, setHornPulse] = useState<boolean>(false);
   const flashPulseTimerRef = useRef<number | null>(null);
   const hornPulseTimerRef = useRef<number | null>(null);
+
+  const toggleHeadlightsAction = useCallback(() => {
+    setHeadlightsOn((prev) => {
+      const next = toggleHeadlightsState(prev);
+      saveHeadlightsState(next, typeof window !== 'undefined' ? window.localStorage : null);
+      return next;
+    });
+    soundFX.playGearShift();
+  }, []);
 
   const triggerFlashAction = useCallback(() => {
     setFlashTriggerCount((c) => c + 1);
@@ -1007,6 +1024,11 @@ export default function App() {
           syncKeyboardPedalVisuals();
           return;
         }
+        if (code === 'KeyL') {
+          e.preventDefault();
+          toggleHeadlightsAction();
+          return;
+        }
         if (code === 'KeyF') {
           e.preventDefault();
           triggerFlashAction();
@@ -1082,6 +1104,7 @@ export default function App() {
     isShareCardOpen,
     isLevelSelectOpen,
     handleStartRun,
+    toggleHeadlightsAction,
     triggerFlashAction,
     triggerHornAction,
   ]);
@@ -1217,6 +1240,7 @@ export default function App() {
         restartTriggerCount={restartTriggerCount}
         flashTriggerCount={flashTriggerCount}
         hornTriggerCount={hornTriggerCount}
+        headlightsOn={headlightsOn}
         screenShakeIntensity={gameSettings.screenShake}
         screenShakeMultiplier={gameSettings.screenShake}
         highFpsMode={gameSettings.highFpsMode}
@@ -1404,7 +1428,7 @@ export default function App() {
                   ? 'PRECISION PARKING · VALET & GYMKHANA'
                   : gameMode === 'highway_traffic'
                   ? 'HIGHWAY TRAFFIC · OVERTAKE CLASH'
-                  : 'TOKYO TOUGE · 3D PIXEL DRIFT'}
+                  : 'FOREST & CAVES · ADVENTURE DRIFT'}
               </text>
             </svg>
           </div>
@@ -2124,8 +2148,34 @@ export default function App() {
                     )}
                   </div>
 
-                  {/* Quick Utility Buttons: High-Beam Flash [F] & Horn [E] */}
+                  {/* Quick Utility Buttons: Headlights ON/OFF [L], High-Beam Flash [F] & Horn [E] */}
                   <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      data-hud-btn="true"
+                      data-testid="btn-headlights"
+                      tabIndex={-1}
+                      aria-pressed={headlightsOn}
+                      aria-label={headlightsOn ? 'Turn Headlights Off [L]' : 'Turn Headlights On [L]'}
+                      title="Toggle Headlights [L]"
+                      onClick={(e) => {
+                        e.currentTarget.blur();
+                        toggleHeadlightsAction();
+                      }}
+                      className={`min-h-[32px] sm:min-h-[34px] px-2 py-1 rounded-lg border flex items-center gap-1 transition-colors whitespace-nowrap ${
+                        headlightsOn
+                          ? 'bg-amber-300 border-amber-100 text-slate-950'
+                          : 'bg-slate-900 border-slate-600/80 hover:bg-slate-800 text-slate-400'
+                      }`}
+                    >
+                      <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 fill-current shrink-0" aria-hidden="true">
+                        <path d="M9 6C5.69 6 3 8.69 3 12s2.69 6 6 6h3V6H9zm5 1v2h7V7h-7zm0 4v2h8v-2h-8zm0 4v2h7v-2h-7z" />
+                      </svg>
+                      <span className="text-[9px] font-mono font-bold">
+                        {headlightsOn ? 'LIGHTS ON' : 'LIGHTS OFF'}
+                      </span>
+                    </button>
+
                     <button
                       type="button"
                       data-hud-btn="true"

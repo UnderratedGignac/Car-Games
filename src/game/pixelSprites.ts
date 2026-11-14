@@ -5,6 +5,7 @@
 
 import { CarCustomization, CarSpec, TrafficVehicleKind, resolveCarAppearance } from './rules';
 import { CarDamageState, getDamageVisualCacheKey } from './damage';
+import { HERO_SPRITE_GROUND_V, TRAFFIC_SPRITE_GROUND_V } from './grounding';
 
 /**
  * True Integer-Pixel 3D-Projected Car Sprite Renderer (112x84)
@@ -96,6 +97,55 @@ const PIXEL_DIGITS: Record<string, string[]> = {
   '8': ['111', '101', '111', '101', '111'],
   '9': ['111', '101', '111', '001', '111'],
 };
+
+/**
+ * Determines which door side (-1 left, +1 right, 0 none) is clearly facing the camera
+ * so door roundels and racing numbers never render edge-on or bleed through from the far side.
+ */
+export function resolveVisibleDoorRoundelSide(params: {
+  showDoorRoundel: boolean;
+  isFormula: boolean;
+  isCustomYaw: boolean;
+  sinY: number;
+  leftDoorDetached?: boolean;
+  rightDoorDetached?: boolean;
+}): -1 | 0 | 1 {
+  if (!params.showDoorRoundel || params.isFormula) return 0;
+  const DOOR_FACING_MIN = 0.28;
+  if (params.sinY > DOOR_FACING_MIN) {
+    return params.rightDoorDetached ? 0 : 1;
+  }
+  if (params.isCustomYaw && params.sinY < -DOOR_FACING_MIN) {
+    return params.leftDoorDetached ? 0 : -1;
+  }
+  return 0;
+}
+
+/**
+ * Checks whether a screen-space pixel on the door racing number corresponds to an
+ * unoccluded, camera-facing door roundel pixel in the 3D Z-buffer.
+ */
+export function isDoorNumberPixelVisible(params: {
+  screenX: number;
+  screenY: number;
+  width: number;
+  height: number;
+  shouldMirror: boolean;
+  colorBuf: Uint32Array;
+  depthBuf: Float32Array;
+  roundelCol: number;
+  doorDepthZ: number;
+}): boolean {
+  const { screenX, screenY, width, height, shouldMirror, colorBuf, depthBuf, roundelCol, doorDepthZ } = params;
+  const bx = shouldMirror ? width - 1 - screenX : screenX;
+  const by = screenY;
+  if (bx < 0 || bx >= width || by < 0 || by >= height) return false;
+  const idx = by * width + bx;
+  if (colorBuf[idx] !== roundelCol) return false;
+  const bufZ = depthBuf[idx];
+  if (!Number.isFinite(bufZ)) return false;
+  return doorDepthZ <= bufZ + 0.24 && Math.abs(bufZ - doorDepthZ) <= 0.34;
+}
 
 export interface TireAnchorNorm {
   u: number; // 0..1 across 144px sprite width
@@ -371,7 +421,7 @@ export function getPixelCarTireAnchors(
   const sinP = Math.sin(pitch);
 
   const cx = W * 0.5;
-  const cy = H * 0.65;
+  const cy = H * HERO_SPRITE_GROUND_V;
   const scale = 33.067;
 
   const projAnchor = (vx: number, vy: number, vz: number, isCameraFacing: boolean): TireAnchorNorm => {
@@ -537,7 +587,7 @@ export function getPixelCarCanvas(
 
   // Project 3D car-local coordinate to 192x144 pixel space (exact 4:3 aspect match)
   const cx = W * 0.5;
-  const cy = H * 0.65;
+  const cy = H * HERO_SPRITE_GROUND_V;
   const scale = 33.067;
 
   const project = (v: Vec3): ScreenPt => {
@@ -1138,6 +1188,14 @@ export function getPixelCarCanvas(
     !isMotorcycle &&
     resolved.livery !== 'clean' &&
     (resolved.livery !== 'stock' || Boolean(car.decalText));
+  const visibleDoorSide = resolveVisibleDoorRoundelSide({
+    showDoorRoundel,
+    isFormula,
+    isCustomYaw,
+    sinY,
+    leftDoorDetached: lDoorDetached,
+    rightDoorDetached: rDoorDetached,
+  });
 
   if (isMotorcycle) {
     // -----------------------------------------------------------------------
@@ -2990,14 +3048,17 @@ export function getPixelCarCanvas(
       );
     }
 
-    if (showDoorRoundel && !isFormula) {
+    if (visibleDoorSide !== 0) {
+      const ds = visibleDoorSide;
+      const doorBendVis = ds < 0 ? lDoorBend : rDoorBend;
+      const dxScale = ds * hw * (1 - doorBendVis * 0.14);
       fillQuad3D(
-        { x: hw * 0.99, y: yFloor + 0.24, z: -0.45 },
-        { x: hw * 0.98, y: yFloor + 0.22, z: 0.42 },
-        { x: hw * 0.96, y: yBeltRear - 0.14, z: 0.42 },
-        { x: hw * 0.97, y: yBeltRear - 0.12, z: -0.45 },
+        { x: dxScale * 0.99, y: yFloor + 0.24, z: -0.45 },
+        { x: dxScale * 0.98, y: yFloor + 0.22, z: 0.42 },
+        { x: dxScale * 0.96, y: yBeltRear - 0.14, z: 0.42 },
+        { x: dxScale * 0.97, y: yBeltRear - 0.12, z: -0.45 },
         colWhite,
-        -0.04
+        -0.025
       );
     }
 
@@ -3430,11 +3491,20 @@ export function getPixelCarCanvas(
   heroScratchCtx!.putImageData(heroScratchImgData!, 0, 0);
   ctx.drawImage(heroScratchCanvas, 0, 0);
 
-  // Stamp crisp 3x5 pixel bitmap racing number onto door roundel!
-  if (showDoorRoundel) {
-    const doorPt = project({ x: hw * 1.0, y: yFloor + 0.34, z: -0.02 });
-    const dx = Math.round(shouldMirror ? W - 1 - doorPt.x - 6 : doorPt.x - 5);
-    const dy = Math.round(doorPt.y - 3);
+  // Stamp crisp 3x5 pixel bitmap racing number onto the camera-facing door roundel (Z-tested so it never shows through the car!)
+  if (visibleDoorSide !== 0) {
+    const doorBendVis = visibleDoorSide < 0 ? lDoorBend : rDoorBend;
+    const doorX = visibleDoorSide * hw * (1 - doorBendVis * 0.14);
+    const doorYMid = (yFloor + 0.24 + yBeltRear - 0.14) * 0.5;
+    const doorPt = project({ x: doorX, y: doorYMid, z: -0.02 });
+    const foreshorten = Math.min(1, Math.max(0.68, Math.abs(sinY) / 0.55));
+    const pxW = 1.5 * foreshorten;
+    const pxH = 1.5;
+    const digitGap = Math.max(4, Math.round(6 * foreshorten));
+    const totalW = 3 * pxW + digitGap;
+    const screenDoorX = shouldMirror ? W - 1 - doorPt.x : doorPt.x;
+    const dx = Math.round(screenDoorX - totalW * 0.5);
+    const dy = Math.round(doorPt.y - 2.5 * pxH);
     ctx.fillStyle = '#090d16';
     const drawDigit = (char: string, ox: number, oy: number) => {
       const rows = PIXEL_DIGITS[char];
@@ -3442,34 +3512,40 @@ export function getPixelCarCanvas(
       for (let r = 0; r < rows.length; r++) {
         for (let col = 0; col < rows[r].length; col++) {
           if (rows[r][col] === '1') {
-            ctx.fillRect(ox + col * 1.5, oy + r * 1.5, 1.5, 1.5);
+            const rx0 = Math.round(ox + col * pxW);
+            const ry0 = Math.round(oy + r * pxH);
+            const rwPx = Math.max(1, Math.round(pxW));
+            const rhPx = Math.max(1, Math.round(pxH));
+            for (let py = ry0; py < ry0 + rhPx; py++) {
+              for (let px = rx0; px < rx0 + rwPx; px++) {
+                if (
+                  isDoorNumberPixelVisible({
+                    screenX: px,
+                    screenY: py,
+                    width: W,
+                    height: H,
+                    shouldMirror,
+                    colorBuf,
+                    depthBuf,
+                    roundelCol: colWhite,
+                    doorDepthZ: doorPt.z,
+                  })
+                ) {
+                  ctx.fillRect(px, py, 1, 1);
+                }
+              }
+            }
           }
         }
       }
     };
     const numStr = resolved.number.padStart(2, '0');
     drawDigit(numStr[0], dx, dy);
-    drawDigit(numStr[1], dx + 6, dy);
+    drawDigit(numStr[1], dx + digitGap, dy);
   }
 
-  // Animated Exhaust Backfire Flames OR Brake Light Glow Halo OR High-Beam Flash OR Wrecked Sparks
+  // Animated Exhaust Backfire Flames OR Brake Light Glow Halo OR Wrecked Sparks
   if (!isWrecked) {
-    if (isFlashing) {
-      // Bright forward headlight flash flare on bumper & roof lightbar!
-      const hlPt = project({ x: hw * 0.78, y: yNose - 0.05, z: zFront + 0.08 });
-      const hx = Math.round(shouldMirror ? W - 1 - hlPt.x : hlPt.x);
-      const hy = Math.round(hlPt.y);
-      ctx.fillStyle = resolved.headlightBeamHex;
-      ctx.globalAlpha = 0.72;
-      ctx.beginPath();
-      ctx.arc(hx, hy, 9, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(hx, hy, 4, 0, Math.PI * 2);
-      ctx.fill();
-    }
 
     if (isBraking) {
       for (const side of [-1, 1]) {
@@ -3647,7 +3723,7 @@ export function getTrafficVehicleCanvas(
   const sinP = Math.sin(pitch);
 
   const cx = TW * 0.5;
-  const cy = TH * 0.68;
+  const cy = TH * TRAFFIC_SPRITE_GROUND_V;
   const scale = 23.914;
 
   const project = (v: Vec3): ScreenPt => {

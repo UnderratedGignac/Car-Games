@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/game/rules.test.ts src/game/missions.test.ts src/game/settingsAndShare.test.ts src/game/ghost.test.ts src/game/jukebox.test.ts"
+    "test": "tsx --test src/game/rules.test.ts src/game/missions.test.ts src/game/settingsAndShare.test.ts src/game/ghost.test.ts src/game/jukebox.test.ts src/game/grounding.test.ts"
   },
   "dependencies": {
     "@capacitor/android": "^8.6.2",
@@ -19,10 +19,12 @@
     "@google/genai": "^3.2.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/canvas-confetti": "^1.9.0",
+    "@types/culori": "^4.0.1",
     "@types/pg": "^8.23.1",
     "@types/three": "^0.187.0",
     "@vitejs/plugin-react": "^6.1.1",
     "canvas-confetti": "^1.9.4",
+    "culori": "^4.0.2",
     "dotenv": "^17.2.3",
     "drizzle-kit": "^0.31.11",
     "drizzle-orm": "^0.45.4",
@@ -30,12 +32,15 @@
     "firebase": "^13.3.0",
     "firebase-admin": "^14.5.1",
     "lucide-react": "^0.546.0",
+    "maath": "^0.10.8",
     "motion": "^12.23.24",
     "pg": "^8.23.1",
+    "postprocessing": "^6.39.6",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "simplex-noise": "^4.0.3",
     "three": "^0.187.0",
+    "three-stdlib": "^2.36.1",
     "vite": "^8.3.0"
   },
   "devDependencies": {

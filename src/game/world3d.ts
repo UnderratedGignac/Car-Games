@@ -4,6 +4,23 @@
  */
 
 import { RoadBiomeConfig, RoadBiomeId, SCurvePoint, VALLEY_BASE_Y, sampleTerrainElevation } from './rules';
+import {
+  AdventureZoneSample,
+  resolveAdventureZone,
+  sampleAdventureTerrainElevation,
+} from './adventure';
+import {
+  deterministicNoise,
+  getChapterTerrainRamps,
+  getRealisticCavePropSprite,
+  getRealisticTreeSprite,
+  getRealisticUndergrowthSprite,
+  pickRampColor,
+  resolveRealisticTreeSpecies,
+  sampleCaveWallProfile,
+  smoothTerrainMix,
+} from './realisticNature';
+import { getHeadlightRgba } from './headlights';
 
 export interface Projected3D {
   x: number;
@@ -1353,6 +1370,7 @@ export function renderBackgroundVista3D(params: {
   mtnNearColor: string;
   pxW: number;
   projectInto: Project3DIntoFn;
+  isAdventure?: boolean;
 }) {
   const {
     ctx,
@@ -1369,6 +1387,7 @@ export function renderBackgroundVista3D(params: {
     mtnNearColor,
     pxW,
     projectInto,
+    isAdventure = false,
   } = params;
 
   const CELL = 68;
@@ -1621,6 +1640,60 @@ export function renderBackgroundVista3D(params: {
       continue;
     }
 
+    // ADVENTURE MODE: Misty, pine-forested mountain ridges instead of sharp white-capped origami cones
+    if (isAdventure) {
+      const hw = v.width * 0.72;
+      const peakY = baseY + v.height * 0.68;
+      const peakOffset = (v.seed - 0.5) * hw * 0.35;
+      const okBL = projectInto(v.wx - hw, baseY, v.wz, wp0, 1.0);
+      const okBR = projectInto(v.wx + hw, baseY, v.wz, wp2, 1.0);
+      const okPkL = projectInto(v.wx + peakOffset - hw * 0.28, peakY * 0.92, v.wz, wp3, 1.0);
+      const okPkC = projectInto(v.wx + peakOffset, peakY, v.wz + v.depth * 0.14, wp4, 1.0);
+      const okPkR = projectInto(v.wx + peakOffset + hw * 0.32, peakY * 0.88, v.wz, wp5, 1.0);
+      if (!okBL || !okBR || !okPkL || !okPkC || !okPkR) continue;
+      if (Math.max(wp0.x, wp2.x) < -44 || Math.min(wp0.x, wp2.x) > pxW + 44) continue;
+
+      const ridgeLit = skyIsNight
+        ? farBlend ? '#172822' : '#101d18'
+        : farBlend ? '#3a5748' : '#264030';
+      const ridgeShade = skyIsNight
+        ? farBlend ? '#0f1b17' : '#0a120f'
+        : farBlend ? '#2b4537' : '#1b3023';
+
+      ctx.fillStyle = ridgeLit;
+      ctx.beginPath();
+      ctx.moveTo(wp0.x, wp0.y);
+      ctx.quadraticCurveTo((wp0.x + wp3.x) * 0.5, wp3.y, wp4.x, wp4.y);
+      ctx.quadraticCurveTo((wp4.x + wp2.x) * 0.5, wp5.y, wp2.x, wp2.y);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = ridgeShade;
+      ctx.beginPath();
+      ctx.moveTo(wp4.x, wp4.y);
+      ctx.quadraticCurveTo((wp4.x + wp2.x) * 0.5, wp5.y, wp2.x, wp2.y);
+      ctx.lineTo((wp0.x + wp2.x) * 0.52, (wp0.y + wp2.y) * 0.5);
+      ctx.closePath();
+      ctx.fill();
+
+      if (!farBlend && Math.abs(wp2.x - wp0.x) > 36) {
+        const trees = 9;
+        ctx.fillStyle = ridgeShade;
+        ctx.beginPath();
+        for (let t = 1; t < trees; t++) {
+          const f = t / trees;
+          const rx = wp0.x + (wp2.x - wp0.x) * f;
+          const ry = wp0.y + (wp4.y - wp0.y) * Math.sin(f * Math.PI);
+          const th = Math.max(2, Math.min(7, (wp0.y - wp4.y) * 0.16));
+          ctx.moveTo(rx - 2, ry + 1);
+          ctx.lineTo(rx, ry - th);
+          ctx.lineTo(rx + 2, ry + 1);
+        }
+        ctx.fill();
+      }
+      continue;
+    }
+
     // ALPINE & SAKURA: True 3D Faceted Mountains + Majestic Snow-Capped Mt. Fuji
     const hw = v.width * 0.5;
     const peakY = baseY + v.height;
@@ -1652,7 +1725,6 @@ export function renderBackgroundVista3D(params: {
     } else {
       drawTriProjected(ctx, wp0, wp1, wp3, litCol);
       drawTriProjected(ctx, wp1, wp2, wp3, shadowCol);
-      // Crisp sunlit ridge edge catchlight along mountain crest
       ctx.strokeStyle = isRedMoon
         ? 'rgba(253, 164, 175, 0.25)'
         : isSunset
@@ -1667,7 +1739,6 @@ export function renderBackgroundVista3D(params: {
       ctx.stroke();
     }
 
-    // Sculpted Snowcaps on tall 3D summits & Mt. Fuji
     if (isFuji || v.height > 44) {
       const snowBaseY = baseY + v.height * (isFuji ? 0.62 : 0.72);
       const snowHW = hw * (isFuji ? 0.38 : 0.28);
@@ -1696,5 +1767,1132 @@ export function renderBackgroundVista3D(params: {
 
   ctx.globalAlpha = 1.0;
 }
+
+// ===========================================================================
+// FOREST & CAVES ADVENTURE 3D RENDERING (Terrain, Props, Cave Vault, Ruins)
+// ===========================================================================
+
+const ADV_TERRAIN_LATS = [-72.0, -24.0, -9.8, -5.2, 5.2, 9.8, 24.0, 72.0];
+const STEP_DIST_REF = 3.4;
+
+// Dedicated zero-alloc scratch Projected3D registers for cave vault rings (11 points per ring)
+const cvFL0: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvFR0: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvFL_S: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvFR_S: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvFL1: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvFR1: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvFL2: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvFR2: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvFC: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvFLB: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvFRB: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+
+const cvNL0: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvNR0: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvNL_S: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvNR_S: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvNL1: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvNR1: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvNL2: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvNR2: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvNC: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvNLB: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+const cvNRB: Projected3D = { x: 0, y: 0, z: 0, scale: 0 };
+
+function fillAdventureTerrainRow(
+  pt: SCurvePoint,
+  zoneSample: AdventureZoneSample,
+  projectInto: Project3DIntoFn,
+  row: TerrainRow
+) {
+  for (let k = 0; k < 8; k++) {
+    const lat = ADV_TERRAIN_LATS[k];
+    const wx = pt.x + pt.nx * lat;
+    const wz = pt.z + pt.nz * lat;
+    const wy = sampleAdventureTerrainElevation(lat, wz, pt.y, zoneSample);
+    row.ok[k] = projectInto(wx, wy, wz, row.pts[k], 0.55);
+  }
+}
+
+/**
+ * Renders naturalistic contoured Forest hillsides (smooth non-checkerboard mossy loam,
+ * woodland grass tufts, leaf litter & river-cobble banks), Wooden Bridge gorges,
+ * and rocky Cavern floors with zero per-frame allocations.
+ */
+export function renderAdventureTerrainMesh3D(params: {
+  ctx: CanvasRenderingContext2D;
+  visibleSlices: RoadSlice3D[];
+  visibleCount: number;
+  projectInto: Project3DIntoFn;
+}) {
+  const { ctx, visibleSlices, visibleCount, projectInto } = params;
+
+  let farRow = terrainRowA;
+  let nearRow = terrainRowB;
+  let prevNearIndex = -999999;
+
+  for (let i = 0; i < visibleCount - 1; i++) {
+    const far = visibleSlices[i];
+    const near = visibleSlices[i + 1];
+    if (Math.abs(far.pt.index - near.pt.index) > 2) continue;
+    if (far.rawZ > 152) continue;
+
+    const fpt = far.pt;
+    const npt = near.pt;
+    const fZone = resolveAdventureZone(fpt.index * STEP_DIST_REF, fpt.index);
+    const nZone = resolveAdventureZone(npt.index * STEP_DIST_REF, npt.index);
+    const ch = fZone.chapter;
+    const ramps = getChapterTerrainRamps(ch);
+    const fogAlpha = computeDistanceFogAlpha(far.rawZ, 108, 152);
+    if (fogAlpha <= 0.02) continue;
+
+    if (fpt.index === prevNearIndex) {
+      const tmp = farRow;
+      farRow = nearRow;
+      nearRow = tmp;
+    } else {
+      fillAdventureTerrainRow(fpt, fZone, projectInto, farRow);
+    }
+    fillAdventureTerrainRow(npt, nZone, projectInto, nearRow);
+    prevNearIndex = npt.index;
+
+    const fp = farRow.pts;
+    const fo = farRow.ok;
+    const np = nearRow.pts;
+    const no = nearRow.ok;
+
+    ctx.globalAlpha = fogAlpha;
+
+    const mixOuterL = smoothTerrainMix(fpt.index, 'outerL');
+    const mixOuterR = smoothTerrainMix(fpt.index, 'outerR');
+    const mixBankL = smoothTerrainMix(fpt.index, 'bankL');
+    const mixBankR = smoothTerrainMix(fpt.index, 'bankR');
+    const outerHillRamp = far.rawZ > 74 ? ramps.hillMist : ramps.hill;
+
+    if (fo[0] && fo[1] && no[1] && no[0]) {
+      drawQuadDirect(ctx, fp[0], fp[1], np[1], np[0], pickRampColor(outerHillRamp, mixOuterL));
+    }
+    if (fo[6] && fo[7] && no[7] && no[6]) {
+      drawQuadDirect(ctx, fp[6], fp[7], np[7], np[6], pickRampColor(outerHillRamp, mixOuterR * 0.86));
+    }
+
+    if (fo[1] && fo[2] && no[2] && no[1]) {
+      drawQuadDirect(ctx, fp[1], fp[2], np[2], np[1], pickRampColor(ramps.bank, mixBankL * 0.92));
+    }
+    if (fo[5] && fo[6] && no[6] && no[5]) {
+      drawQuadDirect(ctx, fp[5], fp[6], np[6], np[5], pickRampColor(ramps.bank, mixBankR * 0.85));
+    }
+    if (fo[2] && fo[3] && no[3] && no[2]) {
+      drawQuadDirect(ctx, fp[2], fp[3], np[3], np[2], pickRampColor(ramps.bank, mixBankL * 0.72));
+    }
+    if (fo[4] && fo[5] && no[5] && no[4]) {
+      drawQuadDirect(ctx, fp[4], fp[5], np[5], np[4], pickRampColor(ramps.bank, mixBankR * 0.68));
+    }
+
+    if (far.rawZ < 54 && fZone.zone === 'forest') {
+      const nA = deterministicNoise(fpt.index, 3.7);
+      const nB = deterministicNoise(fpt.index, 9.1);
+      if (fo[1] && fo[2] && nA > 0.38) {
+        const tx = fp[2].x + (fp[1].x - fp[2].x) * (0.18 + nA * 0.48);
+        const ty = fp[2].y + (fp[1].y - fp[2].y) * (0.18 + nA * 0.48);
+        const tw = Math.max(2, Math.round(far.cM.scale * 0.55));
+        ctx.fillStyle = fZone.bridgeBlend > 0.35 ? 'rgba(110, 108, 100, 0.38)' : 'rgba(28, 46, 24, 0.32)';
+        ctx.fillRect(Math.round(tx - tw * 0.5), Math.round(ty - 1), tw, Math.max(1, Math.round(tw * 0.35)));
+      }
+      if (fo[5] && fo[6] && nB > 0.42) {
+        const tx = fp[5].x + (fp[6].x - fp[5].x) * (0.16 + nB * 0.46);
+        const ty = fp[5].y + (fp[6].y - fp[5].y) * (0.16 + nB * 0.46);
+        const tw = Math.max(2, Math.round(far.cM.scale * 0.52));
+        ctx.fillStyle = fZone.bridgeBlend > 0.35 ? 'rgba(95, 92, 85, 0.35)' : 'rgba(68, 96, 48, 0.28)';
+        ctx.fillRect(Math.round(tx - tw * 0.5), Math.round(ty - 1), tw, Math.max(1, Math.round(tw * 0.32)));
+      }
+    }
+
+    const hasWaterChannel =
+      fZone.bridgeBlend > 0.15 ||
+      nZone.bridgeBlend > 0.15 ||
+      fZone.caveBlend > 0.25 ||
+      nZone.caveBlend > 0.25;
+    if (fo[3] && fo[4] && no[4] && no[3]) {
+      drawQuadDirect(
+        ctx,
+        fp[3],
+        fp[4],
+        np[4],
+        np[3],
+        hasWaterChannel ? ch.riverColor : pickRampColor(ramps.bank, smoothTerrainMix(fpt.index, 'center') * 0.45)
+      );
+      if (far.rawZ < 92 && hasWaterChannel) {
+        ctx.strokeStyle = ch.riverGlint;
+        ctx.globalAlpha = fogAlpha * 0.28;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(Math.round(fp[3].x), Math.round(fp[3].y));
+        ctx.lineTo(Math.round(np[3].x), Math.round(np[3].y));
+        ctx.moveTo(Math.round(fp[4].x), Math.round(fp[4].y));
+        ctx.lineTo(Math.round(np[4].x), Math.round(np[4].y));
+        if (fpt.index % 2 === 0) {
+          const t0 = 0.18 + deterministicNoise(fpt.index, 1.9) * 0.25;
+          const t1 = 0.55 + deterministicNoise(fpt.index, 4.3) * 0.28;
+          const rx1 = fp[3].x + (fp[4].x - fp[3].x) * t0;
+          const ry1 = fp[3].y + (fp[4].y - fp[3].y) * t0;
+          const rx2 = fp[3].x + (fp[4].x - fp[3].x) * t1;
+          const ry2 = fp[3].y + (fp[4].y - fp[3].y) * t1;
+          ctx.moveTo(Math.round(rx1), Math.round(ry1));
+          ctx.lineTo(Math.round(rx2), Math.round(ry2));
+        }
+        ctx.stroke();
+        ctx.globalAlpha = fogAlpha;
+      }
+    }
+  }
+  ctx.globalAlpha = 1.0;
+}
+
+/**
+ * Renders grounded realistic Forest & Caves Adventure props:
+ * - High-detail cached botanical trees (Douglas Fir, Coastal Redwood, Ancient Oak, Silver Birch, Pine, Maple)
+ * - Craggy mossy granite boulders, sword-fern clusters, mossy fallen nurse logs
+ * - Natural limestone stalagmites & multi-faceted cave mineral crystal matrices
+ */
+export function renderAdventureProp3D(params: {
+  ctx: CanvasRenderingContext2D;
+  prop: WorldProp3D;
+  roadY: number;
+  zoneSample: AdventureZoneSample;
+  nowMs: number;
+  pxW: number;
+  projectInto: Project3DIntoFn;
+}) {
+  const { ctx, prop, roadY, zoneSample, nowMs, pxW, projectInto } = params;
+
+  const inCaveProp = zoneSample.caveBlend > 0.3;
+  if (inCaveProp && Math.abs(prop.lateralOffset) > 15.5) {
+    return;
+  }
+
+  let worldPropX = prop.x;
+  let worldPropZ = prop.z;
+  const effLat = inCaveProp
+    ? Math.sign(prop.lateralOffset || 1) * (6.7 + (Math.abs(prop.lateralOffset) % 2.6))
+    : prop.lateralOffset;
+  if (inCaveProp && Math.abs(prop.lateralOffset) > 9.4) {
+    const shift = effLat - prop.lateralOffset;
+    // Gently pull wide forest props inward onto the cavern floor shelf
+    const len = Math.hypot(prop.x, prop.z) || 1;
+    worldPropX = prop.x + (prop.x / len) * shift * 0.35;
+    worldPropZ = prop.z;
+  }
+
+  const groundY =
+    zoneSample.caveBlend > 0.35
+      ? roadY - 0.12
+      : sampleAdventureTerrainElevation(effLat, worldPropZ, roadY, zoneSample);
+  if (!projectInto(worldPropX, groundY, worldPropZ, wpBase)) return;
+  if (wpBase.x < -56 || wpBase.x > pxW + 56 || wpBase.z > 158) return;
+
+  const s = prop.scale;
+  const sc = wpBase.scale;
+  const rawZ = wpBase.z;
+  const fogAlpha = computeDistanceFogAlpha(rawZ, 104, 156);
+  if (fogAlpha <= 0.02) return;
+
+  const bx = Math.round(wpBase.x);
+  const by = Math.round(wpBase.y);
+  const ch = zoneSample.chapter;
+
+  ctx.globalAlpha = fogAlpha;
+
+  if (zoneSample.caveBlend > 0.35) {
+    const cavePropKind = prop.shade > 0.45 ? 0 : ch.featureBias === 'amber_cave' ? 2 : 1;
+    const caveSprite = getRealisticCavePropSprite(cavePropKind);
+    const propH = (cavePropKind === 0 ? 3.2 : 2.35) * s;
+    if (caveSprite && projectInto(worldPropX, groundY + propH, worldPropZ, wp0)) {
+      const dh = Math.max(8, Math.round(by - wp0.y));
+      const dw = Math.max(6, Math.round(dh * (caveSprite.width / caveSprite.height)));
+      if (cavePropKind > 0 && rawZ < 76) {
+        const pulse = 0.7 + 0.3 * Math.sin(nowMs * 0.004 + worldPropZ);
+        ctx.globalAlpha = fogAlpha * 0.2 * pulse;
+        ctx.fillStyle = ch.crystalPrimary;
+        ctx.beginPath();
+        ctx.arc(bx, by - Math.round(dh * 0.42), Math.max(5, Math.round(dw * 0.72)), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = fogAlpha;
+      }
+      ctx.drawImage(caveSprite, Math.round(bx - dw * 0.5), by - dh + 2, dw, dh);
+    }
+    ctx.globalAlpha = 1.0;
+    return;
+  }
+
+  if (rawZ < 96) {
+    const shW = Math.max(3, Math.round((prop.variant === 2 ? 1.15 : 1.65) * s * sc));
+    const shH = Math.max(1, Math.round(shW * 0.28));
+    ctx.fillStyle = 'rgba(10, 18, 12, 0.16)';
+    ctx.beginPath();
+    ctx.ellipse(bx + Math.round(shW * 0.18), by, shW, shH, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(8, 14, 9, 0.22)';
+    ctx.beginPath();
+    ctx.ellipse(bx + Math.round(shW * 0.08), by, Math.max(2, Math.round(shW * 0.52)), Math.max(1, Math.round(shH * 0.6)), 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  if (prop.variant === 2) {
+    const underKind = prop.shade > 0.62 ? 0 : prop.shade > 0.22 ? 1 : 2;
+    const underSprite = getRealisticUndergrowthSprite(underKind);
+    const uh = (underKind === 0 ? 1.95 : underKind === 1 ? 1.55 : 1.35) * s;
+    if (underSprite && projectInto(prop.x, groundY + uh, prop.z, wp0)) {
+      const dh = Math.max(5, Math.round(by - wp0.y));
+      const dw = Math.max(6, Math.round(dh * (underSprite.width / underSprite.height)));
+      const flip = ((Math.round(Math.abs(prop.x)) + Math.round(Math.abs(prop.z))) & 1) === 1;
+      if (flip && rawZ < 72) {
+        ctx.save();
+        ctx.translate(bx, by);
+        ctx.scale(-1, 1);
+        ctx.drawImage(underSprite, Math.round(-dw * 0.5), -dh + 2, dw, dh);
+        ctx.restore();
+      } else {
+        ctx.drawImage(underSprite, Math.round(bx - dw * 0.5), by - dh + 2, dw, dh);
+      }
+    }
+    ctx.globalAlpha = 1.0;
+    return;
+  }
+
+  const species = resolveRealisticTreeSpecies(prop.variant, prop.shade, zoneSample);
+  const treeSprite = getRealisticTreeSprite(species);
+  const treeHeightMeters =
+    species === 1 ? 8.2 * s : species === 0 || species === 4 ? 7.1 * s : species === 3 ? 6.4 * s : 6.0 * s;
+
+  if (!treeSprite || !projectInto(prop.x, groundY + treeHeightMeters, prop.z, wp0)) {
+    ctx.globalAlpha = 1.0;
+    return;
+  }
+
+  const th = Math.max(10, Math.round(by - wp0.y));
+  const tw = Math.max(8, Math.round(th * (treeSprite.width / treeSprite.height)));
+  const mirror = prop.shade > 0.5;
+
+  if (mirror && rawZ < 85) {
+    ctx.save();
+    ctx.translate(bx, by);
+    ctx.scale(-1, 1);
+    ctx.drawImage(treeSprite, Math.round(-tw * 0.5), -th + 3, tw, th);
+    ctx.restore();
+  } else {
+    ctx.drawImage(treeSprite, Math.round(bx - tw * 0.5), by - th + 3, tw, th);
+  }
+
+  ctx.globalAlpha = 1.0;
+}
+
+/**
+ * Renders the realistic 3D Rock Cavern shell:
+ * - Organic asymmetric multi-station rock walls & overhangs (no wireframe polygon lines)
+ * - Sedimentary rock strata seams & damp mineral seepage streaks
+ * - Multi-segment tapered limestone stalactites, prismatic crystal veins, wall torches
+ * - Rugged boulder-framed mountainside cave portals with draped roots & forest vines
+ */
+export function renderCaveTunnelSegment3D(params: {
+  ctx: CanvasRenderingContext2D;
+  far: RoadSlice3D;
+  near: RoadSlice3D;
+  farZone: AdventureZoneSample;
+  nearZone: AdventureZoneSample;
+  playerInCave?: boolean;
+  headlightWallIllum?: number;
+  headlightBeamColor?: string;
+  nowMs: number;
+  projectInto: Project3DIntoFn;
+}) {
+  const {
+    ctx,
+    far,
+    near,
+    farZone,
+    nearZone,
+    playerInCave = false,
+    headlightWallIllum = 0,
+    headlightBeamColor = '#fef9c3',
+    nowMs,
+    projectInto,
+  } = params;
+  const blend = Math.max(farZone.caveBlend, nearZone.caveBlend);
+  if (blend <= 0.04 && !farZone.isCavePortalIn && !farZone.isCavePortalOut) return;
+  if (!playerInCave && (farZone.isCavePortalOut || (!farZone.isCavePortalIn && blend > 0.65))) return;
+  if (far.rawZ < 0.8 || far.rawZ > 142) return;
+
+  const fogAlpha = computeDistanceFogAlpha(far.rawZ, 102, 142);
+  if (fogAlpha <= 0.02) return;
+
+  const fpt = far.pt;
+  const npt = near.pt;
+  const ch = farZone.zone === 'cave' ? farZone.chapter : nearZone.chapter;
+  const ramps = getChapterTerrainRamps(ch);
+
+  const profFL = sampleCaveWallProfile(fpt.index, -1);
+  const profFR = sampleCaveWallProfile(fpt.index, 1);
+  const profNL = sampleCaveWallProfile(npt.index, -1);
+  const profNR = sampleCaveWallProfile(npt.index, 1);
+
+  const fhw = fpt.width * 0.5;
+  const nhw = npt.width * 0.5;
+
+  const baseWL_F = fhw + 4.3 + profFL.baseOffset;
+  const baseWR_F = fhw + 4.3 + profFR.baseOffset;
+  const shelfWL_F = fhw + 4.75 + profFL.lowShelfOffset;
+  const shelfWR_F = fhw + 4.75 + profFR.lowShelfOffset;
+  const midWL_F = fhw + 5.25 + profFL.midOffset;
+  const midWR_F = fhw + 5.25 + profFR.midOffset;
+  const archWL_F = fhw * 1.12 + profFL.archOffset * 0.6;
+  const archWR_F = fhw * 1.12 + profFR.archOffset * 0.6;
+
+  const baseWL_N = nhw + 4.3 + profNL.baseOffset;
+  const baseWR_N = nhw + 4.3 + profNR.baseOffset;
+  const shelfWL_N = nhw + 4.75 + profNL.lowShelfOffset;
+  const shelfWR_N = nhw + 4.75 + profNR.lowShelfOffset;
+  const midWL_N = nhw + 5.25 + profNL.midOffset;
+  const midWR_N = nhw + 5.25 + profNR.midOffset;
+  const archWL_N = nhw * 1.12 + profNL.archOffset * 0.6;
+  const archWR_N = nhw * 1.12 + profNR.archOffset * 0.6;
+
+  const shelfH_F = 1.75 + profFL.lowShelfOffset * 0.25;
+  const shelfHR_F = 1.75 + profFR.lowShelfOffset * 0.25;
+  const midH_F = 3.9 + profFL.midOffset * 0.35;
+  const midHR_F = 3.9 + profFR.midOffset * 0.35;
+  const archH_F = 6.35 + profFL.upperLedgeOffset * 0.45;
+  const archHR_F = 6.35 + profFR.upperLedgeOffset * 0.45;
+  const ceilH_F = 8.05 + (profFL.ceilOffset + profFR.ceilOffset) * 0.38;
+
+  const shelfH_N = 1.75 + profNL.lowShelfOffset * 0.25;
+  const shelfHR_N = 1.75 + profNR.lowShelfOffset * 0.25;
+  const midH_N = 3.9 + profNL.midOffset * 0.35;
+  const midHR_N = 3.9 + profNR.midOffset * 0.35;
+  const archH_N = 6.35 + profNL.upperLedgeOffset * 0.45;
+  const archHR_N = 6.35 + profNR.upperLedgeOffset * 0.45;
+  const ceilH_N = 8.05 + (profNL.ceilOffset + profNR.ceilOffset) * 0.38;
+
+  const okF =
+    projectInto(fpt.x - fpt.nx * baseWL_F, fpt.y - 0.6, fpt.z - fpt.nz * baseWL_F, cvFL0, 0.55) &&
+    projectInto(fpt.x + fpt.nx * baseWR_F, fpt.y - 0.6, fpt.z + fpt.nz * baseWR_F, cvFR0, 0.55) &&
+    projectInto(fpt.x - fpt.nx * baseWL_F, fpt.y - 5.4, fpt.z - fpt.nz * baseWL_F, cvFLB, 0.55) &&
+    projectInto(fpt.x + fpt.nx * baseWR_F, fpt.y - 5.4, fpt.z + fpt.nz * baseWR_F, cvFRB, 0.55) &&
+    projectInto(fpt.x - fpt.nx * shelfWL_F, fpt.y + shelfH_F, fpt.z - fpt.nz * shelfWL_F, cvFL_S, 0.55) &&
+    projectInto(fpt.x + fpt.nx * shelfWR_F, fpt.y + shelfHR_F, fpt.z + fpt.nz * shelfWR_F, cvFR_S, 0.55) &&
+    projectInto(fpt.x - fpt.nx * midWL_F, fpt.y + midH_F, fpt.z - fpt.nz * midWL_F, cvFL1, 0.55) &&
+    projectInto(fpt.x + fpt.nx * midWR_F, fpt.y + midHR_F, fpt.z + fpt.nz * midWR_F, cvFR1, 0.55) &&
+    projectInto(fpt.x - fpt.nx * archWL_F, fpt.y + archH_F, fpt.z - fpt.nz * archWL_F, cvFL2, 0.55) &&
+    projectInto(fpt.x + fpt.nx * archWR_F, fpt.y + archHR_F, fpt.z + fpt.nz * archWR_F, cvFR2, 0.55) &&
+    projectInto(fpt.x + fpt.nx * ((profFR.archOffset - profFL.archOffset) * 0.4), fpt.y + ceilH_F, fpt.z, cvFC, 0.55);
+
+  const okN =
+    projectInto(npt.x - npt.nx * baseWL_N, npt.y - 0.6, npt.z - npt.nz * baseWL_N, cvNL0, 0.55) &&
+    projectInto(npt.x + npt.nx * baseWR_N, npt.y - 0.6, npt.z + npt.nz * baseWR_N, cvNR0, 0.55) &&
+    projectInto(npt.x - npt.nx * baseWL_N, npt.y - 5.4, npt.z - npt.nz * baseWL_N, cvNLB, 0.55) &&
+    projectInto(npt.x + npt.nx * baseWR_N, npt.y - 5.4, npt.z + npt.nz * baseWR_N, cvNRB, 0.55) &&
+    projectInto(npt.x - npt.nx * shelfWL_N, npt.y + shelfH_N, npt.z - npt.nz * shelfWL_N, cvNL_S, 0.55) &&
+    projectInto(npt.x + npt.nx * shelfWR_N, npt.y + shelfHR_N, npt.z + npt.nz * shelfWR_N, cvNR_S, 0.55) &&
+    projectInto(npt.x - npt.nx * midWL_N, npt.y + midH_N, npt.z - npt.nz * midWL_N, cvNL1, 0.55) &&
+    projectInto(npt.x + npt.nx * midWR_N, npt.y + midHR_N, npt.z + npt.nz * midWR_N, cvNR1, 0.55) &&
+    projectInto(npt.x - npt.nx * archWL_N, npt.y + archH_N, npt.z - npt.nz * archWL_N, cvNL2, 0.55) &&
+    projectInto(npt.x + npt.nx * archWR_N, npt.y + archHR_N, npt.z + npt.nz * archWR_N, cvNR2, 0.55) &&
+    projectInto(npt.x + npt.nx * ((profNR.archOffset - profNL.archOffset) * 0.4), npt.y + ceilH_N, npt.z, cvNC, 0.55);
+
+  if (!okF || !okN) return;
+
+  const alpha = (blend > 0.48 || farZone.isCavePortalIn)
+    ? Math.max(fogAlpha, 0.94)
+    : fogAlpha * Math.min(1, 0.55 + blend * 0.45);
+  const illum = Math.max(0, Math.min(1.25, headlightWallIllum));
+  const wallRamp =
+    illum > 0.24
+      ? ramps.caveWallLit
+      : illum > 0.06 || far.rawZ <= 42
+      ? ramps.caveWall
+      : ramps.caveWallDeep;
+  const ceilRamp = illum > 0.3 ? ramps.caveCeilingLit : ramps.caveCeiling;
+  const wallTintBias = illum * 0.32;
+
+  ctx.save();
+
+  // Deep cavern blackness backdrop on portal mouth and mid-to-far cave slices so sky/hills NEVER leak through
+  if (farZone.isCavePortalIn || (blend > 0.14 && far.rawZ > 15)) {
+    ctx.globalAlpha = Math.max(fogAlpha, 0.92);
+    ctx.fillStyle = illum > 0.28 ? pickRampColor(ramps.caveCeilingLit, 0.12) : ch.caveCeiling;
+    ctx.beginPath();
+    ctx.moveTo(cvFL0.x, cvFL0.y + 4);
+    ctx.lineTo(cvFL_S.x, cvFL_S.y);
+    ctx.lineTo(cvFL1.x, cvFL1.y);
+    ctx.lineTo(cvFL2.x, cvFL2.y);
+    ctx.lineTo(cvFC.x, cvFC.y);
+    ctx.lineTo(cvFR2.x, cvFR2.y);
+    ctx.lineTo(cvFR1.x, cvFR1.y);
+    ctx.lineTo(cvFR_S.x, cvFR_S.y);
+    ctx.lineTo(cvFR0.x, cvFR0.y + 4);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.globalAlpha = alpha;
+
+  drawQuadDirect(ctx, cvFLB, cvNLB, cvNL0, cvFL0, pickRampColor(wallRamp, 0.15 + wallTintBias * 0.5));
+  drawQuadDirect(ctx, cvFRB, cvNRB, cvNR0, cvFR0, pickRampColor(wallRamp, 0.12 + wallTintBias * 0.5));
+
+  drawQuadDirect(ctx, cvFL0, cvNL0, cvNL_S, cvFL_S, pickRampColor(wallRamp, profFL.strataShade * 0.72 + wallTintBias));
+  drawQuadDirect(ctx, cvFL_S, cvNL_S, cvNL1, cvFL1, pickRampColor(wallRamp, 0.25 + profFL.strataShade * 0.68 + wallTintBias * 0.75));
+  drawQuadDirect(ctx, cvFL1, cvNL1, cvNL2, cvFL2, pickRampColor(ramps.caveWall, 0.12 + profFL.strataShade * 0.5 + wallTintBias * 0.45));
+
+  drawQuadDirect(ctx, cvFR0, cvNR0, cvNR_S, cvFR_S, pickRampColor(wallRamp, profFR.strataShade * 0.68 + wallTintBias));
+  drawQuadDirect(ctx, cvFR_S, cvNR_S, cvNR1, cvFR1, pickRampColor(wallRamp, 0.2 + profFR.strataShade * 0.64 + wallTintBias * 0.75));
+  drawQuadDirect(ctx, cvFR1, cvNR1, cvNR2, cvFR2, pickRampColor(ramps.caveWall, 0.1 + profFR.strataShade * 0.45 + wallTintBias * 0.45));
+
+  drawQuadDirect(ctx, cvFL2, cvNL2, cvNC, cvFC, pickRampColor(ceilRamp, profFL.strataShade * 0.65 + wallTintBias * 0.35));
+  drawQuadDirect(ctx, cvFC, cvNC, cvNR2, cvFR2, pickRampColor(ceilRamp, profFR.strataShade * 0.55 + wallTintBias * 0.35));
+
+  // Direct warm/xenon headlight grazing bounce across lower & mid cavern rock walls
+  if (illum > 0.05) {
+    const wallBeamAlpha = Math.min(0.28, illum * 0.23) * alpha;
+    const upperBeamAlpha = Math.min(0.14, illum * 0.11) * alpha;
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = 1.0;
+    const lowWallWash = getHeadlightRgba(headlightBeamColor, wallBeamAlpha);
+    const midWallWash = getHeadlightRgba(headlightBeamColor, upperBeamAlpha);
+    drawQuadDirect(ctx, cvFL0, cvNL0, cvNL_S, cvFL_S, lowWallWash);
+    drawQuadDirect(ctx, cvFR0, cvNR0, cvNR_S, cvFR_S, lowWallWash);
+    drawQuadDirect(ctx, cvFL_S, cvNL_S, cvNL1, cvFL1, midWallWash);
+    drawQuadDirect(ctx, cvFR_S, cvNR_S, cvNR1, cvFR1, midWallWash);
+    ctx.restore();
+  }
+
+  if (far.rawZ < 76) {
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.36)';
+    ctx.lineWidth = Math.max(1, 0.09 * far.cM.scale);
+    ctx.beginPath();
+    ctx.moveTo(cvFL_S.x, cvFL_S.y);
+    ctx.lineTo(cvNL_S.x, cvNL_S.y);
+    ctx.moveTo(cvFR_S.x, cvFR_S.y);
+    ctx.lineTo(cvNR_S.x, cvNR_S.y);
+    ctx.stroke();
+
+    // Specular limestone rock ridge catchlight along wall shelves (glows cleanly in headlights)
+    ctx.strokeStyle = illum > 0.08
+      ? getHeadlightRgba(headlightBeamColor, Math.min(0.38, 0.12 + illum * 0.24))
+      : 'rgba(148, 163, 184, 0.08)';
+    ctx.lineWidth = Math.max(1, 0.08 * far.cM.scale);
+    ctx.beginPath();
+    ctx.moveTo(cvFL_S.x, cvFL_S.y);
+    ctx.lineTo(cvNL_S.x, cvNL_S.y);
+    ctx.moveTo(cvFR_S.x, cvFR_S.y);
+    ctx.lineTo(cvNR_S.x, cvNR_S.y);
+    ctx.moveTo(cvFL1.x, cvFL1.y);
+    ctx.lineTo(cvNL1.x, cvNL1.y);
+    ctx.moveTo(cvFR1.x, cvFR1.y);
+    ctx.lineTo(cvNR1.x, cvNR1.y);
+    ctx.stroke();
+
+    if (profFL.wetStreak > 0.62) {
+      ctx.strokeStyle = illum > 0.12
+        ? getHeadlightRgba(headlightBeamColor, Math.min(0.34, 0.12 + illum * 0.22))
+        : 'rgba(180, 195, 210, 0.10)';
+      ctx.lineWidth = Math.max(1, 0.08 * far.cM.scale);
+      ctx.beginPath();
+      ctx.moveTo(cvFL1.x, cvFL1.y);
+      ctx.lineTo(cvFL_S.x, cvFL_S.y);
+      ctx.lineTo(cvFL0.x, cvFL0.y);
+      ctx.stroke();
+    }
+    if (profFR.wetStreak > 0.62) {
+      ctx.strokeStyle = illum > 0.12
+        ? getHeadlightRgba(headlightBeamColor, Math.min(0.34, 0.12 + illum * 0.22))
+        : 'rgba(180, 195, 210, 0.10)';
+      ctx.lineWidth = Math.max(1, 0.08 * far.cM.scale);
+      ctx.beginPath();
+      ctx.moveTo(cvFR1.x, cvFR1.y);
+      ctx.lineTo(cvFR_S.x, cvFR_S.y);
+      ctx.lineTo(cvFR0.x, cvFR0.y);
+      ctx.stroke();
+    }
+  }
+
+  // Stalactites inside cavern vault
+  if (blend > 0.38 && fpt.index % 3 === 0 && far.rawZ > 4 && far.rawZ < 92) {
+    const sc = far.cM.scale;
+    const stalSide = fpt.index % 6 === 0 ? -0.38 : 0.34;
+    const baseStalX = cvFC.x + (cvFR2.x - cvFL2.x) * stalSide * 0.44;
+    const baseStalY = (cvFC.y + (stalSide < 0 ? cvFL2.y : cvFR2.y)) * 0.5;
+    const stalW = Math.max(2.5, sc * 0.46);
+    const stalH = Math.max(6, sc * (1.3 + ((fpt.index * 7) % 3) * 0.48));
+    const midY = baseStalY + stalH * 0.46;
+    const tipX = baseStalX + Math.sin(fpt.index) * stalW * 0.22;
+
+    const stalRamp = illum > 0.24 ? ramps.caveWallLit : wallRamp;
+    ctx.fillStyle = pickRampColor(stalRamp, 0.16 + wallTintBias * 0.4);
+    ctx.beginPath();
+    ctx.moveTo(baseStalX - stalW, baseStalY - 2);
+    ctx.lineTo(baseStalX + stalW, baseStalY - 2);
+    ctx.lineTo(baseStalX + stalW * 0.42, midY);
+    ctx.lineTo(tipX, baseStalY + stalH);
+    ctx.lineTo(baseStalX - stalW * 0.36, midY);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = pickRampColor(stalRamp, Math.min(1, 0.68 + wallTintBias * 0.6));
+    ctx.beginPath();
+    ctx.moveTo(baseStalX - stalW, baseStalY - 2);
+    ctx.lineTo(baseStalX + stalW * 0.08, baseStalY - 2);
+    ctx.lineTo(baseStalX + stalW * 0.04, midY);
+    ctx.lineTo(tipX, baseStalY + stalH);
+    ctx.lineTo(baseStalX - stalW * 0.36, midY);
+    ctx.closePath();
+    ctx.fill();
+
+    const compX = baseStalX + (stalSide < 0 ? 1 : -1) * stalW * 1.45;
+    const compH = stalH * 0.58;
+    ctx.fillStyle = pickRampColor(stalRamp, 0.44 + wallTintBias * 0.4);
+    ctx.beginPath();
+    ctx.moveTo(compX - stalW * 0.5, baseStalY);
+    ctx.lineTo(compX + stalW * 0.5, baseStalY);
+    ctx.lineTo(compX, baseStalY + compH);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Prismatic crystal veins strictly inside enclosed cavern walls
+  if (blend > 0.46 && fpt.index % 4 === 1 && far.rawZ > 4 && far.rawZ < 92) {
+    const isLeft = fpt.index % 8 === 1;
+    const wallX = isLeft ? (cvFL_S.x + cvFL1.x) * 0.5 : (cvFR_S.x + cvFR1.x) * 0.5;
+    const wallY = isLeft ? (cvFL_S.y + cvFL1.y) * 0.5 : (cvFR_S.y + cvFR1.y) * 0.5;
+    const sc = far.cM.scale;
+    const dir = isLeft ? 1 : -1;
+    const len = Math.max(4, sc * 0.92);
+    const thick = Math.max(1.8, sc * 0.26);
+    const pulse = 0.72 + 0.28 * Math.sin(nowMs * 0.004 + fpt.index);
+    const cryCol = fpt.index % 8 === 1 ? ch.crystalPrimary : ch.crystalSecondary;
+
+    ctx.globalAlpha = fogAlpha * 0.18 * pulse;
+    ctx.fillStyle = cryCol;
+    ctx.beginPath();
+    ctx.arc(wallX + dir * len * 0.35, wallY, Math.max(5, len * 1.45), 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalAlpha = fogAlpha * 0.92;
+    for (let k = -1; k <= 1; k++) {
+      const prongLen = len * (k === 0 ? 1.05 : 0.72);
+      const tilt = k * thick * 1.45;
+      ctx.fillStyle = k === 0 ? cryCol : ch.crystalSecondary;
+      ctx.beginPath();
+      ctx.moveTo(wallX, wallY - thick * 0.7 + tilt * 0.25);
+      ctx.lineTo(wallX + dir * prongLen * 0.76, wallY - thick * 0.5 + tilt);
+      ctx.lineTo(wallX + dir * prongLen, wallY + tilt * 1.15);
+      ctx.lineTo(wallX + dir * prongLen * 0.72, wallY + thick * 0.5 + tilt);
+      ctx.lineTo(wallX, wallY + thick * 0.7 + tilt * 0.25);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.fillStyle = 'rgba(248, 250, 252, 0.85)';
+    ctx.fillRect(Math.round(wallX + dir * len * 0.64) - 1, Math.round(wallY - thick * 0.3) - 1, 2, 2);
+  }
+
+  // Iron cavern lanterns strictly inside enclosed cavern walls
+  if (blend > 0.5 && fpt.index % 6 === 0 && far.rawZ > 5 && far.rawZ < 86) {
+    const isLeft = fpt.index % 12 === 0;
+    const lx = isLeft ? cvFL1.x + (cvFL_S.x - cvFL1.x) * 0.45 : cvFR1.x + (cvFR_S.x - cvFR1.x) * 0.45;
+    const ly = isLeft ? cvFL1.y + (cvFL_S.y - cvFL1.y) * 0.45 : cvFR1.y + (cvFR_S.y - cvFR1.y) * 0.45;
+    const sc = far.cM.scale;
+    const glowR = Math.max(7, sc * 1.65);
+
+    ctx.globalAlpha = fogAlpha * 0.11;
+    ctx.fillStyle = ch.lanternGlow;
+    ctx.beginPath();
+    ctx.arc(lx, ly, glowR, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalAlpha = fogAlpha * 0.22;
+    ctx.beginPath();
+    ctx.arc(lx, ly, glowR * 0.52, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalAlpha = fogAlpha;
+    const bSz = Math.max(2, Math.round(sc * 0.22));
+    // Wall iron sconce arm + cage
+    ctx.strokeStyle = '#1c1917';
+    ctx.lineWidth = Math.max(1, bSz * 0.45);
+    ctx.beginPath();
+    ctx.moveTo(lx + (isLeft ? -bSz * 1.4 : bSz * 1.4), ly - bSz * 0.4);
+    ctx.lineTo(lx, ly - bSz * 0.8);
+    ctx.stroke();
+    ctx.fillStyle = '#1c1917';
+    ctx.fillRect(lx - bSz * 0.8, ly - bSz, bSz * 1.6, bSz * 2);
+    ctx.fillStyle = '#fde68a';
+    ctx.fillRect(lx - bSz * 0.45, ly - bSz * 0.55, bSz * 0.9, bSz * 1.1);
+  }
+
+  // Grounded mountainside rock cliff facade at cave entrance / exit portals
+  if ((farZone.isCavePortalIn || farZone.isCavePortalOut) && far.rawZ > 3.5 && far.rawZ < 130) {
+    const sc = far.cM.scale;
+    const cliffW = Math.max(15, sc * 3.8);
+    const browH = Math.max(11, sc * 3.5);
+    const groundDropY = Math.max(cvFLB.y, cvFL0.y + sc * 6.5);
+    const groundDropRY = Math.max(cvFRB.y, cvFR0.y + sc * 6.5);
+    ctx.globalAlpha = fogAlpha;
+
+    // Grounded granite cliff buttress shoulders anchoring deep into the valley floor
+    ctx.fillStyle = '#2b2926';
+    ctx.beginPath();
+    ctx.moveTo(cvFL0.x - cliffW * 1.55, groundDropY);
+    ctx.lineTo(cvFL_S.x - cliffW * 1.28, cvFL_S.y + browH * 0.05);
+    ctx.lineTo(cvFL1.x - cliffW * 0.92, cvFL1.y - browH * 0.52);
+    ctx.lineTo(cvFL2.x - cliffW * 0.5, cvFL2.y - browH * 1.08);
+    ctx.lineTo(cvFL2.x - cliffW * 0.12, cvFC.y - browH * 1.32);
+    ctx.lineTo(cvFC.x - cliffW * 0.04, cvFC.y - browH * 1.12);
+    ctx.lineTo(cvFR2.x + cliffW * 0.08, cvFC.y - browH * 1.26);
+    ctx.lineTo(cvFR2.x + cliffW * 0.5, cvFR2.y - browH * 1.0);
+    ctx.lineTo(cvFR1.x + cliffW * 0.92, cvFR1.y - browH * 0.46);
+    ctx.lineTo(cvFR_S.x + cliffW * 1.28, cvFR_S.y + browH * 0.05);
+    ctx.lineTo(cvFR0.x + cliffW * 1.55, groundDropRY);
+    ctx.lineTo(cvFR0.x, groundDropRY);
+    // Cut back along the rugged inner rock mouth opening
+    ctx.lineTo(cvFR0.x, cvFR0.y + 2);
+    ctx.lineTo(cvFR_S.x, cvFR_S.y);
+    ctx.lineTo(cvFR1.x, cvFR1.y);
+    ctx.lineTo(cvFR2.x, cvFR2.y);
+    ctx.lineTo(cvFC.x, cvFC.y);
+    ctx.lineTo(cvFL2.x, cvFL2.y);
+    ctx.lineTo(cvFL1.x, cvFL1.y);
+    ctx.lineTo(cvFL_S.x, cvFL_S.y);
+    ctx.lineTo(cvFL0.x, cvFL0.y + 2);
+    ctx.lineTo(cvFL0.x, groundDropY);
+    ctx.closePath();
+    ctx.fill();
+
+    // Sunlit limestone/granite rock strata ledges across the upper cliff face
+    ctx.fillStyle = '#4c4943';
+    ctx.beginPath();
+    ctx.moveTo(cvFL1.x - cliffW * 0.85, cvFL1.y - browH * 0.6);
+    ctx.lineTo(cvFL2.x - cliffW * 0.55, cvFL2.y - browH * 1.15);
+    ctx.lineTo(cvFL2.x - cliffW * 0.12, cvFC.y - browH * 1.38);
+    ctx.lineTo(cvFC.x - cliffW * 0.04, cvFC.y - browH * 1.18);
+    ctx.lineTo(cvFR2.x + cliffW * 0.08, cvFC.y - browH * 1.32);
+    ctx.lineTo(cvFR2.x + cliffW * 0.35, cvFR2.y - browH * 0.68);
+    ctx.lineTo(cvFC.x, cvFC.y - browH * 0.45);
+    ctx.lineTo(cvFL2.x - cliffW * 0.18, cvFL2.y - browH * 0.42);
+    ctx.closePath();
+    ctx.fill();
+
+    // Irregular mossy forest shelf hugging the cliff crest (varied sizes, natural placement)
+    const mossSpots = 9;
+    for (let m = 0; m < mossSpots; m++) {
+      const t = (m / (mossSpots - 1)) * 1.24 - 0.12;
+      const mx = cvFL2.x + (cvFR2.x - cvFL2.x) * t;
+      const arc = Math.sin(Math.max(0, Math.min(1, t)) * Math.PI);
+      const my = cvFL2.y + (cvFC.y - cvFL2.y) * arc - browH * (0.82 + (m % 3) * 0.16);
+      const mw = Math.max(4, sc * (0.72 + ((m * 5) % 4) * 0.24));
+      ctx.fillStyle = m % 2 === 0 ? ch.foliageLight : ch.foliageDark;
+      ctx.beginPath();
+      ctx.ellipse(mx, my, mw, mw * 0.38, (m % 3 - 1) * 0.18, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Hanging woodland roots & ivy tendrils from upper rock mouth cracks
+    ctx.strokeStyle = '#36522e';
+    ctx.lineWidth = Math.max(1.1, sc * 0.09);
+    for (let v = 0; v < 6; v++) {
+      const f = 0.14 + v * 0.145;
+      const vx = cvFL2.x + (cvFR2.x - cvFL2.x) * f;
+      const vy = cvFL2.y + (cvFC.y - cvFL2.y) * Math.sin(f * Math.PI);
+      const vLen = Math.max(4, sc * (0.75 + ((v * 3) % 4) * 0.38));
+      ctx.beginPath();
+      ctx.moveTo(vx, vy);
+      ctx.quadraticCurveTo(vx + Math.sin(v * 2.1) * sc * 0.2, vy + vLen * 0.55, vx - Math.cos(v) * sc * 0.14, vy + vLen);
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+}
+
+/**
+ * Renders Forest Trail / Wooden Bridge / Cave Road architecture:
+ * - Weathered timber bridge decks & trestle legs over mountain river gorges
+ * - Rustic timber log guardrails on forest trails & rocky cave curbs
+ * - Explorer lantern posts, Timber Expedition Gates & Mossy Stone Ruin Archways
+ */
+export function renderAdventureRoadSlice3D(params: {
+  ctx: CanvasRenderingContext2D;
+  far: RoadSlice3D;
+  near: RoadSlice3D;
+  farZone: AdventureZoneSample;
+  fogAlpha: number;
+  breachedSliceIdx: number;
+  headlightRoadIllum?: number;
+  headlightBeamColor?: string;
+  nowMs: number;
+  projectInto: Project3DIntoFn;
+}) {
+  const {
+    ctx,
+    far,
+    near,
+    farZone,
+    fogAlpha,
+    breachedSliceIdx,
+    headlightRoadIllum = 0,
+    headlightBeamColor = '#fef9c3',
+    nowMs,
+    projectInto,
+  } = params;
+  const fpt = far.pt;
+  const isNearMid = far.rawZ < 64;
+  const ch = farZone.chapter;
+  const inCave = farZone.zone === 'cave';
+  const onBridge = farZone.isWoodenBridge;
+  const roadIllum = Math.max(0, Math.min(1.35, headlightRoadIllum));
+
+  if (onBridge) {
+    if (fpt.index % 5 === 0 && far.rawZ > 2.2) {
+      if (projectInto(fpt.x, fpt.y - 9.5, fpt.z, wp0, 0.55)) {
+        const legW = Math.max(2, Math.round(0.28 * far.cM.scale));
+        const topY = Math.round((far.uL.y + far.uR.y) * 0.5);
+        const botY = Math.round(wp0.y);
+        if (botY > topY) {
+          ctx.fillStyle = '#3d210d';
+          ctx.fillRect(Math.round(far.uL.x), topY, legW, botY - topY);
+          ctx.fillRect(Math.round(far.uR.x) - legW, topY, legW, botY - topY);
+          ctx.strokeStyle = '#633818';
+          ctx.lineWidth = Math.max(1, Math.round(legW * 0.62));
+          ctx.beginPath();
+          ctx.moveTo(far.uL.x, topY);
+          ctx.lineTo(far.uR.x, Math.min(botY, topY + (botY - topY) * 0.55));
+          ctx.moveTo(far.uR.x, topY);
+          ctx.lineTo(far.uL.x, Math.min(botY, topY + (botY - topY) * 0.55));
+          ctx.stroke();
+        }
+      }
+    }
+    drawQuadPtsDirect(ctx, far.pL, near.pL, near.uL, far.uL, '#6b3e1b', far.rawZ < 64 ? '#291507' : undefined);
+    drawQuadPtsDirect(ctx, far.pR, near.pR, near.uR, far.uR, '#42240d', far.rawZ < 64 ? '#291507' : undefined);
+  } else {
+    const sideWallL = inCave
+      ? roadIllum > 0.25 ? '#3b3c42' : '#1b1a19'
+      : '#35482b';
+    const sideWallR = inCave
+      ? roadIllum > 0.25 ? '#2d2e33' : '#141313'
+      : '#263420';
+    drawQuadPtsDirect(ctx, far.pL, near.pL, near.uL, far.uL, sideWallL);
+    drawQuadPtsDirect(ctx, far.pR, near.pR, near.uR, far.uR, sideWallR);
+  }
+
+  const plankTone = deterministicNoise(fpt.index, 2.3);
+  const deckColor = onBridge
+    ? plankTone > 0.5 ? '#7c4a21' : '#6b3e1b'
+    : inCave
+    ? roadIllum > 0.45
+      ? plankTone > 0.5 ? '#3c404b' : '#353944'
+      : roadIllum > 0.14
+      ? plankTone > 0.5 ? '#2c2f38' : '#262931'
+      : plankTone > 0.5 ? '#16171c' : '#131419'
+    : plankTone > 0.5 ? '#3b3f45' : '#373b40';
+  drawQuadPtsDirect(ctx, far.pL, far.pR, near.pR, near.pL, deckColor);
+
+  const nearLineScale = Math.min(near.cM.scale, 95);
+  const farLineScale = Math.min(far.cM.scale, 95);
+
+  if (onBridge) {
+    if (isNearMid) {
+      ctx.strokeStyle = '#331a08';
+      ctx.lineWidth = Math.max(1, 0.1 * nearLineScale);
+      ctx.beginPath();
+      ctx.moveTo(far.pL.x, far.pL.y);
+      ctx.lineTo(far.pR.x, far.pR.y);
+      ctx.stroke();
+    }
+  } else if (isNearMid) {
+    const trimCol = inCave ? 'rgba(18, 20, 24, 0.35)' : 'rgba(54, 72, 42, 0.38)';
+    wp0.x = far.pL.x + (far.pR.x - far.pL.x) * 0.065;
+    wp0.y = far.pL.y + (far.pR.y - far.pL.y) * 0.065;
+    wp1.x = near.pL.x + (near.pR.x - near.pL.x) * 0.065;
+    wp1.y = near.pL.y + (near.pR.y - near.pL.y) * 0.065;
+    drawQuadPtsDirect(ctx, far.pL, wp0, wp1, near.pL, trimCol);
+
+    wp0.x = far.pR.x - (far.pR.x - far.pL.x) * 0.065;
+    wp0.y = far.pR.y - (far.pR.y - far.pL.y) * 0.065;
+    wp1.x = near.pR.x - (near.pR.x - near.pL.x) * 0.065;
+    wp1.y = near.pR.y - (near.pR.y - near.pL.y) * 0.065;
+    drawQuadPtsDirect(ctx, wp0, far.pR, near.pR, wp1, trimCol);
+  }
+
+  if (inCave && far.rawZ < 88) {
+    wp0.x = far.pL.x + (far.pR.x - far.pL.x) * 0.34;
+    wp0.y = far.pL.y + (far.pR.y - far.pL.y) * 0.34;
+    wp1.x = far.pL.x + (far.pR.x - far.pL.x) * 0.66;
+    wp1.y = far.pL.y + (far.pR.y - far.pL.y) * 0.66;
+    wp2.x = near.pL.x + (near.pR.x - near.pL.x) * 0.66;
+    wp2.y = near.pL.y + (near.pR.y - near.pL.y) * 0.66;
+    wp3.x = near.pL.x + (near.pR.x - near.pL.x) * 0.34;
+    wp3.y = near.pL.y + (near.pR.y - near.pL.y) * 0.34;
+    ctx.globalAlpha = fogAlpha * (roadIllum > 0.08 ? 0.14 : 0.06);
+    drawQuadPtsDirect(ctx, wp0, wp1, wp2, wp3, roadIllum > 0.1 ? headlightBeamColor : ch.crystalPrimary);
+    ctx.globalAlpha = fogAlpha;
+  }
+
+  ctx.strokeStyle = onBridge
+    ? '#b45309'
+    : inCave
+    ? roadIllum > 0.08
+      ? getHeadlightRgba(headlightBeamColor, Math.min(0.88, 0.34 + roadIllum * 0.54))
+      : 'rgba(148, 163, 184, 0.20)'
+    : 'rgba(226, 232, 240, 0.42)';
+  ctx.globalAlpha = fogAlpha * (inCave ? (roadIllum > 0.08 ? 0.85 : 0.32) : 0.46);
+  ctx.lineWidth = Math.max(1.1, 0.09 * nearLineScale);
+  ctx.beginPath();
+  ctx.moveTo(far.pL.x, far.pL.y);
+  ctx.lineTo(near.pL.x, near.pL.y);
+  ctx.moveTo(far.pR.x, far.pR.y);
+  ctx.lineTo(near.pR.x, near.pR.y);
+  ctx.stroke();
+  ctx.globalAlpha = fogAlpha;
+
+  if (fpt.index % 2 === 0) {
+    ctx.strokeStyle = onBridge
+      ? 'rgba(254, 243, 199, 0.38)'
+      : inCave
+      ? roadIllum > 0.08
+        ? getHeadlightRgba(headlightBeamColor, Math.min(0.9, 0.36 + roadIllum * 0.52))
+        : 'rgba(148, 163, 184, 0.22)'
+      : 'rgba(253, 224, 71, 0.42)';
+    ctx.lineWidth = Math.max(1.1, 0.08 * nearLineScale);
+    ctx.beginPath();
+    ctx.moveTo(far.cM.x, far.cM.y);
+    ctx.lineTo(near.cM.x, near.cM.y);
+    ctx.stroke();
+  }
+
+  if (Math.abs(fpt.curvature) > 0.011) {
+    const isInsideLeft = fpt.curvature < 0;
+    const curbCol = inCave
+      ? roadIllum > 0.22
+        ? fpt.index % 2 === 0 ? '#4b5263' : '#636c80'
+        : fpt.index % 2 === 0 ? '#1c1e24' : '#24262e'
+      : fpt.index % 2 === 0 ? '#4d5444' : '#5e5b52';
+    if (isInsideLeft) {
+      wp0.x = far.pL.x + (far.pR.x - far.pL.x) * 0.065;
+      wp0.y = far.pL.y + (far.pR.y - far.pL.y) * 0.065;
+      wp1.x = near.pL.x + (near.pR.x - near.pL.x) * 0.065;
+      wp1.y = near.pL.y + (near.pR.y - near.pL.y) * 0.065;
+      drawQuadPtsDirect(ctx, far.pL, wp0, wp1, near.pL, curbCol);
+    } else {
+      wp0.x = far.pR.x - (far.pR.x - far.pL.x) * 0.065;
+      wp0.y = far.pR.y - (far.pR.y - far.pL.y) * 0.065;
+      wp1.x = near.pR.x - (near.pR.x - near.pL.x) * 0.065;
+      wp1.y = near.pR.y - (near.pR.y - near.pL.y) * 0.065;
+      drawQuadPtsDirect(ctx, wp0, far.pR, near.pR, wp1, curbCol);
+    }
+  }
+
+  if (fpt.hasBoostPad && !fpt.boostTriggered) {
+    const padW = Math.max(4, Math.round(1.45 * farLineScale));
+    ctx.fillStyle = ch.crystalPrimary;
+    ctx.beginPath();
+    ctx.moveTo(Math.round(far.cM.x), Math.round(far.cM.y - padW * 0.65));
+    ctx.lineTo(Math.round(far.cM.x + padW), Math.round(far.cM.y + padW * 0.5));
+    ctx.lineTo(Math.round(far.cM.x - padW), Math.round(far.cM.y + padW * 0.5));
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(Math.round(far.cM.x - 1), Math.round(far.cM.y - padW * 0.25), 2, Math.max(2, Math.round(padW * 0.5)));
+  }
+
+  const isBreached = breachedSliceIdx >= 0 && Math.abs(fpt.index - breachedSliceIdx) <= 1;
+  if (!isBreached) {
+    if (inCave) {
+      drawQuadPtsDirect(
+        ctx,
+        far.gL,
+        near.gL,
+        near.pL,
+        far.pL,
+        roadIllum > 0.2 ? 'rgba(64, 67, 74, 0.84)' : 'rgba(22, 22, 24, 0.84)'
+      );
+      drawQuadPtsDirect(
+        ctx,
+        far.gR,
+        near.gR,
+        near.pR,
+        far.pR,
+        roadIllum > 0.2 ? 'rgba(50, 53, 60, 0.84)' : 'rgba(16, 16, 18, 0.84)'
+      );
+      if (fpt.index % 3 === 0 && far.rawZ < 75) {
+        const dotSz = Math.max(2, Math.round(0.12 * farLineScale));
+        ctx.fillStyle = ch.crystalPrimary;
+        ctx.fillRect(far.gL.x - dotSz * 0.5, (far.gL.y + far.pL.y) * 0.5 - dotSz * 0.5, dotSz, dotSz);
+        ctx.fillStyle = ch.crystalSecondary;
+        ctx.fillRect(far.gR.x - dotSz * 0.5, (far.gR.y + far.pR.y) * 0.5 - dotSz * 0.5, dotSz, dotSz);
+      }
+    } else {
+      const woodLight = onBridge ? '#925728' : '#7a4b25';
+      const woodDark = onBridge ? '#5c3415' : '#4a2c14';
+      if (onBridge) {
+        drawQuadPtsDirect(ctx, far.gL, near.gL, near.pL, far.pL, 'rgba(92, 52, 21, 0.45)', '#291507');
+        drawQuadPtsDirect(ctx, far.gR, near.gR, near.pR, far.pR, 'rgba(58, 32, 12, 0.45)', '#291507');
+      }
+      ctx.strokeStyle = woodLight;
+      ctx.lineWidth = Math.max(2, 0.15 * nearLineScale);
+      ctx.beginPath();
+      ctx.moveTo(far.gL.x, far.gL.y);
+      ctx.lineTo(near.gL.x, near.gL.y);
+      ctx.moveTo(far.gR.x, far.gR.y);
+      ctx.lineTo(near.gR.x, near.gR.y);
+      ctx.stroke();
+
+      if (far.rawZ < 60) {
+        ctx.strokeStyle = woodDark;
+        ctx.lineWidth = Math.max(1.5, 0.11 * nearLineScale);
+        ctx.beginPath();
+        ctx.moveTo((far.gL.x + far.pL.x) * 0.5, (far.gL.y + far.pL.y) * 0.5);
+        ctx.lineTo((near.gL.x + near.pL.x) * 0.5, (near.gL.y + near.pL.y) * 0.5);
+        ctx.moveTo((far.gR.x + far.pR.x) * 0.5, (far.gR.y + far.pR.y) * 0.5);
+        ctx.lineTo((near.gR.x + near.pR.x) * 0.5, (near.gR.y + near.pR.y) * 0.5);
+        ctx.stroke();
+      }
+
+      if (far.rawZ < 58) {
+        ctx.strokeStyle = '#38200d';
+        ctx.lineWidth = Math.max(1.5, 0.15 * farLineScale);
+        ctx.beginPath();
+        ctx.moveTo(far.pL.x, far.pL.y);
+        ctx.lineTo(far.gL.x, far.gL.y);
+        ctx.moveTo(far.pR.x, far.pR.y);
+        ctx.lineTo(far.gR.x, far.gR.y);
+        ctx.stroke();
+      }
+    }
+  }
+
+  if (!inCave && fpt.index % 8 === 0 && far.rawZ > 6 && far.rawZ < 105) {
+    const isLeft = fpt.index % 16 === 0;
+    const base = isLeft ? far.gL : far.gR;
+    const postH = Math.max(6, 2.35 * far.cM.scale);
+    const arm = Math.max(2, 0.65 * far.cM.scale) * (isLeft ? 1 : -1);
+    const topY = base.y - postH;
+    const lx = base.x + arm;
+
+    ctx.strokeStyle = '#38200d';
+    ctx.lineWidth = Math.max(1.5, 0.16 * far.cM.scale);
+    ctx.beginPath();
+    ctx.moveTo(base.x, base.y);
+    ctx.lineTo(base.x, topY);
+    ctx.lineTo(lx, topY);
+    ctx.stroke();
+
+    const glowPulse = 0.72 + 0.28 * Math.sin(nowMs * 0.006 + fpt.index);
+    ctx.fillStyle = ch.lanternGlow;
+    ctx.globalAlpha = fogAlpha * 0.28 * glowPulse;
+    ctx.beginPath();
+    ctx.arc(lx, topY + 2, Math.max(3, 0.45 * far.cM.scale), 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalAlpha = fogAlpha;
+    ctx.fillStyle = '#fef3c7';
+    const sz = Math.max(2, Math.round(0.24 * far.cM.scale));
+    ctx.fillRect(lx - sz * 0.5, topY + 1, sz, sz * 1.2);
+  }
+
+  if (farZone.hasRuinArch && far.rawZ > 4 && far.rawZ < 124) {
+    const hw = fpt.width * 0.56;
+    const archH = 5.4;
+    if (
+      projectInto(fpt.x - fpt.nx * hw, fpt.y, fpt.z - fpt.nz * hw, wp0, 0.55) &&
+      projectInto(fpt.x + fpt.nx * hw, fpt.y, fpt.z + fpt.nz * hw, wp1, 0.55) &&
+      projectInto(fpt.x - fpt.nx * (hw - 0.35), fpt.y + archH, fpt.z - fpt.nz * (hw - 0.35), wp2, 0.55) &&
+      projectInto(fpt.x + fpt.nx * (hw - 0.35), fpt.y + archH, fpt.z + fpt.nz * (hw - 0.35), wp3, 0.55)
+    ) {
+      const colW = Math.max(3, Math.round(0.58 * far.cM.scale));
+      ctx.strokeStyle = '#36332f';
+      ctx.lineWidth = colW + 2;
+      ctx.beginPath();
+      ctx.moveTo(wp0.x, wp0.y);
+      ctx.lineTo(wp2.x, wp2.y);
+      ctx.lineTo(wp3.x, wp3.y);
+      ctx.lineTo(wp1.x, wp1.y);
+      ctx.stroke();
+
+      ctx.strokeStyle = '#6b665e';
+      ctx.lineWidth = colW;
+      ctx.stroke();
+
+      ctx.fillStyle = ch.foliageLight;
+      const span = wp3.x - wp2.x;
+      for (let m = 0; m < 6; m++) {
+        const f = m / 5;
+        ctx.beginPath();
+        ctx.ellipse(wp2.x + span * f, wp2.y - 1, Math.max(2, colW * 0.65), Math.max(1.5, colW * 0.35), 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      const midX = (wp2.x + wp3.x) * 0.5;
+      const midY = (wp2.y + wp3.y) * 0.5;
+      ctx.fillStyle = ch.crystalPrimary;
+      ctx.fillRect(midX - 2, midY - 2, Math.max(3, colW * 0.45), Math.max(3, colW * 0.45));
+    }
+  }
+
+  if (farZone.hasTimberGate && far.rawZ > 4 && far.rawZ < 120) {
+    const hw = fpt.width * 0.55;
+    const gateH = 4.9;
+    if (
+      projectInto(fpt.x - fpt.nx * hw, fpt.y, fpt.z - fpt.nz * hw, wp0, 0.55) &&
+      projectInto(fpt.x + fpt.nx * hw, fpt.y, fpt.z + fpt.nz * hw, wp1, 0.55) &&
+      projectInto(fpt.x - fpt.nx * hw, fpt.y + gateH, fpt.z - fpt.nz * hw, wp2, 0.55) &&
+      projectInto(fpt.x + fpt.nx * hw, fpt.y + gateH, fpt.z + fpt.nz * hw, wp3, 0.55)
+    ) {
+      const logW = Math.max(2, Math.round(0.32 * far.cM.scale));
+      ctx.strokeStyle = '#38200d';
+      ctx.lineWidth = logW + 2;
+      ctx.beginPath();
+      ctx.moveTo(wp0.x, wp0.y);
+      ctx.lineTo(wp2.x, wp2.y);
+      ctx.lineTo(wp3.x, wp3.y);
+      ctx.lineTo(wp1.x, wp1.y);
+      ctx.stroke();
+
+      ctx.strokeStyle = '#7c4a21';
+      ctx.lineWidth = logW;
+      ctx.stroke();
+
+      const lanY = (wp2.y + wp3.y) * 0.5 + Math.max(3, 0.4 * far.cM.scale);
+      ctx.fillStyle = '#fef08a';
+      ctx.fillRect(wp2.x + (wp3.x - wp2.x) * 0.28 - 1.5, lanY, Math.max(2, logW * 0.65), Math.max(3, logW * 0.8));
+      ctx.fillRect(wp2.x + (wp3.x - wp2.x) * 0.72 - 1.5, lanY, Math.max(2, logW * 0.65), Math.max(3, logW * 0.8));
+    }
+  }
+
+  ctx.globalAlpha = 1.0;
+}
+
+function drawQuadPtsDirect(
+  ctx: CanvasRenderingContext2D,
+  a: Projected3D,
+  b: Projected3D,
+  c: Projected3D,
+  d: Projected3D,
+  fillStyle: string,
+  strokeStyle?: string
+) {
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(b.x, b.y);
+  ctx.lineTo(c.x, c.y);
+  ctx.lineTo(d.x, d.y);
+  ctx.closePath();
+  ctx.fillStyle = fillStyle;
+  ctx.fill();
+  if (strokeStyle) {
+    ctx.strokeStyle = strokeStyle;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+}
+
 
 

@@ -35,7 +35,12 @@ import {
   ROAD_WIDTH,
 } from './rules';
 import { computeMixerVolume, SoundFXSystem, soundFX } from './audio';
-import { getPixelCarTireAnchors, resolveVehicleArchetype } from './pixelSprites';
+import {
+  getPixelCarTireAnchors,
+  isDoorNumberPixelVisible,
+  resolveVehicleArchetype,
+  resolveVisibleDoorRoundelSide,
+} from './pixelSprites';
 import { computeDistanceFogAlpha } from './world3d';
 import {
   AI_SFX_SLOTS,
@@ -928,6 +933,121 @@ test('computeDistanceFogAlpha smoothly attenuates distant 3D slices without hard
   assert.equal(computeDistanceFogAlpha(152, 104, 152), 0);
   assert.equal(computeDistanceFogAlpha(180, 104, 152), 0);
 });
+
+test('resolveVisibleDoorRoundelSide and isDoorNumberPixelVisible prevent racing numbers from showing through the car', () => {
+  // Straight rear chase or shallow weave hides door numbers
+  assert.equal(
+    resolveVisibleDoorRoundelSide({ showDoorRoundel: true, isFormula: false, isCustomYaw: false, sinY: 0 }),
+    0
+  );
+  assert.equal(
+    resolveVisibleDoorRoundelSide({ showDoorRoundel: true, isFormula: false, isCustomYaw: false, sinY: 0.2 }),
+    0
+  );
+  // Significant drift exposes camera-facing door unless detached
+  assert.equal(
+    resolveVisibleDoorRoundelSide({ showDoorRoundel: true, isFormula: false, isCustomYaw: false, sinY: 0.45 }),
+    1
+  );
+  assert.equal(
+    resolveVisibleDoorRoundelSide({
+      showDoorRoundel: true,
+      isFormula: false,
+      isCustomYaw: false,
+      sinY: 0.45,
+      rightDoorDetached: true,
+    }),
+    0
+  );
+  // Custom yaw rotating left door toward camera selects -1
+  assert.equal(
+    resolveVisibleDoorRoundelSide({ showDoorRoundel: true, isFormula: false, isCustomYaw: true, sinY: -0.5 }),
+    -1
+  );
+  assert.equal(
+    resolveVisibleDoorRoundelSide({ showDoorRoundel: true, isFormula: true, isCustomYaw: true, sinY: 0.6 }),
+    0
+  );
+
+  // Z-buffer pixel test rejects occluded rear glass / body pixels and mirrored bounds
+  const w = 10;
+  const h = 10;
+  const colorBuf = new Uint32Array(w * h);
+  const depthBuf = new Float32Array(w * h).fill(Infinity);
+  const roundelCol = 0xfffaf8f8;
+  const bodyCol = 0xff2244aa;
+
+  // Unoccluded white roundel pixel at (3, 4) with depth 1.0
+  colorBuf[4 * w + 3] = roundelCol;
+  depthBuf[4 * w + 3] = 1.0;
+  // Closer glass/body pixel at (4, 4) with depth 0.3
+  colorBuf[4 * w + 4] = bodyCol;
+  depthBuf[4 * w + 4] = 0.3;
+  // Distant roof white stripe pixel at (5, 4) with depth 0.2
+  colorBuf[4 * w + 5] = roundelCol;
+  depthBuf[4 * w + 5] = 0.2;
+
+  assert.equal(
+    isDoorNumberPixelVisible({
+      screenX: 3,
+      screenY: 4,
+      width: w,
+      height: h,
+      shouldMirror: false,
+      colorBuf,
+      depthBuf,
+      roundelCol,
+      doorDepthZ: 1.0,
+    }),
+    true
+  );
+  // Mirrored coordinate maps screenX = 6 -> bx = 3
+  assert.equal(
+    isDoorNumberPixelVisible({
+      screenX: 6,
+      screenY: 4,
+      width: w,
+      height: h,
+      shouldMirror: true,
+      colorBuf,
+      depthBuf,
+      roundelCol,
+      doorDepthZ: 1.0,
+    }),
+    true
+  );
+  // Occluded by closer car body
+  assert.equal(
+    isDoorNumberPixelVisible({
+      screenX: 4,
+      screenY: 4,
+      width: w,
+      height: h,
+      shouldMirror: false,
+      colorBuf,
+      depthBuf,
+      roundelCol,
+      doorDepthZ: 1.0,
+    }),
+    false
+  );
+  // Distant/closer white stripe on roof rejected by Z-buffer check
+  assert.equal(
+    isDoorNumberPixelVisible({
+      screenX: 5,
+      screenY: 4,
+      width: w,
+      height: h,
+      shouldMirror: false,
+      colorBuf,
+      depthBuf,
+      roundelCol,
+      doorDepthZ: 1.0,
+    }),
+    false
+  );
+});
+
 
 
 
