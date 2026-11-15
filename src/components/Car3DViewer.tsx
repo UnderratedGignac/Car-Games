@@ -1,14 +1,26 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
+import CameraControls from 'camera-controls';
+import CustomShaderMaterial from 'three-custom-shader-material/vanilla';
+import { N8AOPostPass } from 'n8ao';
+import {
+  BloomEffect,
+  EffectComposer,
+  EffectPass,
+  RenderPass,
+  SMAAEffect,
+  ToneMappingEffect,
+  ToneMappingMode,
+  VignetteEffect,
+} from 'postprocessing';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js';
 import { CarCustomization, CarSpec, resolveCarAppearance } from '../game/rules';
 import { resolveVehicleArchetype } from '../game/pixelSprites';
 import { CarDamageState, CarPartId, CAR_PART_IDS, getDamageVisualCacheKey } from '../game/damage';
 import { createShowroomTexturePack, type ShowroomTexturePack } from '../game/proceduralTextures';
+
+CameraControls.install({ THREE });
 
 export type InspectTarget = 'all' | 'hood' | 'wheels' | 'aero' | 'exhaust' | 'underglow';
 
@@ -39,7 +51,7 @@ function disposeObject3D(root: THREE.Object3D) {
 function createExtrudedProfile(
   points: [number, number][],
   width: number,
-  bevel = 0.025
+  bevel = 0.028
 ): THREE.ExtrudeGeometry {
   const shape = new THREE.Shape();
   shape.moveTo(points[0][0], points[0][1]);
@@ -52,14 +64,103 @@ function createExtrudedProfile(
     bevelEnabled: bevel > 0,
     bevelThickness: bevel,
     bevelSize: bevel,
-    bevelSegments: 2,
+    bevelSegments: 3,
     steps: 1,
   });
-  // Extrude runs along +Z with profile in X-Y; rotate so profile Z-Y maps to car length Z & height Y, extruded along X centered at 0
   geo.translate(0, 0, -width * 0.5);
   geo.rotateY(-Math.PI / 2);
   geo.computeVertexNormals();
   return geo;
+}
+
+function createSculptedTireGeometry(rad: number, width: number): THREE.LatheGeometry {
+  const hw = width * 0.5;
+  const rimBead = rad * 0.62;
+  const shoulderR = rad * 0.965;
+  const crownR = rad;
+  const pts: THREE.Vector2[] = [
+    new THREE.Vector2(rimBead, -hw * 0.88),
+    new THREE.Vector2(rad * 0.78, -hw * 0.99),
+    new THREE.Vector2(shoulderR, -hw * 0.84),
+    new THREE.Vector2(crownR, -hw * 0.56),
+    new THREE.Vector2(crownR, 0),
+    new THREE.Vector2(crownR, hw * 0.56),
+    new THREE.Vector2(shoulderR, hw * 0.84),
+    new THREE.Vector2(rad * 0.78, hw * 0.99),
+    new THREE.Vector2(rimBead, hw * 0.88),
+  ];
+  const geo = new THREE.LatheGeometry(pts, 32);
+  geo.rotateZ(Math.PI / 2);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function createExhaustTipGeometry(radius = 0.068, length = 0.28): THREE.LatheGeometry {
+  const pts: THREE.Vector2[] = [
+    new THREE.Vector2(radius * 0.82, -length * 0.5),
+    new THREE.Vector2(radius, -length * 0.5),
+    new THREE.Vector2(radius, length * 0.44),
+    new THREE.Vector2(radius * 0.95, length * 0.5),
+    new THREE.Vector2(radius * 0.84, length * 0.48),
+    new THREE.Vector2(radius * 0.82, length * 0.06),
+  ];
+  const geo = new THREE.LatheGeometry(pts, 20);
+  geo.rotateX(Math.PI / 2);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function createMetallicFlakeMaterial(
+  baseColor: THREE.Color,
+  texPack: ShowroomTexturePack | null,
+  clearcoatStrength = 1.0
+): THREE.MeshPhysicalMaterial {
+  return new CustomShaderMaterial({
+    baseMaterial: THREE.MeshPhysicalMaterial,
+    color: baseColor,
+    metalness: 0.72,
+    roughness: 0.22,
+    roughnessMap: texPack?.paintFlakeRoughness ?? null,
+    clearcoat: clearcoatStrength,
+    clearcoatRoughness: 0.065,
+    clearcoatNormalMap: texPack?.paintFlakeNormal ?? null,
+    clearcoatNormalScale: new THREE.Vector2(0.18, 0.18),
+    envMapIntensity: 1.55,
+    vertexShader: `
+      varying vec3 vWorldPos;
+      varying vec3 vLocalPos;
+      void main() {
+        vLocalPos = position;
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorldPos = wp.xyz;
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vWorldPos;
+      varying vec3 vLocalPos;
+      float hashFlake(vec3 p) {
+        p = fract(p * vec3(443.8975, 397.2973, 491.1871));
+        p += dot(p, p.yxz + 19.19);
+        return fract((p.x + p.y) * p.z);
+      }
+      void main() {
+        vec3 cell = floor(vLocalPos * 145.0);
+        float rnd = hashFlake(cell);
+        float glint = smoothstep(0.92, 1.0, rnd);
+        vec3 viewDirW = normalize(cameraPosition - vWorldPos);
+        float fresnel = pow(1.0 - max(0.0, abs(dot(vNormal, viewDirW))), 3.0);
+        csm_DiffuseColor.rgb += csm_DiffuseColor.rgb * (glint * 0.18 + fresnel * 0.06);
+        csm_Roughness = clamp(csm_Roughness - glint * 0.14, 0.06, 0.95);
+      }
+    `,
+  }) as unknown as THREE.MeshPhysicalMaterial;
+}
+
+function sphericalLookAt(yaw: number, pitch: number, dist: number, centerY: number): [number, number, number] {
+  const x = Math.sin(yaw) * Math.cos(pitch) * dist;
+  const y = Math.sin(pitch) * dist + centerY;
+  const z = Math.cos(yaw) * Math.cos(pitch) * dist;
+  return [x, y, z];
 }
 
 export const Car3DViewer: React.FC<Car3DViewerProps> = ({
@@ -77,26 +178,13 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
   const [activeInspect, setActiveInspect] = useState<InspectTarget>('all');
   const [contextLost, setContextLost] = useState<boolean>(false);
 
-  const stateRef = useRef({
-    yaw: -0.65,
-    pitch: 0.30,
-    targetYaw: -0.65,
-    targetPitch: 0.30,
-    distance: 6.8,
-    targetDistance: 6.8,
-    targetCenterY: 0.62,
-    centerY: 0.62,
-    isDragging: false,
-    prevPointerX: 0,
-    prevPointerY: 0,
-    autoRotate: true,
-  });
-
-  stateRef.current.autoRotate = autoRotate;
+  const autoRotateRef = useRef(autoRotate);
+  autoRotateRef.current = autoRotate;
 
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const controlsRef = useRef<CameraControls | null>(null);
   const carGroupRef = useRef<THREE.Group | null>(null);
   const fxGroupRef = useRef<THREE.Group | null>(null);
   const exhaustFlamesRef = useRef<THREE.Group | null>(null);
@@ -105,49 +193,37 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
   const isSoftwareGlRef = useRef<boolean>(false);
   const texPackRef = useRef<ShowroomTexturePack | null>(null);
 
+  const moveCameraTo = (yaw: number, pitch: number, dist: number, centerY: number) => {
+    const controls = controlsRef.current;
+    if (!controls) return;
+    const [camX, camY, camZ] = sphericalLookAt(yaw, pitch, dist, centerY);
+    controls.setLookAt(camX, camY, camZ, 0, centerY, 0, !isSoftwareGlRef.current);
+  };
+
   const setInspectionMode = (target: InspectTarget) => {
     setActiveInspect(target);
     onInspectTargetChange?.(target);
     setAutoRotate(false);
 
-    const s = stateRef.current;
     switch (target) {
       case 'hood':
-        s.targetYaw = -0.42;
-        s.targetPitch = 0.42;
-        s.targetDistance = 4.6;
-        s.targetCenterY = 0.80;
+        moveCameraTo(-0.42, 0.42, 4.5, 0.78);
         break;
       case 'wheels':
-        s.targetYaw = -1.48;
-        s.targetPitch = 0.16;
-        s.targetDistance = 3.8;
-        s.targetCenterY = 0.42;
+        moveCameraTo(-1.48, 0.16, 3.65, 0.42);
         break;
       case 'aero':
-        s.targetYaw = 2.48;
-        s.targetPitch = 0.44;
-        s.targetDistance = 4.5;
-        s.targetCenterY = 0.88;
+        moveCameraTo(2.48, 0.44, 4.4, 0.88);
         break;
       case 'exhaust':
-        s.targetYaw = 3.14;
-        s.targetPitch = 0.14;
-        s.targetDistance = 3.7;
-        s.targetCenterY = 0.36;
+        moveCameraTo(3.14, 0.14, 3.6, 0.36);
         break;
       case 'underglow':
-        s.targetYaw = -0.85;
-        s.targetPitch = 0.08;
-        s.targetDistance = 5.0;
-        s.targetCenterY = 0.25;
+        moveCameraTo(-0.85, 0.09, 4.9, 0.25);
         break;
       case 'all':
       default:
-        s.targetYaw = -0.65;
-        s.targetPitch = 0.30;
-        s.targetDistance = 6.8;
-        s.targetCenterY = 0.62;
+        moveCameraTo(-0.65, 0.30, 6.7, 0.62);
         break;
     }
   };
@@ -155,76 +231,53 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
   useEffect(() => {
     if (!highlightedPart) return;
     setAutoRotate(false);
-    const s = stateRef.current;
     switch (highlightedPart) {
       case 'front_bumper':
       case 'hood':
-        s.targetYaw = -0.35;
-        s.targetPitch = 0.38;
-        s.targetDistance = 4.6;
-        s.targetCenterY = 0.68;
+        moveCameraTo(-0.35, 0.38, 4.5, 0.68);
         break;
       case 'windshield':
       case 'roof':
-        s.targetYaw = -0.65;
-        s.targetPitch = 0.52;
-        s.targetDistance = 5.1;
-        s.targetCenterY = 0.88;
+        moveCameraTo(-0.65, 0.52, 5.0, 0.88);
         break;
       case 'left_door':
-        s.targetYaw = -1.55;
-        s.targetPitch = 0.24;
-        s.targetDistance = 4.8;
-        s.targetCenterY = 0.62;
+        moveCameraTo(-1.55, 0.24, 4.7, 0.62);
         break;
       case 'right_door':
-        s.targetYaw = 1.55;
-        s.targetPitch = 0.24;
-        s.targetDistance = 4.8;
-        s.targetCenterY = 0.62;
+        moveCameraTo(1.55, 0.24, 4.7, 0.62);
         break;
       case 'rear_bumper':
-        s.targetYaw = 3.0;
-        s.targetPitch = 0.22;
-        s.targetDistance = 4.5;
-        s.targetCenterY = 0.55;
+        moveCameraTo(3.0, 0.22, 4.4, 0.55);
         break;
       case 'spoiler':
-        s.targetYaw = 2.52;
-        s.targetPitch = 0.44;
-        s.targetDistance = 4.6;
-        s.targetCenterY = 0.88;
+        moveCameraTo(2.52, 0.44, 4.5, 0.88);
         break;
     }
   }, [highlightedPart]);
 
-  // 1. Mount Three.js Renderer, Studio Lighting Rig & Turntable ONCE
+  // 1. Mount Three.js Renderer, Studio Softboxes, CameraControls & N8AO+Postprocessing Pipeline ONCE
   useEffect(() => {
     if (!mountRef.current) return;
     const container = mountRef.current;
 
     const scene = new THREE.Scene();
     sceneRef.current = scene;
-    scene.background = new THREE.Color(0x070b14);
-    scene.fog = new THREE.FogExp2(0x070b14, 0.055);
+    scene.background = new THREE.Color(0x060a13);
+    scene.fog = new THREE.FogExp2(0x060a13, 0.048);
 
-    const camera = new THREE.PerspectiveCamera(
-      36,
-      Math.max(1, container.clientWidth) / Math.max(1, container.clientHeight),
-      0.1,
-      80
-    );
+    const initW = Math.max(1, container.clientWidth);
+    const initH = Math.max(1, container.clientHeight);
+    const camera = new THREE.PerspectiveCamera(35, initW / initH, 0.1, 80);
     cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
       alpha: false,
       powerPreference: 'high-performance',
+      stencil: false,
     });
     rendererRef.current = renderer;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.08;
 
     const glCtx = renderer.getContext();
     const dbgInfo = glCtx.getExtension('WEBGL_debug_renderer_info');
@@ -234,8 +287,9 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
     const isSoftwareGl = /swiftshader|llvmpipe|softpipe|software|basic render/i.test(glVendor);
     isSoftwareGlRef.current = isSoftwareGl;
 
-    const initW = Math.max(1, container.clientWidth);
-    const initH = Math.max(1, container.clientHeight);
+    // ToneMappingEffect applies ACES Filmic when EffectComposer runs; enable direct ACES only on fallback render path
+    renderer.toneMapping = isSoftwareGl ? THREE.ACESFilmicToneMapping : THREE.NoToneMapping;
+    renderer.toneMappingExposure = 1.08;
     renderer.setSize(initW, initH);
     renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 2));
     renderer.shadowMap.enabled = !isSoftwareGl;
@@ -246,20 +300,56 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
 
     const pmremGen = new THREE.PMREMGenerator(renderer);
     const roomEnv = new RoomEnvironment();
-    const envTarget = pmremGen.fromScene(roomEnv, 0.04);
+    const envTarget = pmremGen.fromScene(roomEnv, 0.035);
     scene.environment = envTarget.texture;
     roomEnv.dispose();
     pmremGen.dispose();
 
-    // GPU-gated Post-Processing Pipeline (Bloom for neon rings, headlights, taillights, and flames)
+    // CameraControls for silky damped orbiting, wheel zoom, pinch-zoom & inspection transitions
+    const controls = new CameraControls(camera, renderer.domElement);
+    controlsRef.current = controls;
+    controls.minDistance = 2.6;
+    controls.maxDistance = 10.5;
+    controls.minPolarAngle = 0.08;
+    controls.maxPolarAngle = Math.PI * 0.48;
+    controls.smoothTime = isSoftwareGl ? 0 : 0.24;
+    controls.draggingSmoothTime = isSoftwareGl ? 0 : 0.12;
+    controls.dollySpeed = 0.7;
+    const [initCamX, initCamY, initCamZ] = sphericalLookAt(-0.65, 0.30, 6.7, 0.62);
+    controls.setLookAt(initCamX, initCamY, initCamZ, 0, 0.62, 0, false);
+
+    const onControlStart = () => {
+      setAutoRotate(false);
+    };
+    controls.addEventListener('controlstart', onControlStart);
+
+    // GPU-gated Post-Processing Pipeline: N8AO Contact Ambient Occlusion + Selective HDR Bloom + SMAA + Vignette + ACES
     let composer: EffectComposer | null = null;
-    let bloomPass: UnrealBloomPass | null = null;
     if (!isSoftwareGl) {
-      composer = new EffectComposer(renderer);
+      composer = new EffectComposer(renderer, { frameBufferType: THREE.HalfFloatType });
       composer.addPass(new RenderPass(scene, camera));
-      bloomPass = new UnrealBloomPass(new THREE.Vector2(initW, initH), 0.36, 0.42, 0.85);
-      composer.addPass(bloomPass);
-      composer.addPass(new OutputPass());
+
+      const n8aoPass = new N8AOPostPass(scene, camera, initW, initH);
+      n8aoPass.configuration.aoRadius = 0.72;
+      n8aoPass.configuration.intensity = 1.6;
+      n8aoPass.configuration.distanceFalloff = 0.65;
+      n8aoPass.configuration.aoSamples = 8;
+      n8aoPass.configuration.denoiseSamples = 4;
+      n8aoPass.configuration.halfRes = true;
+      composer.addPass(n8aoPass);
+
+      const bloomEffect = new BloomEffect({
+        mipmapBlur: true,
+        luminanceThreshold: 1.05,
+        intensity: 0.48,
+      });
+      const smaaEffect = new SMAAEffect();
+      const vignetteEffect = new VignetteEffect({ darkness: 0.36, offset: 0.25 });
+      const toneMappingEffect = new ToneMappingEffect({ mode: ToneMappingMode.ACES_FILMIC });
+
+      composer.addPass(
+        new EffectPass(camera, bloomEffect, smaaEffect, vignetteEffect, toneMappingEffect)
+      );
     }
 
     const handleContextLost = (e: Event) => {
@@ -277,12 +367,12 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
     }
     container.appendChild(renderer.domElement);
 
-    // 3-Point Warm/Cool Automotive Studio Lighting
-    const hemiLight = new THREE.HemisphereLight(0xdbeafe, 0x0f172a, 0.78);
+    // Studio Lighting Rig + GPU RectAreaLight Softboxes for authentic automotive clearcoat reflections
+    const hemiLight = new THREE.HemisphereLight(0xdbeafe, 0x080d1a, 0.48);
     scene.add(hemiLight);
 
-    const keyLight = new THREE.DirectionalLight(0xfff7ed, 2.3);
-    keyLight.position.set(5, 8.5, 5.5);
+    const keyLight = new THREE.DirectionalLight(0xfff7ed, 2.65);
+    keyLight.position.set(4.8, 8.2, 5.8);
     keyLight.castShadow = !isSoftwareGl;
     keyLight.shadow.mapSize.width = 1024;
     keyLight.shadow.mapSize.height = 1024;
@@ -291,20 +381,38 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
     scene.add(keyLight);
 
     const fillLight = new THREE.DirectionalLight(0x38bdf8, 1.15);
-    fillLight.position.set(-6, 4.5, -3.5);
+    fillLight.position.set(-6.2, 4.2, -2.5);
     scene.add(fillLight);
 
-    const rimLight = new THREE.DirectionalLight(0xf59e0b, 1.25);
-    rimLight.position.set(0, 5.5, -6.5);
+    const rimLight = new THREE.DirectionalLight(0xf59e0b, 1.35);
+    rimLight.position.set(-1.5, 5.2, -6.5);
     scene.add(rimLight);
 
-    // Overhead & Angled Side Studio Rim Lights + Out-of-Frame Softbox Panels (clean studio frame with diagonal speculars)
-    const softboxBarGeo = new THREE.BoxGeometry(0.18, 0.04, 4.6);
+    if (!isSoftwareGl) {
+      RectAreaLightUniformsLib.init();
+      const overheadSoftbox = new THREE.RectAreaLight(0xf0f9ff, 3.2, 4.2, 1.6);
+      overheadSoftbox.position.set(0, 4.9, 0);
+      overheadSoftbox.lookAt(0, 0.5, 0);
+      scene.add(overheadSoftbox);
+
+      const coolFlank = new THREE.RectAreaLight(0xbae6fd, 2.1, 4.4, 1.1);
+      coolFlank.position.set(-4.6, 2.2, 1.4);
+      coolFlank.lookAt(0, 0.6, 0);
+      scene.add(coolFlank);
+
+      const warmFlank = new THREE.RectAreaLight(0xfef3c7, 1.9, 4.4, 1.1);
+      warmFlank.position.set(4.6, 2.2, 1.4);
+      warmFlank.lookAt(0, 0.6, 0);
+      scene.add(warmFlank);
+    }
+
+    // Overhead Studio Softbox Light Bars (reflection streaks in car paint)
+    const softboxBarGeo = new THREE.BoxGeometry(0.18, 0.04, 4.8);
     const softboxBarMat = new THREE.MeshStandardMaterial({
       color: 0xf8fafc,
       emissive: 0xe0f2fe,
-      emissiveIntensity: 1.85,
-      roughness: 0.2,
+      emissiveIntensity: 1.9,
+      roughness: 0.18,
     });
     for (const bx of [-1.25, 0, 1.25]) {
       const bar = new THREE.Mesh(softboxBarGeo, softboxBarMat);
@@ -312,14 +420,7 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
       scene.add(bar);
     }
 
-    const sideFlankLeft = new THREE.DirectionalLight(0xbae6fd, 0.95);
-    sideFlankLeft.position.set(-5.5, 3.2, 2.2);
-    scene.add(sideFlankLeft);
-    const sideFlankRight = new THREE.DirectionalLight(0xfef3c7, 0.85);
-    sideFlankRight.position.set(5.5, 3.2, 2.2);
-    scene.add(sideFlankRight);
-
-    // Architectural Textured Basalt & Telemetry Turntable Stage
+    // Architectural Textured Basalt & Telemetry Turntable Stage with Tangent-Space Normal Map
     const turntableGeo = new THREE.CylinderGeometry(3.48, 3.72, 0.18, 64);
     const turntableSideMat = new THREE.MeshStandardMaterial({
       color: 0x0b1222,
@@ -330,37 +431,39 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
       color: 0xffffff,
       map: texPack.turntableAlbedo,
       roughnessMap: texPack.turntableRoughness,
-      metalness: 0.52,
+      normalMap: texPack.turntableNormal,
+      normalScale: new THREE.Vector2(0.42, 0.42),
+      metalness: 0.54,
       roughness: 0.42,
-      envMapIntensity: 1.15,
+      envMapIntensity: 1.2,
     });
     const turntable = new THREE.Mesh(turntableGeo, [turntableSideMat, turntableTopMat, turntableSideMat]);
     turntable.position.y = -0.09;
     turntable.receiveShadow = !isSoftwareGl;
     scene.add(turntable);
 
-    // Chamfered Brushed-Titanium Outer Turntable Collar
-    const collarGeo = new THREE.TorusGeometry(3.52, 0.042, 10, 64);
+    const collarGeo = new THREE.TorusGeometry(3.52, 0.042, 12, 64);
     const collarMat = new THREE.MeshStandardMaterial({
       color: 0x64748b,
-      metalness: 0.9,
-      roughness: 0.22,
-      envMapIntensity: 1.35,
+      metalness: 0.92,
+      roughness: 0.20,
+      envMapIntensity: 1.4,
     });
     const collar = new THREE.Mesh(collarGeo, collarMat);
     collar.rotation.x = Math.PI / 2;
     collar.position.y = 0.008;
     scene.add(collar);
 
-    // Outer Studio Floor Apron with Sealed Paddock Concrete Grid PBR Texture + Atmospheric Fog Fade
     const floorApronGeo = new THREE.RingGeometry(3.7, 42, 64);
     const floorApronMat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
       map: texPack.studioFloorAlbedo,
       roughnessMap: texPack.studioFloorRoughness,
-      metalness: 0.28,
-      roughness: 0.72,
-      envMapIntensity: 0.85,
+      normalMap: texPack.studioFloorNormal,
+      normalScale: new THREE.Vector2(0.45, 0.45),
+      metalness: 0.30,
+      roughness: 0.70,
+      envMapIntensity: 0.9,
     });
     const floorApron = new THREE.Mesh(floorApronGeo, floorApronMat);
     floorApron.rotation.x = -Math.PI / 2;
@@ -368,13 +471,12 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
     floorApron.receiveShadow = !isSoftwareGl;
     scene.add(floorApron);
 
-    // Subtle vertical LED bay pillars around the perimeter for studio depth & clearcoat reflections
     const pillarHousingGeo = new THREE.BoxGeometry(0.16, 4.4, 0.16);
     const pillarStripGeo = new THREE.BoxGeometry(0.06, 3.8, 0.06);
     const cyanPillarMat = new THREE.MeshStandardMaterial({
       color: 0x67e8f9,
       emissive: 0x06b6d4,
-      emissiveIntensity: 1.65,
+      emissiveIntensity: 1.7,
       roughness: 0.2,
     });
     const amberPillarMat = new THREE.MeshStandardMaterial({
@@ -415,7 +517,7 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
     const ringMat = new THREE.MeshStandardMaterial({
       color: 0x22d3ee,
       emissive: 0x06b6d4,
-      emissiveIntensity: 2.1,
+      emissiveIntensity: 2.15,
       side: THREE.DoubleSide,
     });
     const ring = new THREE.Mesh(ringGeo, ringMat);
@@ -431,77 +533,6 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
     fxGroupRef.current = fxGroup;
     scene.add(fxGroup);
 
-    const onPointerDown = (e: PointerEvent) => {
-      stateRef.current.isDragging = true;
-      stateRef.current.prevPointerX = e.clientX;
-      stateRef.current.prevPointerY = e.clientY;
-      setAutoRotate(false);
-    };
-
-    const onPointerMove = (e: PointerEvent) => {
-      if (!stateRef.current.isDragging) return;
-      const dx = e.clientX - stateRef.current.prevPointerX;
-      const dy = e.clientY - stateRef.current.prevPointerY;
-      stateRef.current.prevPointerX = e.clientX;
-      stateRef.current.prevPointerY = e.clientY;
-
-      stateRef.current.targetYaw += dx * 0.008;
-      stateRef.current.targetPitch = Math.max(
-        0.05,
-        Math.min(1.18, stateRef.current.targetPitch - dy * 0.007)
-      );
-    };
-
-    const onPointerUp = () => {
-      stateRef.current.isDragging = false;
-    };
-
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      stateRef.current.targetDistance = Math.max(
-        3.0,
-        Math.min(10.5, stateRef.current.targetDistance + e.deltaY * 0.005)
-      );
-    };
-
-    let initialPinchDist = 0;
-    let initialTargetDist = 6.8;
-
-    const onTouchStart = (e: TouchEvent) => {
-      if (e.touches.length === 2) {
-        stateRef.current.isDragging = false;
-        const dx = e.touches[0].clientX - e.touches[1].clientX;
-        const dy = e.touches[0].clientY - e.touches[1].clientY;
-        initialPinchDist = Math.hypot(dx, dy);
-        initialTargetDist = stateRef.current.targetDistance;
-      }
-    };
-
-    const onTouchMove = (e: TouchEvent) => {
-      if (e.touches.length === 2 && initialPinchDist > 0) {
-        const dx = e.touches[0].clientX - e.touches[1].clientX;
-        const dy = e.touches[0].clientY - e.touches[1].clientY;
-        const currentDist = Math.hypot(dx, dy);
-        const ratio = initialPinchDist / Math.max(10, currentDist);
-        stateRef.current.targetDistance = Math.max(
-          2.8,
-          Math.min(11.0, initialTargetDist * ratio)
-        );
-      }
-    };
-
-    const onTouchEnd = () => {
-      initialPinchDist = 0;
-    };
-
-    container.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('pointermove', onPointerMove);
-    window.addEventListener('pointerup', onPointerUp);
-    container.addEventListener('wheel', onWheel, { passive: false });
-    container.addEventListener('touchstart', onTouchStart, { passive: true });
-    container.addEventListener('touchmove', onTouchMove, { passive: true });
-    container.addEventListener('touchend', onTouchEnd, { passive: true });
-
     const onResize = () => {
       if (!mountRef.current || !rendererRef.current || !cameraRef.current) return;
       const w = Math.max(1, mountRef.current.clientWidth);
@@ -509,12 +540,7 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
       cameraRef.current.aspect = w / h;
       cameraRef.current.updateProjectionMatrix();
       rendererRef.current.setSize(w, h);
-      if (composer) {
-        composer.setSize(w, h);
-      }
-      if (bloomPass) {
-        bloomPass.resolution.set(w, h);
-      }
+      composer?.setSize(w, h);
     };
     window.addEventListener('resize', onResize);
 
@@ -555,24 +581,11 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
       const nowMs = performance.now();
       const dt = Math.min(0.05, Math.max(0.001, (nowMs - lastTimeMs) / 1000));
       lastTimeMs = nowMs;
-      const s = stateRef.current;
 
-      if (s.autoRotate && !s.isDragging) {
-        s.targetYaw += dt * 0.55;
+      if (autoRotateRef.current) {
+        controls.azimuthAngle += dt * 0.45;
       }
-
-      const k = 1 - Math.exp(-9 * dt);
-      s.yaw += (s.targetYaw - s.yaw) * k;
-      s.pitch += (s.targetPitch - s.pitch) * k;
-      s.distance += (s.targetDistance - s.distance) * k;
-      s.centerY += (s.targetCenterY - s.centerY) * k;
-
-      const camX = Math.sin(s.yaw) * Math.cos(s.pitch) * s.distance;
-      const camY = Math.sin(s.pitch) * s.distance + s.centerY;
-      const camZ = Math.cos(s.yaw) * Math.cos(s.pitch) * s.distance;
-
-      camera.position.set(camX, camY, camZ);
-      camera.lookAt(0, s.centerY, 0);
+      controls.update(dt);
 
       if (isSoftwareGl || !composer) {
         renderer.render(scene, camera);
@@ -594,15 +607,11 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
       cancelAnimationFrame(frameId);
       clearTimeout(frameId);
       resizeObserver?.disconnect();
+      controls.removeEventListener('controlstart', onControlStart);
+      controls.dispose();
+      controlsRef.current = null;
       renderer.domElement.removeEventListener('webglcontextlost', handleContextLost);
       renderer.domElement.removeEventListener('webglcontextrestored', handleContextRestored);
-      container.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerup', onPointerUp);
-      container.removeEventListener('wheel', onWheel);
-      container.removeEventListener('touchstart', onTouchStart);
-      container.removeEventListener('touchmove', onTouchMove);
-      container.removeEventListener('touchend', onTouchEnd);
       window.removeEventListener('resize', onResize);
       composer?.dispose();
       texPack.dispose();
@@ -652,54 +661,43 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
 
     const tp = texPackRef.current;
     const bodyColor = new THREE.Color(appearance.primaryColor);
-    const bodyMat = new THREE.MeshPhysicalMaterial({
-      color: bodyColor,
-      metalness: 0.68,
-      roughness: 0.24,
-      roughnessMap: tp?.paintFlakeRoughness ?? null,
-      clearcoat: 1.0,
-      clearcoatRoughness: 0.08,
-      envMapIntensity: 1.35,
-    });
+    const bodyMat = createMetallicFlakeMaterial(bodyColor, tp, 1.0);
     const scuffedBodyMat = new THREE.MeshStandardMaterial({
       color: bodyColor.clone().multiplyScalar(0.84),
       metalness: 0.32,
       roughness: 0.66,
     });
-    const steelMat = new THREE.MeshStandardMaterial({ color: 0x64748b, metalness: 0.82, roughness: 0.44 });
-    const engineBlockMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.85, roughness: 0.35 });
-    const valveCoverMat = new THREE.MeshStandardMaterial({ color: 0xdc2626, metalness: 0.45, roughness: 0.42 });
+    const steelMat = new THREE.MeshStandardMaterial({ color: 0x64748b, metalness: 0.85, roughness: 0.40 });
+    const engineBlockMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.88, roughness: 0.32 });
+    const valveCoverMat = new THREE.MeshStandardMaterial({ color: 0xdc2626, metalness: 0.45, roughness: 0.40 });
     const interiorMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, metalness: 0.18, roughness: 0.85 });
-    const accentMat = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(car.accentColor || '#22d3ee'),
-      metalness: 0.65,
-      roughness: 0.26,
-      clearcoat: 0.85,
-      clearcoatRoughness: 0.1,
-    });
+    const accentMat = createMetallicFlakeMaterial(new THREE.Color(car.accentColor || '#22d3ee'), tp, 0.85);
     const carbonFinishMat = new THREE.MeshPhysicalMaterial({
       color: 0xffffff,
       map: tp?.carbonAlbedo ?? null,
       bumpMap: tp?.carbonBump ?? null,
       bumpScale: 0.015,
-      metalness: 0.55,
-      roughness: 0.28,
-      clearcoat: 0.9,
-      clearcoatRoughness: 0.09,
+      normalMap: tp?.carbonNormal ?? null,
+      normalScale: new THREE.Vector2(0.55, 0.55),
+      metalness: 0.58,
+      roughness: 0.26,
+      clearcoat: 0.92,
+      clearcoatRoughness: 0.08,
     });
     const isCarbonHood = appearance.hood === 'carbon';
     const hoodMat = isCarbonHood ? carbonFinishMat : bodyMat;
     const isCarbonRoof = appearance.roof === 'carbon_panel';
     const roofMat = isCarbonRoof ? carbonFinishMat : bodyMat;
-    const trimMat = new THREE.MeshStandardMaterial({ color: 0x111827, metalness: 0.55, roughness: 0.45 });
+    const trimMat = new THREE.MeshStandardMaterial({ color: 0x111827, metalness: 0.55, roughness: 0.42 });
     const glassMat = new THREE.MeshPhysicalMaterial({
       color: new THREE.Color(appearance.windowDarkHex || '#0f172a'),
-      metalness: 0.15,
-      roughness: 0.08,
-      clearcoat: 0.95,
-      clearcoatRoughness: 0.05,
+      metalness: 0.12,
+      roughness: 0.06,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.04,
       transparent: true,
-      opacity: 0.84,
+      opacity: 0.86,
+      envMapIntensity: 1.65,
     });
     const crackedGlassMat = new THREE.MeshPhysicalMaterial({
       color: 0x94a3b8,
@@ -710,31 +708,36 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
     });
     const rimMat = new THREE.MeshStandardMaterial({
       color: new THREE.Color(appearance.rimHex || '#f59e0b'),
-      metalness: 0.92,
-      roughness: 0.16,
-      envMapIntensity: 1.4,
+      metalness: 0.94,
+      roughness: 0.14,
+      envMapIntensity: 1.5,
     });
     const rotorMat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
       map: tp?.rotorAlbedo ?? null,
       bumpMap: tp?.rotorBump ?? null,
       bumpScale: 0.014,
-      metalness: 0.9,
-      roughness: 0.26,
+      normalMap: tp?.rotorNormal ?? null,
+      normalScale: new THREE.Vector2(0.5, 0.5),
+      metalness: 0.92,
+      roughness: 0.24,
     });
     const caliperMat = new THREE.MeshStandardMaterial({
       color: isGt3 || isSupercar ? 0xef4444 : 0xf97316,
       metalness: 0.45,
-      roughness: 0.32,
+      roughness: 0.30,
     });
     const tireMat = new THREE.MeshStandardMaterial({
-      color: 0x171717,
+      color: 0x161618,
       bumpMap: tp?.tireBump ?? null,
-      bumpScale: 0.028,
+      bumpScale: 0.025,
+      normalMap: tp?.tireNormal ?? null,
+      normalScale: new THREE.Vector2(0.65, 0.65),
       metalness: 0.06,
-      roughness: 0.86,
+      roughness: 0.84,
     });
-    const chromeMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, metalness: 0.96, roughness: 0.10, envMapIntensity: 1.5 });
+    const chromeMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, metalness: 0.96, roughness: 0.09, envMapIntensity: 1.55 });
+    const burntTiMat = new THREE.MeshStandardMaterial({ color: 0x7dd3fc, metalness: 0.92, roughness: 0.16, envMapIntensity: 1.5 });
     const woodMat = new THREE.MeshStandardMaterial({ color: 0x78350f, metalness: 0.12, roughness: 0.72 });
     const tailCol = new THREE.Color(car.tailGlowColor || '#ef4444');
     const tailMat = new THREE.MeshStandardMaterial({
@@ -756,7 +759,6 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
     const yFloor = arch === 'truck_baja' || arch === 'van_overland' ? 0.42 : isSupercar || arch === 'truck_dually' ? 0.20 : 0.28;
     const yCenter = yFloor + bodyH * 0.5;
 
-    // Create 8 modular detachable/bendable part groups anchored to carGroup
     const partGroups: Record<CarPartId, THREE.Group> = {
       front_bumper: new THREE.Group(),
       hood: new THREE.Group(),
@@ -782,7 +784,6 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
       return fallback;
     };
 
-    // Soft Feathered Radial Contact AO Shadow Disc
     const contactShadowGeo = new THREE.PlaneGeometry(isMoto ? 1.65 : 2.95, isMoto ? 3.25 : 4.95);
     const contactShadowMat = new THREE.MeshBasicMaterial({
       color: 0x020617,
@@ -820,58 +821,108 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
       return m;
     };
 
+    // Sculpted Lathe Tire + Multi-Spoke Alloy Wheel + Cross-Drilled Brake Rotor + Caliper + 5 Lug Nuts
     const addWheel = (x: number, y: number, z: number, rad: number, w: number, hasRim = true) => {
       const hub = new THREE.Group();
       hub.position.set(x, y, z);
-      const tGeo = new THREE.CylinderGeometry(rad, rad, w, 22);
-      tGeo.rotateZ(Math.PI / 2);
+      const tGeo = createSculptedTireGeometry(rad, w);
       const tMesh = new THREE.Mesh(tGeo, tireMat);
       tMesh.castShadow = !isSoftwareGl;
       hub.add(tMesh);
 
       if (hasRim) {
-        const discGeo = new THREE.CylinderGeometry(rad * 0.52, rad * 0.52, w * 0.72, 16);
+        const outerSign = x < 0 ? -1 : 1;
+        const rimX = outerSign * (w * 0.44);
+
+        // Dark wheel barrel recess behind spokes
+        const barrelGeo = new THREE.CylinderGeometry(rad * 0.61, rad * 0.61, w * 0.86, 24);
+        barrelGeo.rotateZ(Math.PI / 2);
+        hub.add(new THREE.Mesh(barrelGeo, trimMat));
+
+        // Cross-drilled brake rotor disc & radial Brembo caliper
+        const discGeo = new THREE.CylinderGeometry(rad * 0.50, rad * 0.50, 0.025, 24);
         discGeo.rotateZ(Math.PI / 2);
-        hub.add(new THREE.Mesh(discGeo, rotorMat));
+        const disc = new THREE.Mesh(discGeo, rotorMat);
+        disc.position.x = outerSign * (w * 0.22);
+        hub.add(disc);
 
         const caliper = new THREE.Mesh(
-          new THREE.BoxGeometry(w * 0.82, rad * 0.34, rad * 0.24),
+          new THREE.BoxGeometry(w * 0.34, rad * 0.34, rad * 0.22),
           caliperMat
         );
-        caliper.position.set(0, rad * 0.16, -rad * 0.34);
+        caliper.position.set(outerSign * (w * 0.24), rad * 0.16, -rad * 0.32);
         hub.add(caliper);
 
-        const rGeo = new THREE.CylinderGeometry(rad * 0.63, rad * 0.63, w + 0.014, 14);
-        rGeo.rotateZ(Math.PI / 2);
-        hub.add(new THREE.Mesh(rGeo, rimMat));
+        // Outer polished alloy rim lip
+        const lipGeo = new THREE.TorusGeometry(rad * 0.61, 0.024, 10, 28);
+        lipGeo.rotateY(Math.PI / 2);
+        const lip = new THREE.Mesh(lipGeo, chromeMat);
+        lip.position.x = outerSign * (w * 0.47);
+        hub.add(lip);
 
-        const outerSign = x < 0 ? -1 : 1;
-        const centerNut = new THREE.Mesh(
-          new THREE.CylinderGeometry(rad * 0.13, rad * 0.13, 0.04, 10),
-          caliperMat
+        // Rim Spokes (styled per customization.rims)
+        const rimStyle = customization.rims || 'stock';
+        if (rimStyle === 'turbo_fan') {
+          const fanGeo = new THREE.CylinderGeometry(rad * 0.58, rad * 0.58, 0.03, 20);
+          fanGeo.rotateZ(Math.PI / 2);
+          const fanMesh = new THREE.Mesh(fanGeo, rimMat);
+          fanMesh.position.x = rimX;
+          hub.add(fanMesh);
+        } else {
+          const isMeshStyle = rimStyle === 'white_rally' || rimStyle === 'gold' || rimStyle === 'alloy';
+          const isDeepDish = rimStyle === 'deep_dish_chrome';
+          const spokeCount = isMeshStyle ? 10 : isDeepDish ? 6 : 5;
+          const spokeLen = rad * 0.58;
+          const spokeThick = isMeshStyle ? 0.022 : 0.036;
+          for (let s = 0; s < spokeCount; s++) {
+            const ang = (s / spokeCount) * Math.PI * 2;
+            const spokeGeo = new THREE.BoxGeometry(0.032, spokeLen, spokeThick);
+            const spoke = new THREE.Mesh(spokeGeo, rimMat);
+            spoke.position.set(
+              rimX,
+              Math.cos(ang) * (spokeLen * 0.5),
+              Math.sin(ang) * (spokeLen * 0.5)
+            );
+            spoke.rotation.x = ang;
+            hub.add(spoke);
+          }
+        }
+
+        // Center hub cap + 5 Chrome Lug Nuts
+        const centerCap = new THREE.Mesh(
+          new THREE.CylinderGeometry(rad * 0.16, rad * 0.16, 0.045, 16),
+          rimMat
         );
-        centerNut.rotation.z = Math.PI / 2;
-        centerNut.position.x = outerSign * (w * 0.5 + 0.01);
-        hub.add(centerNut);
+        centerCap.rotation.z = Math.PI / 2;
+        centerCap.position.x = rimX + outerSign * 0.01;
+        hub.add(centerCap);
+
+        const lugGeo = new THREE.CylinderGeometry(0.015, 0.015, 0.04, 8);
+        lugGeo.rotateZ(Math.PI / 2);
+        for (let l = 0; l < 5; l++) {
+          const lang = (l / 5) * Math.PI * 2;
+          const lug = new THREE.Mesh(lugGeo, chromeMat);
+          lug.position.set(
+            rimX + outerSign * 0.02,
+            Math.cos(lang) * rad * 0.11,
+            Math.sin(lang) * rad * 0.11
+          );
+          hub.add(lug);
+        }
       }
       carGroup.add(hub);
     };
 
-    // Internal Chassis & Engine Bay Details (revealed when hood, bumpers, doors, roof, or spoiler detach!)
     if (!isMoto && !isFormula) {
-      // Exposed front steel crash bar + radiator core
       addBox(bodyW * 0.78, 0.10, 0.10, steelMat, 0, yFloor + bodyH * 0.42, bodyL * 0.49);
       addBox(bodyW * 0.48, bodyH * 0.44, 0.08, rotorMat, 0, yFloor + bodyH * 0.36, bodyL * 0.47);
-      // Exposed engine block + twin valve covers + strut brace inside engine bay
-      addBox(bodyW * 0.38, bodyH * 0.36, bodyL * 0.22, engineBlockMat, 0, yFloor + bodyH * 0.68, bodyL * 0.27);
-      addBox(bodyW * 0.12, 0.07, bodyL * 0.18, valveCoverMat, -bodyW * 0.12, yFloor + bodyH * 0.84, bodyL * 0.27);
-      addBox(bodyW * 0.12, 0.07, bodyL * 0.18, valveCoverMat, bodyW * 0.12, yFloor + bodyH * 0.84, bodyL * 0.27);
-      addBox(bodyW * 0.74, 0.04, 0.04, accentMat, 0, yFloor + bodyH * 0.84, bodyL * 0.22);
-      // Exposed cabin tub & bucket seats (visible if doors, windshield, or roof detach)
+      addBox(bodyW * 0.38, bodyH * 0.32, bodyL * 0.22, engineBlockMat, 0, yFloor + bodyH * 0.54, bodyL * 0.27);
+      addBox(bodyW * 0.12, 0.06, bodyL * 0.16, valveCoverMat, -bodyW * 0.12, yFloor + bodyH * 0.68, bodyL * 0.27);
+      addBox(bodyW * 0.12, 0.06, bodyL * 0.16, valveCoverMat, bodyW * 0.12, yFloor + bodyH * 0.68, bodyL * 0.27);
+      addBox(bodyW * 0.74, 0.04, 0.04, accentMat, 0, yFloor + bodyH * 0.68, bodyL * 0.22);
       addBox(bodyW * 0.66, 0.10, 0.95, interiorMat, 0, yFloor + bodyH * 0.78, -0.15);
       addBox(0.32, 0.34, 0.16, interiorMat, -bodyW * 0.20, yFloor + bodyH + 0.10, -0.26, -0.18);
       addBox(0.32, 0.34, 0.16, interiorMat, bodyW * 0.20, yFloor + bodyH + 0.10, -0.26, -0.18);
-      // Exposed rear steel crash beam
       addBox(bodyW * 0.76, 0.10, 0.10, steelMat, 0, yFloor + bodyH * 0.36, -bodyL * 0.49);
     }
 
@@ -954,12 +1005,12 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
       addBox(2.0, 0.04, 0.08, trimMat, 0, 0.34, 1.48);
       addBox(2.0, 0.04, 0.08, trimMat, 0, 0.36, -1.35);
     } else {
-      const wRad = isSemi || arch === 'truck_baja' || arch === 'truck_apc' ? 0.41 : 0.34;
-      const trackX = bodyW * 0.5 + 0.02;
-      addWheel(-trackX, wRad, bodyL * 0.34, wRad, 0.26);
-      addWheel(trackX, wRad, bodyL * 0.34, wRad, 0.26);
-      addWheel(-trackX, wRad, -bodyL * 0.32, wRad, 0.30);
-      addWheel(trackX, wRad, -bodyL * 0.32, wRad, 0.30);
+      const wRad = isSemi || arch === 'truck_baja' || arch === 'truck_apc' ? 0.41 : 0.35;
+      const trackX = bodyW * 0.5 + 0.045;
+      addWheel(-trackX, wRad, bodyL * 0.34, wRad, 0.28);
+      addWheel(trackX, wRad, bodyL * 0.34, wRad, 0.28);
+      addWheel(-trackX, wRad, -bodyL * 0.32, wRad, 0.32);
+      addWheel(trackX, wRad, -bodyL * 0.32, wRad, 0.32);
       if (arch === 'truck_apc') {
         addWheel(-trackX, wRad, 0.0, wRad, 0.30);
         addWheel(trackX, wRad, 0.0, wRad, 0.30);
@@ -1036,54 +1087,92 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
         addBox(bodyW * 0.86, cabH, cabL, glassMat, 0, yCenter + bodyH * 0.5 + cabH * 0.5, cabZ, 0, 0, 'windshield');
         addBox(bodyW * 0.88, 0.05, cabL * 0.94, roofMat, 0, yCenter + bodyH * 0.5 + cabH + 0.02, cabZ, 0, 0, 'roof');
       } else {
-        // Core monocoque inner tub (slightly narrower so doors & front/rear bumpers cleanly mount on top!)
-        const noseH = isSupercar ? bodyH * 0.68 : bodyH * 0.84;
+        const noseH = isSupercar ? bodyH * 0.54 : bodyH * 0.72;
+        const waistY = yFloor + bodyH * 0.96;
         const hullGeo = createExtrudedProfile(
           [
-            [-bodyL * 0.46, yFloor],
-            [bodyL * 0.46, yFloor],
-            [bodyL * 0.46, yFloor + noseH],
-            [bodyL * 0.16, yFloor + bodyH * 0.92],
-            [-bodyL * 0.46, yFloor + bodyH],
+            [-bodyL * 0.48, yFloor + 0.03],
+            [bodyL * 0.47, yFloor + 0.02],
+            [bodyL * 0.51, yFloor + noseH * 0.45],
+            [bodyL * 0.48, yFloor + noseH * 0.92],
+            [bodyL * 0.22, yFloor + bodyH * 0.88],
+            [bodyL * 0.05, waistY],
+            [-bodyL * 0.36, waistY],
+            [-bodyL * 0.49, yFloor + bodyH * 0.96],
+            [-bodyL * 0.50, yFloor + bodyH * 0.38],
           ],
-          bodyW * 0.82,
-          0.022
+          bodyW * 0.88,
+          0.062
         );
         const hullMesh = new THREE.Mesh(hullGeo, bodyMat);
         hullMesh.castShadow = !isSoftwareGl;
         hullMesh.receiveShadow = !isSoftwareGl;
         carGroup.add(hullMesh);
 
-        // Detachable Front Bumper + Carbon Splitter + Titanium Struts + Canards
-        addBox(bodyW * 1.0, bodyH * 0.84, 0.24, bodyMat, 0, yFloor + noseH * 0.5, bodyL * 0.46, 0, 0, 'front_bumper');
-        addBox(bodyW * 1.06, 0.05, 0.42, trimMat, 0, yFloor + 0.02, bodyL * 0.5 + 0.12, 0, 0, 'front_bumper');
-        addBox(0.03, 0.18, 0.03, chromeMat, -bodyW * 0.24, yFloor + 0.12, bodyL * 0.5 + 0.18, 0, 0, 'front_bumper');
-        addBox(0.03, 0.18, 0.03, chromeMat, bodyW * 0.24, yFloor + 0.12, bodyL * 0.5 + 0.18, 0, 0, 'front_bumper');
+        // Sculpted Beveled Front Fascia & Recessed Radiator Grille
+        const frontBumperGeo = createExtrudedProfile(
+          [
+            [bodyL * 0.44, yFloor + 0.03],
+            [bodyL * 0.525, yFloor + 0.05],
+            [bodyL * 0.515, yFloor + noseH * 0.82],
+            [bodyL * 0.43, yFloor + noseH * 0.96],
+          ],
+          bodyW * 0.94,
+          0.048
+        );
+        const frontBumperMesh = new THREE.Mesh(frontBumperGeo, getPartMat('front_bumper', bodyMat));
+        frontBumperMesh.castShadow = !isSoftwareGl;
+        partGroups.front_bumper.add(frontBumperMesh);
+
+        // Carbon Aero Front Chin Splitter + Recessed Black Mesh Mouth
+        const splitterGeo = createExtrudedProfile(
+          [
+            [bodyL * 0.42, yFloor],
+            [bodyL * 0.555, yFloor],
+            [bodyL * 0.545, yFloor + 0.042],
+            [bodyL * 0.42, yFloor + 0.042],
+          ],
+          bodyW * 1.04,
+          0.014
+        );
+        partGroups.front_bumper.add(new THREE.Mesh(splitterGeo, carbonFinishMat));
         if (isGt3 || isSupercar) {
-          addBox(0.14, 0.03, 0.28, trimMat, -bodyW * 0.52, yFloor + 0.18, bodyL * 0.42, 0.14, 0, 'front_bumper');
-          addBox(0.14, 0.03, 0.28, trimMat, bodyW * 0.52, yFloor + 0.18, bodyL * 0.42, 0.14, 0, 'front_bumper');
+          addBox(0.14, 0.028, 0.28, carbonFinishMat, -bodyW * 0.51, yFloor + 0.16, bodyL * 0.44, 0.14, 0, 'front_bumper');
+          addBox(0.14, 0.028, 0.28, carbonFinishMat, bodyW * 0.51, yFloor + 0.16, bodyL * 0.44, 0.14, 0, 'front_bumper');
         }
         if (arch !== 'classic_cobra') {
-          addBox(bodyW * 0.52, bodyH * 0.42, 0.08, rotorMat, 0, yFloor + bodyH * 0.34, bodyL * 0.5 + 0.02, 0, 0, 'front_bumper');
+          addBox(bodyW * 0.56, bodyH * 0.34, 0.06, rotorMat, 0, yFloor + bodyH * 0.28, bodyL * 0.52, 0, 0, 'front_bumper');
+          addBox(bodyW * 0.58, 0.025, 0.04, chromeMat, 0, yFloor + bodyH * 0.28, bodyL * 0.535, 0, 0, 'front_bumper');
         }
 
-        // Detachable Left & Right Doors + Door Handles + Side Mirrors
-        addBox(0.09, bodyH * 0.90, bodyL * 0.44, bodyMat, -bodyW * 0.46, yFloor + bodyH * 0.50, 0.04, 0, 0, 'left_door');
-        addBox(0.04, 0.05, 0.18, chromeMat, -bodyW * 0.51, yFloor + bodyH * 0.78, 0.06, 0, 0, 'left_door');
-        addBox(0.16, 0.09, 0.12, bodyMat, -bodyW * 0.49, yFloor + bodyH + 0.09, 0.52, 0, 0, 'left_door');
+        // Sculpted Side Skirts & Door Panels with Flush Chrome Handles & Aero Mirrors
+        addBox(0.06, bodyH * 0.78, bodyL * 0.46, bodyMat, -bodyW * 0.495, yFloor + bodyH * 0.48, 0.02, 0, 0, 'left_door');
+        addBox(0.03, 0.035, 0.16, chromeMat, -bodyW * 0.53, yFloor + bodyH * 0.74, -0.04, 0, 0, 'left_door');
+        const mirrorGeoL = new THREE.CapsuleGeometry(0.042, 0.09, 6, 12);
+        mirrorGeoL.rotateZ(Math.PI * 0.46);
+        const mirrorL = new THREE.Mesh(mirrorGeoL, getPartMat('left_door', bodyMat));
+        mirrorL.position.set(-bodyW * 0.52, yFloor + bodyH + 0.07, 0.48);
+        partGroups.left_door.add(mirrorL);
 
-        addBox(0.09, bodyH * 0.90, bodyL * 0.44, bodyMat, bodyW * 0.46, yFloor + bodyH * 0.50, 0.04, 0, 0, 'right_door');
-        addBox(0.04, 0.05, 0.18, chromeMat, bodyW * 0.51, yFloor + bodyH * 0.78, 0.06, 0, 0, 'right_door');
-        addBox(0.16, 0.09, 0.12, bodyMat, bodyW * 0.49, yFloor + bodyH + 0.09, 0.52, 0, 0, 'right_door');
+        addBox(0.06, bodyH * 0.78, bodyL * 0.46, bodyMat, bodyW * 0.495, yFloor + bodyH * 0.48, 0.02, 0, 0, 'right_door');
+        addBox(0.03, 0.035, 0.16, chromeMat, bodyW * 0.53, yFloor + bodyH * 0.74, -0.04, 0, 0, 'right_door');
+        const mirrorR = new THREE.Mesh(mirrorGeoL, getPartMat('right_door', bodyMat));
+        mirrorR.position.set(bodyW * 0.52, yFloor + bodyH + 0.07, 0.48);
+        partGroups.right_door.add(mirrorR);
 
-        // Side Skirts on main sill & Sculpted Wheel-Arch Fender Flares
-        addBox(bodyW * 1.0, 0.06, bodyL * 0.56, trimMat, 0, yFloor + 0.03, 0);
-        const flareW = isGt3 || isSupercar ? 0.10 : 0.065;
+        // Carbon Side-Skirt Ground Effects
+        addBox(bodyW * 1.06, 0.045, bodyL * 0.48, carbonFinishMat, 0, yFloor + 0.02, 0);
+
+        // Curved Semi-Circular Fender Arches cleanly framing wheels (zero boxy steps)
         for (const fz of [bodyL * 0.34, -bodyL * 0.32]) {
           for (const side of [-1, 1]) {
-            addBox(flareW, 0.065, 0.52, bodyMat, side * (bodyW * 0.48), yFloor + bodyH * 0.58, fz);
-            addBox(flareW * 0.85, 0.12, 0.10, bodyMat, side * (bodyW * 0.48), yFloor + bodyH * 0.40, fz + 0.23, 0.35);
-            addBox(flareW * 0.85, 0.12, 0.10, bodyMat, side * (bodyW * 0.48), yFloor + bodyH * 0.40, fz - 0.23, -0.35);
+            const fenderLip = new THREE.Mesh(
+              new THREE.TorusGeometry(wRad + 0.055, 0.038, 10, 22, Math.PI),
+              bodyMat
+            );
+            fenderLip.rotation.y = Math.PI / 2;
+            fenderLip.position.set(side * (bodyW * 0.49), wRad + 0.01, fz);
+            carGroup.add(fenderLip);
           }
         }
 
@@ -1094,11 +1183,11 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
             addBox(0.64, 0.16, 0.12, chromeMat, 0, yCenter - 0.04, bodyL * 0.5 + 0.03, 0, 0, 'front_bumper');
           }
         } else {
-          const cabH = isSupercar ? 0.35 : 0.44;
-          const zBack = isSupercar ? -1.18 : -1.28;
-          const zRoofBack = isSupercar ? -0.58 : -0.68;
-          const zRoofFront = isSupercar ? 0.45 : 0.28;
-          const zWindshieldBase = isSupercar ? 1.08 : 0.88;
+          const cabH = isSupercar ? 0.33 : 0.41;
+          const zBack = isSupercar ? -1.24 : -1.32;
+          const zRoofBack = isSupercar ? -0.58 : -0.70;
+          const zRoofFront = isSupercar ? 0.42 : 0.26;
+          const zWindshieldBase = isSupercar ? 1.12 : 0.90;
           const cabTopY = yFloor + bodyH + cabH;
           const greenhouseGeo = createExtrudedProfile(
             [
@@ -1107,31 +1196,31 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
               [zRoofFront, cabTopY],
               [zRoofBack, cabTopY],
             ],
-            bodyW * 0.78,
-            0.02
+            bodyW * 0.74,
+            0.045
           );
           const cabMesh = new THREE.Mesh(greenhouseGeo, getPartMat('windshield', glassMat));
           partGroups.windshield.add(cabMesh);
 
-          // Gloss-black A-pillar & B-pillar greenhouse mullions
+          // Painted Body-Color A-Pillars & C-Pillars framing the glass canopy
           for (const side of [-1, 1]) {
-            addBox(0.045, cabH * 1.12, 0.06, trimMat, side * bodyW * 0.395, yFloor + bodyH + cabH * 0.46, (zWindshieldBase + zRoofFront) * 0.5, -0.72, 0, 'windshield');
-            addBox(0.045, cabH * 0.92, 0.07, trimMat, side * bodyW * 0.395, yFloor + bodyH + cabH * 0.46, (zRoofFront + zRoofBack) * 0.5 - 0.12, 0, 0, 'windshield');
+            addBox(0.045, cabH * 1.18, 0.055, bodyMat, side * bodyW * 0.39, yFloor + bodyH + cabH * 0.46, (zWindshieldBase + zRoofFront) * 0.5, -0.78, 0, 'windshield');
+            addBox(0.045, cabH * 1.12, 0.075, bodyMat, side * bodyW * 0.39, yFloor + bodyH + cabH * 0.46, (zRoofBack + zBack) * 0.5, 0.78, 0, 'windshield');
           }
 
-          const roofCap = addBox(
-            bodyW * 0.76,
-            0.04,
-            zRoofFront - zRoofBack,
-            roofMat,
-            0,
-            cabTopY + 0.015,
-            (zRoofFront + zRoofBack) * 0.5,
-            0,
-            0,
-            'roof'
+          const roofGeo = createExtrudedProfile(
+            [
+              [zRoofBack - 0.04, cabTopY - 0.01],
+              [zRoofFront + 0.04, cabTopY - 0.01],
+              [zRoofFront, cabTopY + 0.042],
+              [zRoofBack, cabTopY + 0.042],
+            ],
+            bodyW * 0.74,
+            0.032
           );
+          const roofCap = new THREE.Mesh(roofGeo, getPartMat('roof', roofMat));
           roofCap.castShadow = !isSoftwareGl;
+          partGroups.roof.add(roofCap);
 
           if (shape === 'prototype') {
             addBox(0.05, 0.24, 1.05, trimMat, 0, cabTopY - 0.06, -0.92, 0, 0, 'roof');
@@ -1143,7 +1232,7 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
           }
 
           if (appearance.roof === 'roof_scoop') {
-            addBox(0.32, 0.14, 0.52, trimMat, 0, cabTopY + 0.09, (zRoofFront + zRoofBack) * 0.5, 0, 0, 'roof');
+            addBox(0.32, 0.14, 0.52, carbonFinishMat, 0, cabTopY + 0.09, (zRoofFront + zRoofBack) * 0.5, 0, 0, 'roof');
           } else if (appearance.roof === 'light_bar' || appearance.roof === 'siren_strobe') {
             addBox(bodyW * 0.62, 0.09, 0.16, tailMat, -bodyW * 0.16, cabTopY + 0.07, 0.06, 0, 0, 'roof');
             addBox(bodyW * 0.62, 0.09, 0.16, amberMat, bodyW * 0.16, cabTopY + 0.07, 0.06, 0, 0, 'roof');
@@ -1151,11 +1240,22 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
             addBox(0.58, 0.22, 0.92, trimMat, 0, cabTopY + 0.13, -0.18, 0, 0, 'roof');
           }
         }
-        // Detachable Hood Panel!
-        addBox(bodyW * 0.88, 0.05, bodyL * 0.30, hoodMat, 0, yFloor + bodyH * 0.90, bodyL * 0.30, 0.08, 0, 'hood');
+        // Flush Beveled Hood Panel (aligned cleanly with front nose slope)
+        const hoodPanelGeo = createExtrudedProfile(
+          [
+            [bodyL * 0.18, yFloor + bodyH * 0.88],
+            [bodyL * 0.48, yFloor + noseH * 0.91],
+            [bodyL * 0.47, yFloor + noseH * 0.96],
+            [bodyL * 0.18, yFloor + bodyH * 0.94],
+          ],
+          bodyW * 0.80,
+          0.028
+        );
+        const hoodPanel = new THREE.Mesh(hoodPanelGeo, getPartMat('hood', hoodMat));
+        hoodPanel.castShadow = !isSoftwareGl;
+        partGroups.hood.add(hoodPanel);
       }
 
-      // Detachable Rear Bumper + Carbon Lower Diffuser Tray + Diffuser Strakes + Taillights
       if (arch !== 'truck_cyber') {
         addBox(bodyW * 0.96, bodyH * 0.72, 0.20, bodyMat, 0, yFloor + bodyH * 0.42, -bodyL * 0.46, 0, 0, 'rear_bumper');
         addBox(bodyW * 0.80, 0.04, 0.26, carbonFinishMat, 0, yFloor + 0.02, -bodyL * 0.48, 0, 0, 'rear_bumper');
@@ -1174,7 +1274,6 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
         addBox(0.42, 0.28, 0.44, chromeMat, 0, yFloor + bodyH + 0.08, bodyL * 0.24, 0, 0, 'hood');
       }
 
-      // Detachable Rear Wing / Spoiler + Snapped Stubs Left Behind on Decklid
       if (appearance.spoilerStyle !== 'lip' && arch !== 'formula_cigar' && arch !== 'supercar_streamliner') {
         const wingW = bodyW * 1.08;
         const isHighWing =
@@ -1184,22 +1283,19 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
           appearance.spoilerStyle === 'f1_giant';
         const wingH = isHighWing ? 0.44 : 0.18;
         const wingZ = -bodyL * 0.5 + 0.08;
-        // Stub mounts on decklid stay visible when spoiler snaps off
         addBox(0.05, 0.05, 0.14, trimMat, -0.46, yFloor + bodyH + 0.02, wingZ);
         addBox(0.05, 0.05, 0.14, trimMat, 0.46, yFloor + bodyH + 0.02, wingZ);
         addBox(0.04, wingH, 0.14, trimMat, -0.46, yFloor + bodyH + wingH * 0.5, wingZ, 0, 0, 'spoiler');
         addBox(0.04, wingH, 0.14, trimMat, 0.46, yFloor + bodyH + wingH * 0.5, wingZ, 0, 0, 'spoiler');
-        const blade = addBox(wingW, 0.05, 0.34, trimMat, 0, yFloor + bodyH + wingH, wingZ, -0.08, 0, 'spoiler');
+        const blade = addBox(wingW, 0.05, 0.34, carbonFinishMat, 0, yFloor + bodyH + wingH, wingZ, -0.08, 0, 'spoiler');
         blade.castShadow = !isSoftwareGl;
         addBox(0.04, 0.22, 0.40, accentMat, -wingW * 0.5, yFloor + bodyH + wingH, wingZ, 0, 0, 'spoiler');
         addBox(0.04, 0.22, 0.40, accentMat, wingW * 0.5, yFloor + bodyH + wingH, wingZ, 0, 0, 'spoiler');
       } else {
-        // Subtle decklid lip spoiler on cars with lip wing
         addBox(bodyW * 0.92, 0.06, 0.14, accentMat, 0, yFloor + bodyH + 0.03, -bodyL * 0.46, -0.18, 0, 'spoiler');
       }
     }
 
-    // Apply physical detachment & bend deformations to each of the 8 partGroups!
     if (damageState) {
       for (const pid of CAR_PART_IDS) {
         const ps = damageState[pid];
@@ -1258,14 +1354,14 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
     carGroup.add(exhaustGroup);
 
     if (!isMoto) {
-      const pipeGeo = new THREE.CylinderGeometry(0.065, 0.065, 0.28, 12);
-      pipeGeo.rotateX(Math.PI / 2);
+      const pipeGeo = createExhaustTipGeometry(0.066, 0.28);
+      const isTi = appearance.exhaust === 'quad_ti';
 
       [-0.38, -0.22, 0.22, 0.38].forEach((px, i) => {
         const isQuad = appearance.exhaust === 'quad_ti' || appearance.exhaust === 'center_tri';
         if (!isQuad && (i === 0 || i === 3)) return;
 
-        const pipe = new THREE.Mesh(pipeGeo, chromeMat);
+        const pipe = new THREE.Mesh(pipeGeo, isTi ? burntTiMat : chromeMat);
         pipe.position.set(px, yFloor + 0.08, -bodyL * 0.5 - 0.04);
         carGroup.add(pipe);
 
@@ -1286,32 +1382,43 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
     const lightLensMat = new THREE.MeshStandardMaterial({
       color: lensCol,
       emissive: lensCol,
-      emissiveIntensity: 2.5,
-      roughness: 0.1,
+      emissiveIntensity: 2.6,
+      roughness: 0.08,
     });
-    const hlXs = isMoto ? [0] : [-bodyW * 0.36, bodyW * 0.36];
+    const projectorDomeGeo = new THREE.SphereGeometry(0.036, 12, 12);
+    const hlXs = isMoto ? [0] : [-bodyW * 0.35, bodyW * 0.35];
+    const hlZ = isMoto || isFormula ? bodyL * 0.5 : bodyL * 0.532;
+    const hlY = isMoto || isFormula ? yCenter + 0.02 : yFloor + bodyH * 0.54;
     hlXs.forEach((lx) => {
       const bezel = new THREE.Mesh(
-        new THREE.BoxGeometry(isMoto ? 0.22 : 0.30, 0.12, 0.06),
+        new THREE.BoxGeometry(isMoto ? 0.22 : 0.30, 0.11, 0.06),
         trimMat
       );
-      bezel.position.set(lx, yCenter + 0.02, bodyL * 0.5 - 0.005);
+      bezel.position.set(lx, hlY, hlZ - 0.006);
       carGroup.add(bezel);
 
-      const lens = new THREE.Mesh(new THREE.BoxGeometry(isMoto ? 0.16 : 0.22, 0.075, 0.08), lightLensMat);
-      lens.position.set(lx, yCenter + 0.02, bodyL * 0.5 + 0.015);
-      carGroup.add(lens);
+      const projector = new THREE.Mesh(projectorDomeGeo, lightLensMat);
+      projector.scale.set(1.2, 0.9, 0.7);
+      projector.position.set(lx, hlY, hlZ + 0.012);
+      carGroup.add(projector);
+
+      const outerCover = new THREE.Mesh(
+        new THREE.BoxGeometry(isMoto ? 0.19 : 0.26, 0.085, 0.024),
+        glassMat
+      );
+      outerCover.position.set(lx, hlY, hlZ + 0.026);
+      carGroup.add(outerCover);
 
       if (!isMoto) {
         const drlBrow = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.018, 0.065), lightLensMat);
-        drlBrow.position.set(lx, yCenter + 0.088, bodyL * 0.5 + 0.008);
+        drlBrow.position.set(lx, hlY + 0.062, hlZ + 0.008);
         drlBrow.rotation.z = lx < 0 ? -0.06 : 0.06;
         carGroup.add(drlBrow);
       }
 
       const spot = new THREE.SpotLight(0xfffbeb, 0, 14, Math.PI / 4, 0.4);
-      spot.position.set(lx, yCenter + 0.02, bodyL * 0.5 + 0.1);
-      spot.target.position.set(lx, yCenter - 0.1, bodyL * 0.5 + 4);
+      spot.position.set(lx, hlY, hlZ + 0.1);
+      spot.target.position.set(lx, hlY - 0.1, hlZ + 4);
       fxGroup.add(spot);
       fxGroup.add(spot.target);
       headlightLightsRef.current.push(spot);
@@ -1370,7 +1477,7 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
       <div className="p-2.5 bg-slate-900/95 border-t border-slate-800 flex flex-col gap-2">
         <div className="flex items-center justify-between gap-2">
           <span className="text-[11px] font-mono text-cyan-400 font-bold truncate">
-            3D WEBGL SHOWROOM · ORBIT
+            3D WEBGL SHOWROOM · STUDIO PBR
           </span>
 
           <div className="flex items-center gap-1.5 shrink-0">

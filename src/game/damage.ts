@@ -379,3 +379,111 @@ export function repairSinglePart(damage: CarDamageState, partId: CarPartId): Car
 export function repairAllParts(): CarDamageState {
   return createMintDamageState();
 }
+
+export interface SpeedGatedImpactParams {
+  damage: CarDamageState;
+  impactZone: ImpactZone;
+  /** Impact or closing speed in world m/s */
+  impactSpeed: number;
+  /** Speed (m/s) below which impacts only cause superficial/zero chassis damage */
+  minDamageSpeed?: number;
+  /** Speed (m/s) at which well-aligned impacts cause severe/totaling damage */
+  highSpeedThreshold?: number;
+  /** Alignment / centrality of hit (0..1): < 0.45 is glancing, >= 0.55 is well hit */
+  hitQuality?: number;
+  sideBias?: number;
+  /** If false, a single hit caps damage so non-catastrophic hits do not total an intact car */
+  allowTotaling?: boolean;
+}
+
+export interface SpeedGatedImpactOutcome {
+  nextDamage: CarDamageState;
+  newlyDetached: CarPartId[];
+  newlyBent: CarPartId[];
+  appliedSeverity: number;
+  isTotaled: boolean;
+}
+
+/**
+ * Applies car damage scaled by both impact speed and hit quality.
+ * Low-speed bumps and glancing grazes never destroy the vehicle.
+ */
+export function evaluateSpeedGatedImpact({
+  damage,
+  impactZone,
+  impactSpeed,
+  minDamageSpeed = 9.5,
+  highSpeedThreshold = 20.0,
+  hitQuality = 1.0,
+  sideBias = 1,
+  allowTotaling = true,
+}: SpeedGatedImpactParams): SpeedGatedImpactOutcome {
+  const clampedQuality = Math.max(0, Math.min(1, hitQuality));
+  const safeCurrent = normalizeCarDamageState(damage);
+
+  if (impactSpeed < minDamageSpeed || clampedQuality < 0.35) {
+    return {
+      nextDamage: safeCurrent,
+      newlyDetached: [],
+      newlyBent: [],
+      appliedSeverity: 0,
+      isTotaled: isCarTotaled(safeCurrent),
+    };
+  }
+
+  const speedSpan = Math.max(1, highSpeedThreshold - minDamageSpeed);
+  const speedRatio = Math.max(0, Math.min(1.4, (impactSpeed - minDamageSpeed) / speedSpan));
+  const isWellHit = clampedQuality >= 0.55;
+  const isHighSpeed = impactSpeed >= highSpeedThreshold;
+
+  let appliedSeverity = 0.14 + speedRatio * clampedQuality * 0.85;
+  if (!isHighSpeed || !isWellHit || !allowTotaling) {
+    // Non-high-speed or glancing impacts stay strictly sub-destructive
+    appliedSeverity = Math.min(0.36, appliedSeverity * 0.48);
+  } else {
+    appliedSeverity = Math.max(0.75, Math.min(1.45, appliedSeverity * 1.18));
+  }
+
+  const dmgRes = applyImpactToCarDamage({
+    damage: safeCurrent,
+    impactZone,
+    severity: appliedSeverity,
+    sideBias,
+  });
+
+  // Guardrail against accidental totaling from a sub-threshold, glancing, or repeated low-energy hit
+  if ((!isHighSpeed || !isWellHit || !allowTotaling) && isCarTotaled(dmgRes.nextDamage) && !isCarTotaled(safeCurrent)) {
+    const softened = normalizeCarDamageState(safeCurrent);
+    const softRes = applyImpactToCarDamage({
+      damage: softened,
+      impactZone,
+      severity: 0.12,
+      sideBias,
+    });
+    if (!isCarTotaled(softRes.nextDamage)) {
+      return {
+        nextDamage: softRes.nextDamage,
+        newlyDetached: softRes.newlyDetached,
+        newlyBent: softRes.newlyBent,
+        appliedSeverity: 0.12,
+        isTotaled: false,
+      };
+    }
+    return {
+      nextDamage: softened,
+      newlyDetached: [],
+      newlyBent: [],
+      appliedSeverity: 0,
+      isTotaled: false,
+    };
+  }
+
+  return {
+    nextDamage: dmgRes.nextDamage,
+    newlyDetached: dmgRes.newlyDetached,
+    newlyBent: dmgRes.newlyBent,
+    appliedSeverity: Number(appliedSeverity.toFixed(3)),
+    isTotaled: isCarTotaled(dmgRes.nextDamage),
+  };
+}
+

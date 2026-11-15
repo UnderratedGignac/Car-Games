@@ -7,21 +7,30 @@ import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MISSION_POOL,
+  RANDOM_MISSION_BLUEPRINTS,
+  RANDOM_MISSIONS_COUNT,
   TECHNICAL_MISSIONS_POOL,
   claimMission,
+  claimRandomMission,
   claimTechnicalMission,
   generateDailyMissionsForDate,
+  generateRandomMissions,
   getClaimableMissionsCount,
+  getClaimableRandomMissionsCount,
   getClaimableTechnicalMissionsCount,
   getDailyMissions,
+  getRandomMissions,
   getTechnicalMissions,
   getTimeUntilUtcMidnight,
   getTotalClaimableMissionsCount,
   hasClaimableMissions,
+  hasClaimableRandomMissions,
   hasClaimableTechnicalMissions,
   hashDateString,
   recordMissionProgress,
+  rerollRandomMissions,
   resetDailyMissionsStorage,
+  resetRandomMissionsStorage,
   resetTechnicalMissionsStorage,
 } from './missions';
 import {
@@ -38,6 +47,7 @@ describe('Daily Missions System (missions.ts)', () => {
   beforeEach(() => {
     resetDailyMissionsStorage();
     resetTechnicalMissionsStorage();
+    resetRandomMissionsStorage();
   });
 
   it('MISSION_POOL contains at least 8 distinct cyberpunk arcade missions', () => {
@@ -270,5 +280,36 @@ describe('Daily Missions System (missions.ts)', () => {
     const doubleClaim = claimTechnicalMission('tech_parallel_perfection');
     assert.equal(doubleClaim.success, false);
     assert.equal(doubleClaim.reward, 0);
+  });
+
+  it('Random Missions generate distinct mixed-mode contracts, track progress, claim-and-replace, and reroll safely', () => {
+    assert.ok(RANDOM_MISSION_BLUEPRINTS.length >= 14);
+    const sample = generateRandomMissions(4);
+    assert.equal(sample.length, RANDOM_MISSIONS_COUNT);
+    const uniqueTypes = new Set(sample.map((m) => m.type));
+    assert.equal(uniqueTypes.size, RANDOM_MISSIONS_COUNT, 'Generated random batch uses distinct mission types');
+
+    // Persisted random bounties start unclaimed and progress via recordMissionProgress
+    const active = getRandomMissions();
+    assert.equal(active.length, RANDOM_MISSIONS_COUNT);
+    assert.equal(hasClaimableRandomMissions(), false);
+
+    const first = active[0];
+    recordMissionProgress({ [first.type]: first.target * 2 });
+    assert.equal(hasClaimableRandomMissions(), true);
+    assert.equal(getClaimableRandomMissionsCount(), 1);
+
+    // Rerolling with preserveCompleted=true keeps ready-to-claim missions intact and refreshes unfinished slots
+    const rerolled = rerollRandomMissions(true);
+    assert.equal(rerolled.length, RANDOM_MISSIONS_COUNT);
+    assert.ok(rerolled.some((m) => m.id === first.id && m.completed), 'Completed unclaimed bounty preserved on reroll');
+
+    // Claiming grants reward CR and automatically deals a replacement mission with a new ID
+    const claimed = claimRandomMission(first.id);
+    assert.equal(claimed.success, true);
+    assert.equal(claimed.reward, first.reward);
+    assert.equal(claimed.missions.length, RANDOM_MISSIONS_COUNT);
+    assert.equal(claimed.missions.some((m) => m.id === first.id), false);
+    assert.equal(getClaimableRandomMissionsCount(), 0);
   });
 });

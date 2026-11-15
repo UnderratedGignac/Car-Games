@@ -44,7 +44,7 @@ const ARTWORKS: ArtworkEntry[] = [
     title: 'Underground Paddock & Tuning Bay',
     shortLabel: 'Studio Bay',
     subtitle: 'Hex-LED Showroom · Brushed Obsidian Slate',
-    tag: '3D Studio',
+    tag: 'Paddock Studio',
     imageSrc: studioPaddockImg,
     description:
       'Subterranean motorsport tuning bay bathed in overhead hexagonal softbox LED arrays and dual cyan/amber rim strips reflecting across dark polished studio concrete.',

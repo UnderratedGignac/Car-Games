@@ -121,3 +121,20 @@ test('sampleCaveWallProfile generates asymmetric organic rock ledges and species
   ]);
   assert.ok(speciesSet.size >= 5, `Expected diverse botanical tree species, got ${speciesSet.size}`);
 });
+
+test('cave terrain ramps never collapse to pure black on lit or deep surfaces', () => {
+  const crystal = resolveAdventureZone(150, 58);
+  const amber = resolveAdventureZone(380, 146);
+  for (const ch of [crystal.chapter, amber.chapter]) {
+    const ramps = getChapterTerrainRamps(ch);
+    for (const group of [ramps.caveWall, ramps.caveWallDeep, ramps.caveCeiling, ramps.caveWallLit, ramps.caveCeilingLit]) {
+      for (const col of group) {
+        assert.notEqual(col, 'rgb(0, 0, 0)', `Expected non-black cave color for ${ch.id}, got ${col}`);
+        const m = col.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+        assert.ok(m, `Expected rgb() format, got ${col}`);
+        const lum = Number(m[1]) + Number(m[2]) + Number(m[3]);
+        assert.ok(lum >= 80, `Expected readable cave luminance >= 80, got ${lum} (${col})`);
+      }
+    }
+  }
+});

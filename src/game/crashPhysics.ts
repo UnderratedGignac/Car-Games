@@ -38,6 +38,7 @@ export interface TrafficImpulseParams {
 
 export interface TrafficImpulseOutcome {
   isFatalCrash: boolean;
+  hitQuality: number;
   impactSeverity: number;
   closingSpeed: number;
   sideBias: -1 | 1;
@@ -51,6 +52,47 @@ export interface TrafficImpulseOutcome {
   trafficCrashVy: number;
   trafficYawVel: number;
   trafficRollVel: number;
+}
+
+export interface GuardrailImpactParams {
+  playerSpeed: number;
+  outwardLateralSpeed: number;
+  overallIntegrity?: number;
+}
+
+export interface GuardrailImpactOutcome {
+  shouldBreach: boolean;
+  hitQuality: number;
+  impactSpeed: number;
+  scrubbedSpeedFactor: number;
+  inwardBounceLatVel: number;
+}
+
+/**
+ * Evaluates whether a guardrail hit is fast and direct enough to smash through and wreck the car,
+ * or whether the rail should deflect the car safely back onto the road.
+ */
+export function evaluateGuardrailImpact({
+  playerSpeed,
+  outwardLateralSpeed,
+  overallIntegrity = 100,
+}: GuardrailImpactParams): GuardrailImpactOutcome {
+  const safeOutward = Math.max(0, outwardLateralSpeed);
+  const hitQuality = Math.max(0, Math.min(1, safeOutward / 10.5));
+  const integrityFactor = overallIntegrity < 65 ? 0.85 : 1.0;
+
+  // Guardrail only breaches & wrecks the car when speed is high AND it is slammed well into the rail
+  const isHighSpeed = playerSpeed >= 24.0 * integrityFactor;
+  const isWellHit = safeOutward >= 6.5 * integrityFactor;
+  const shouldBreach = isHighSpeed && isWellHit;
+
+  return {
+    shouldBreach,
+    hitQuality: Number(hitQuality.toFixed(3)),
+    impactSpeed: Number((safeOutward * 1.65 + playerSpeed * 0.25).toFixed(2)),
+    scrubbedSpeedFactor: shouldBreach ? 0.86 : safeOutward > 4.0 ? 0.84 : 0.92,
+    inwardBounceLatVel: Math.max(3.5, safeOutward * 0.52 + 2.2),
+  };
 }
 
 const VEHICLE_MASS_BY_KIND: Record<TrafficVehicleKind, number> = {
@@ -108,45 +150,53 @@ export function resolveTrafficCollisionImpulse(
   const sideBias: -1 | 1 = dLat >= 0 ? 1 : -1;
   const overlapFraction = Math.max(0, 1 - absDLat / Math.max(0.8, car.halfWidth + 0.9));
 
-  // Head-on or heavy center-line hits are fatal; light oblique sideswipes on same-lane traffic deflect & scrape
-  const isGlancingSideswipe =
-    !car.isOncoming && overlapFraction < 0.42 && relForward < 13.5 && absDLat > 0.92;
+  // Only high-speed, solidly aligned ("well hit") impacts destroy the player's car.
+  // Slow taps, moderate rear-ends, and glancing corner clips deflect cleanly without destroying the car.
+  const isWellHit = overlapFraction >= 0.45;
+  const isHighSpeedImpact = car.isOncoming
+    ? playerSpeedForward >= 15.0 && relForward >= 24.0
+    : playerSpeedForward >= 22.0 && relForward >= 14.5;
+  const isFatalCrash = isWellHit && isHighSpeedImpact;
 
-  const restitution = isGlancingSideswipe ? 0.52 : 0.44;
+  const restitution = isFatalCrash ? 0.44 : 0.52;
   const invMassSum = 1 / playerMass + 1 / trafficMass;
 
   // Longitudinal momentum transfer impulse
   const jLong = ((1 + restitution) * relForward) / invMassSum;
-  const playerDeltaForward = -(jLong / playerMass) * (isGlancingSideswipe ? 0.34 : 0.88);
-  const trafficDeltaForward = (jLong / trafficMass) * (isGlancingSideswipe ? 0.55 : 0.95);
+  const playerDeltaForward = -(jLong / playerMass) * (isFatalCrash ? 0.88 : 0.30);
+  const trafficDeltaForward = (jLong / trafficMass) * (isFatalCrash ? 0.95 : 0.55);
 
   // Off-center lateral & rotational lever torque
   const leverNorm = Math.max(0.18, Math.min(1.0, absDLat / 1.35));
-  const lateralImpulseBase = Math.max(4.5, relForward * 0.42 + Math.abs(playerLateralVel) * 0.55);
+  const lateralImpulseBase = Math.max(4.2, relForward * 0.38 + Math.abs(playerLateralVel) * 0.55);
   const playerBounceVx = sideBias * lateralImpulseBase * (trafficMass / (playerMass + trafficMass)) * 1.45;
   const trafficCrashVelLat = -sideBias * lateralImpulseBase * (playerMass / (playerMass + trafficMass)) * 1.65;
 
   const kineticNorm = Math.min(1.5, (relForward * (car.isOncoming ? 1.15 : 0.85)) / 22);
-  const impactSeverity = isGlancingSideswipe
-    ? Math.max(0.22, Math.min(0.48, kineticNorm * 0.45))
-    : Math.max(0.68, Math.min(1.48, kineticNorm * (0.75 + trafficMass * 0.16)));
+  const isLightTap = !isFatalCrash && relForward < 9.5 && playerSpeedForward < 20.0;
+  const impactSeverity = isLightTap
+    ? 0.08
+    : !isFatalCrash
+    ? Math.max(0.16, Math.min(0.38, kineticNorm * 0.38))
+    : Math.max(0.85, Math.min(1.48, kineticNorm * (0.8 + trafficMass * 0.16)));
 
-  const playerBounceVy = isGlancingSideswipe
-    ? 1.4
-    : Math.min(9.5, 3.8 + kineticNorm * (car.isOncoming ? 4.2 : 2.8));
-  const trafficCrashVy = isGlancingSideswipe
+  const playerBounceVy = !isFatalCrash
     ? 1.2
+    : Math.min(9.5, 3.8 + kineticNorm * (car.isOncoming ? 4.2 : 2.8));
+  const trafficCrashVy = !isFatalCrash
+    ? 1.0
     : Math.min(10.5, 3.2 + (playerMass / trafficMass) * kineticNorm * 4.4);
 
   const torqueSign = sideBias;
-  const playerYawVel = torqueSign * (isGlancingSideswipe ? 1.8 : 3.2 + leverNorm * kineticNorm * 4.8);
-  const playerRollVel = torqueSign * (isGlancingSideswipe ? 0.9 : 2.1 + kineticNorm * 2.5);
+  const playerYawVel = torqueSign * (!isFatalCrash ? 1.6 : 3.2 + leverNorm * kineticNorm * 4.8);
+  const playerRollVel = torqueSign * (!isFatalCrash ? 0.8 : 2.1 + kineticNorm * 2.5);
 
-  const trafficYawVel = -torqueSign * (isGlancingSideswipe ? 2.4 : 4.2 + leverNorm * (playerMass / trafficMass) * 5.2);
-  const trafficRollVel = -torqueSign * (isGlancingSideswipe ? 1.0 : 2.4 + (playerMass / trafficMass) * 2.2);
+  const trafficYawVel = -torqueSign * (!isFatalCrash ? 2.2 : 4.2 + leverNorm * (playerMass / trafficMass) * 5.2);
+  const trafficRollVel = -torqueSign * (!isFatalCrash ? 0.9 : 2.4 + (playerMass / trafficMass) * 2.2);
 
   return {
-    isFatalCrash: !isGlancingSideswipe,
+    isFatalCrash,
+    hitQuality: Number(overlapFraction.toFixed(3)),
     impactSeverity: Number(impactSeverity.toFixed(3)),
     closingSpeed: Number(relForward.toFixed(2)),
     sideBias,

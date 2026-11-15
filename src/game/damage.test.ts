@@ -6,6 +6,7 @@ import {
   computeDamagedStats,
   countDamagedParts,
   createMintDamageState,
+  evaluateSpeedGatedImpact,
   getCarOverallIntegrity,
   getDamageVisualCacheKey,
   getFullRepairCost,
@@ -117,3 +118,85 @@ test('repairSinglePart and repairAllParts restore part integrity, bendAngle, and
   assert.equal(normalized.spoiler.detached, true);
   assert.equal(normalized.spoiler.integrity, 0);
 });
+
+test('evaluateSpeedGatedImpact ignores low-speed/glancing grazes, caps sub-threshold dents, and totals only on fast well-hit slams', () => {
+  const mint = createMintDamageState();
+
+  // 1. Low-speed bump (< minDamageSpeed) causes zero chassis damage
+  const slowTap = evaluateSpeedGatedImpact({
+    damage: mint,
+    impactZone: 'front',
+    impactSpeed: 7.2,
+    minDamageSpeed: 9.5,
+    highSpeedThreshold: 20.0,
+    hitQuality: 1.0,
+  });
+  assert.equal(slowTap.appliedSeverity, 0);
+  assert.equal(slowTap.isTotaled, false);
+  assert.equal(getCarOverallIntegrity(slowTap.nextDamage), 100);
+
+  // 2. High-speed but very glancing corner clip (< 0.35 hitQuality) causes zero structural damage
+  const cornerClip = evaluateSpeedGatedImpact({
+    damage: mint,
+    impactZone: 'right',
+    impactSpeed: 28.0,
+    minDamageSpeed: 9.5,
+    highSpeedThreshold: 20.0,
+    hitQuality: 0.25,
+  });
+  assert.equal(cornerClip.appliedSeverity, 0);
+  assert.equal(cornerClip.isTotaled, false);
+
+  // 3. Moderate speed or glancing hit (0.45 hitQuality or below highSpeedThreshold) bends slightly, never totals
+  const moderateHit = evaluateSpeedGatedImpact({
+    damage: mint,
+    impactZone: 'front',
+    impactSpeed: 15.0,
+    minDamageSpeed: 9.5,
+    highSpeedThreshold: 20.0,
+    hitQuality: 0.85,
+  });
+  assert.ok(moderateHit.appliedSeverity > 0 && moderateHit.appliedSeverity <= 0.36);
+  assert.equal(moderateHit.isTotaled, false);
+
+  const highGlancing = evaluateSpeedGatedImpact({
+    damage: mint,
+    impactZone: 'left',
+    impactSpeed: 26.0,
+    minDamageSpeed: 9.5,
+    highSpeedThreshold: 20.0,
+    hitQuality: 0.45,
+  });
+  assert.ok(highGlancing.appliedSeverity > 0 && highGlancing.appliedSeverity <= 0.36);
+  assert.equal(highGlancing.isTotaled, false);
+
+  // 4. Even repeated moderate bumps with allowTotaling: false do not total an intact car
+  let cur = mint;
+  for (let i = 0; i < 6; i++) {
+    const res = evaluateSpeedGatedImpact({
+      damage: cur,
+      impactZone: 'front',
+      impactSpeed: 16.0,
+      minDamageSpeed: 8.5,
+      highSpeedThreshold: 13.0,
+      hitQuality: 0.9,
+      allowTotaling: false,
+    });
+    cur = res.nextDamage;
+    assert.equal(res.isTotaled, false);
+  }
+
+  // 5. High-speed + well-aligned slam totals the car
+  const heavySlam = evaluateSpeedGatedImpact({
+    damage: mint,
+    impactZone: 'ground_slam',
+    impactSpeed: 28.0,
+    minDamageSpeed: 9.5,
+    highSpeedThreshold: 20.0,
+    hitQuality: 0.95,
+    allowTotaling: true,
+  });
+  assert.ok(heavySlam.appliedSeverity >= 0.75);
+  assert.equal(heavySlam.isTotaled, true);
+});
+

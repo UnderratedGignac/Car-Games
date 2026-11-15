@@ -18,10 +18,12 @@ import { HERO_SPRITE_GROUND_V, TRAFFIC_SPRITE_GROUND_V } from './grounding';
  * - True continuous 3D yaw from rear chase (0) to 3/4 isometric drift ('/' or '\')
  */
 
-const W = 192;
-const H = 144;
-const TW = 144;
-const TH = 108;
+const W = 320;
+const H = 240;
+const TW = 224;
+const TH = 168;
+const HERO_SCALE_FACTOR = W / 192;
+const TRAFFIC_SCALE_FACTOR = TW / 144;
 const HERO_BUCKETS = 16;
 const TRAFFIC_BUCKETS = 8;
 const MAX_HERO_CACHE = 960;
@@ -145,6 +147,57 @@ export function isDoorNumberPixelVisible(params: {
   const bufZ = depthBuf[idx];
   if (!Number.isFinite(bufZ)) return false;
   return doorDepthZ <= bufZ + 0.24 && Math.abs(bufZ - doorDepthZ) <= 0.34;
+}
+
+/**
+ * Checks whether a screen-space effect pixel (exhaust flame, taillight halo) at pointDepthZ
+ * sits in front of (or outside) the rasterized 3D vehicle Z-buffer.
+ */
+export function isDepthPointVisible(params: {
+  screenX: number;
+  screenY: number;
+  width: number;
+  height: number;
+  shouldMirror: boolean;
+  depthBuf: Float32Array;
+  pointDepthZ: number;
+  zTolerance?: number;
+}): boolean {
+  const {
+    screenX,
+    screenY,
+    width,
+    height,
+    shouldMirror,
+    depthBuf,
+    pointDepthZ,
+    zTolerance = 0.12,
+  } = params;
+  const rx = Math.round(screenX);
+  const ry = Math.round(screenY);
+  if (rx < 0 || rx >= width || ry < 0 || ry >= height) return true;
+  const bx = shouldMirror ? width - 1 - rx : rx;
+  const by = ry;
+  const idx = by * width + bx;
+  let minBufZ = depthBuf[idx];
+  if (bx > 0) {
+    const zL = depthBuf[idx - 1];
+    if (zL < minBufZ) minBufZ = zL;
+  }
+  if (bx < width - 1) {
+    const zR = depthBuf[idx + 1];
+    if (zR < minBufZ) minBufZ = zR;
+  }
+  if (by > 0) {
+    const zU = depthBuf[idx - width];
+    if (zU < minBufZ) minBufZ = zU;
+  }
+  if (by < height - 1) {
+    const zD = depthBuf[idx + width];
+    if (zD < minBufZ) minBufZ = zD;
+  }
+  if (!Number.isFinite(minBufZ)) return true;
+  return pointDepthZ <= minBufZ + zTolerance;
 }
 
 export interface TireAnchorNorm {
@@ -422,7 +475,7 @@ export function getPixelCarTireAnchors(
 
   const cx = W * 0.5;
   const cy = H * HERO_SPRITE_GROUND_V;
-  const scale = 33.067;
+  const scale = 33.067 * HERO_SCALE_FACTOR;
 
   const projAnchor = (vx: number, vy: number, vz: number, isCameraFacing: boolean): TireAnchorNorm => {
     const rx = vx * cosY + vz * sinY;
@@ -585,10 +638,10 @@ export function getPixelCarCanvas(
   const cosP = Math.cos(pitch);
   const sinP = Math.sin(pitch);
 
-  // Project 3D car-local coordinate to 192x144 pixel space (exact 4:3 aspect match)
+  // Project 3D car-local coordinate to 320x240 HD pixel space (exact 4:3 aspect match)
   const cx = W * 0.5;
   const cy = H * HERO_SPRITE_GROUND_V;
-  const scale = 33.067;
+  const scale = 33.067 * HERO_SCALE_FACTOR;
 
   const project = (v: Vec3): ScreenPt => {
     // Rotate around Y (yaw): +Z nose swings upper-right, -Z rear swings lower-left, +X side faces camera
@@ -625,13 +678,20 @@ export function getPixelCarCanvas(
     }
   };
 
-  // Scanline integer triangle rasterizer with interpolated depth
+  const applyCurvatureShade = (abgr: number, nyAbs: number): number => {
+    const shade = 0.94 + nyAbs * 0.13;
+    const r = Math.min(255, Math.round((abgr & 0xff) * shade));
+    const g = Math.min(255, Math.round(((abgr >> 8) & 0xff) * shade));
+    const b = Math.min(255, Math.round(((abgr >> 16) & 0xff) * shade));
+    return (abgr & 0xff000000) | (b << 16) | (g << 8) | r;
+  };
+
+  // Scanline triangle rasterizer with interpolated depth and subtle sky-normal shading
   const fillTri3D = (a: Vec3, b: Vec3, c: Vec3, col: number, zBias = 0) => {
     const p0 = project(a);
     const p1 = project(b);
     const p2 = project(c);
 
-    // Backface cull optional — we draw double-sided for thin spoilers/skirts, or keep clean
     const minX = Math.max(1, Math.floor(Math.min(p0.x, p1.x, p2.x)));
     const maxX = Math.min(W - 2, Math.ceil(Math.max(p0.x, p1.x, p2.x)));
     const minY = Math.max(1, Math.floor(Math.min(p0.y, p1.y, p2.y)));
@@ -640,6 +700,31 @@ export function getPixelCarCanvas(
     const area = (p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x);
     if (Math.abs(area) < 0.05) return;
     const invArea = 1 / area;
+
+    // Preserve exact colWhite (door roundels) & glowing lamps untouched; gently shade car panels by 3D slope
+    let shadedCol = col;
+    if (
+      col !== colWhite &&
+      col !== colTail &&
+      col !== colTailCore &&
+      col !== colAmber &&
+      col !== colHeadlightLens &&
+      col !== colHeadlightBeam
+    ) {
+      const ux = b.x - a.x;
+      const uy = b.y - a.y;
+      const uz = b.z - a.z;
+      const vx = c.x - a.x;
+      const vy = c.y - a.y;
+      const vz = c.z - a.z;
+      const nx = uy * vz - uz * vy;
+      const ny = uz * vx - ux * vz;
+      const nz = ux * vy - uy * vx;
+      const nLen = Math.hypot(nx, ny, nz);
+      if (nLen > 1e-4) {
+        shadedCol = applyCurvatureShade(col, Math.abs(ny / nLen));
+      }
+    }
 
     for (let y = minY; y <= maxY; y++) {
       const py = y + 0.5;
@@ -650,7 +735,7 @@ export function getPixelCarCanvas(
         const w2 = 1 - w0 - w1;
         if (w0 >= -0.02 && w1 >= -0.02 && w2 >= -0.02) {
           const z = w0 * p0.z + w1 * p1.z + w2 * p2.z + zBias;
-          plot(x, y, z, col);
+          plot(x, y, z, shadedCol);
         }
       }
     }
@@ -3412,9 +3497,8 @@ export function getPixelCarCanvas(
   }
 
   // =========================================================================
-  // 6. AUTOMATIC 1PX MORPHOLOGICAL DARK INK OUTLINE PASS (#090d16)
+  // 6. SUB-PIXEL ANTI-ALIASED SILHOUETTE FEATHERING PASS
   // =========================================================================
-  const outlineCol = packHex('#090d16');
   const outlinedBuf = heroOutlinedBuf;
   outlinedBuf.set(colorBuf);
 
@@ -3423,13 +3507,27 @@ export function getPixelCarCanvas(
     for (let x = 1; x < W - 1; x++) {
       const idx = row + x;
       if (colorBuf[idx] === 0) {
-        if (
-          colorBuf[idx - 1] !== 0 ||
-          colorBuf[idx + 1] !== 0 ||
-          colorBuf[idx - W] !== 0 ||
-          colorBuf[idx + W] !== 0
-        ) {
-          outlinedBuf[idx] = outlineCol;
+        let sumR = 0;
+        let sumG = 0;
+        let sumB = 0;
+        let hits = 0;
+        const nL = colorBuf[idx - 1];
+        const nR = colorBuf[idx + 1];
+        const nU = colorBuf[idx - W];
+        const nD = colorBuf[idx + W];
+        if (nL !== 0) { sumR += nL & 0xff; sumG += (nL >> 8) & 0xff; sumB += (nL >> 16) & 0xff; hits++; }
+        if (nR !== 0) { sumR += nR & 0xff; sumG += (nR >> 8) & 0xff; sumB += (nR >> 16) & 0xff; hits++; }
+        if (nU !== 0) { sumR += nU & 0xff; sumG += (nU >> 8) & 0xff; sumB += (nU >> 16) & 0xff; hits++; }
+        if (nD !== 0) { sumR += nD & 0xff; sumG += (nD >> 8) & 0xff; sumB += (nD >> 16) & 0xff; hits++; }
+        if (hits > 0) {
+          const inv = 1 / hits;
+          const edgeAlpha = Math.min(200, 72 + hits * 32);
+          outlinedBuf[idx] = packAbgr(
+            Math.round(sumR * inv * 0.85),
+            Math.round(sumG * inv * 0.85),
+            Math.round(sumB * inv * 0.85),
+            edgeAlpha
+          );
         }
       }
     }
@@ -3449,19 +3547,18 @@ export function getPixelCarCanvas(
     finalBuf.set(outlinedBuf);
   }
 
-  // Assemble final canvas with crisp contact shadow + pixel buffer + #73 decal + flames
   const c = document.createElement('canvas');
   c.width = W;
   c.height = H;
   const ctx = c.getContext('2d')!;
-  ctx.imageSmoothingEnabled = false;
+  ctx.imageSmoothingEnabled = true;
 
-  // Grounded contact shadow ellipse (+ Neon Underglow Kit if equipped!)
+  // Grounded soft contact shadow ellipse (+ Neon Underglow Kit if equipped!)
   const shCenter = project({ x: 0, y: 0.02, z: 0 });
   const shX = Math.round(shouldMirror ? W - 1 - shCenter.x : shCenter.x);
-  const shY = Math.round(shCenter.y + 1.5);
-  const shRx = Math.round((32 + absNorm * 13) * 1.333);
-  const shRy = Math.round((12 + absNorm * 3) * 1.333);
+  const shY = Math.round(shCenter.y + 1.5 * HERO_SCALE_FACTOR);
+  const shRx = Math.round((32 + absNorm * 13) * 1.333 * HERO_SCALE_FACTOR);
+  const shRy = Math.round((12 + absNorm * 3) * 1.333 * HERO_SCALE_FACTOR);
   const shadowTilt = shouldMirror ? 0.18 : isCustomYaw ? Math.sin(yaw) * -0.18 : dirSign * -0.18;
 
   if (resolved.underglowHex && !isWrecked) {
@@ -3469,17 +3566,17 @@ export function getPixelCarCanvas(
     ctx.globalAlpha = 0.65;
     ctx.fillStyle = resolved.underglowHex;
     ctx.beginPath();
-    ctx.ellipse(shX, shY + 1.5, shRx + 7, shRy + 4, shadowTilt, 0, Math.PI * 2);
+    ctx.ellipse(shX, shY + 2, shRx + 11, shRy + 6, shadowTilt, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
   }
 
-  ctx.fillStyle = isFever ? 'rgba(6, 182, 212, 0.45)' : 'rgba(9, 13, 22, 0.50)';
+  ctx.fillStyle = isFever ? 'rgba(6, 182, 212, 0.45)' : 'rgba(9, 13, 22, 0.48)';
   ctx.beginPath();
   ctx.ellipse(shX, shY, shRx, shRy, shadowTilt, 0, Math.PI * 2);
   ctx.fill();
 
-  // Blit crisp Z-buffered outlined pixel-art car via reusable scratch canvas!
+  // Blit crisp Z-buffered anti-aliased vehicle via reusable scratch canvas!
   if (!heroScratchCanvas) {
     heroScratchCanvas = document.createElement('canvas');
     heroScratchCanvas.width = W;
@@ -3491,6 +3588,18 @@ export function getPixelCarCanvas(
   heroScratchCtx!.putImageData(heroScratchImgData!, 0, 0);
   ctx.drawImage(heroScratchCanvas, 0, 0);
 
+  // Glossy automotive clearcoat specular reflection sweep across hood, windshield & roof
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-atop';
+  const clearcoatGrad = ctx.createLinearGradient(0, Math.round(H * 0.18), 0, Math.round(H * 0.72));
+  clearcoatGrad.addColorStop(0, 'rgba(255, 255, 255, 0.22)');
+  clearcoatGrad.addColorStop(0.32, 'rgba(224, 242, 254, 0.08)');
+  clearcoatGrad.addColorStop(0.52, 'rgba(255, 255, 255, 0)');
+  clearcoatGrad.addColorStop(1, 'rgba(15, 23, 42, 0.14)');
+  ctx.fillStyle = clearcoatGrad;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+
   // Stamp crisp 3x5 pixel bitmap racing number onto the camera-facing door roundel (Z-tested so it never shows through the car!)
   if (visibleDoorSide !== 0) {
     const doorBendVis = visibleDoorSide < 0 ? lDoorBend : rDoorBend;
@@ -3498,9 +3607,9 @@ export function getPixelCarCanvas(
     const doorYMid = (yFloor + 0.24 + yBeltRear - 0.14) * 0.5;
     const doorPt = project({ x: doorX, y: doorYMid, z: -0.02 });
     const foreshorten = Math.min(1, Math.max(0.68, Math.abs(sinY) / 0.55));
-    const pxW = 1.5 * foreshorten;
-    const pxH = 1.5;
-    const digitGap = Math.max(4, Math.round(6 * foreshorten));
+    const pxW = 1.5 * HERO_SCALE_FACTOR * foreshorten;
+    const pxH = 1.5 * HERO_SCALE_FACTOR;
+    const digitGap = Math.max(6, Math.round(6 * HERO_SCALE_FACTOR * foreshorten));
     const totalW = 3 * pxW + digitGap;
     const screenDoorX = shouldMirror ? W - 1 - doorPt.x : doorPt.x;
     const dx = Math.round(screenDoorX - totalW * 0.5);
@@ -3545,21 +3654,67 @@ export function getPixelCarCanvas(
   }
 
   // Animated Exhaust Backfire Flames OR Brake Light Glow Halo OR Wrecked Sparks
-  if (!isWrecked) {
+  // All particles are tested against depthBuf so rear flames & tail halos never overlay the car body when viewed from the front!
+  const drawZTestedDisc = (
+    cxPt: number,
+    cyPt: number,
+    radius: number,
+    depthZ: number,
+    fillStyle: string,
+    alpha = 1,
+    zTolerance = 0.12
+  ) => {
+    const rCeil = Math.ceil(radius);
+    const xMin = Math.max(0, Math.floor(cxPt - rCeil));
+    const xMax = Math.min(W - 1, Math.ceil(cxPt + rCeil));
+    const yMin = Math.max(0, Math.floor(cyPt - rCeil));
+    const yMax = Math.min(H - 1, Math.ceil(cyPt + rCeil));
+    if (xMin > xMax || yMin > yMax) return;
+    const rSq = radius * radius;
+    ctx.save();
+    if (alpha < 1) ctx.globalAlpha = alpha;
+    ctx.fillStyle = fillStyle;
+    for (let py = yMin; py <= yMax; py++) {
+      const dy = py + 0.5 - cyPt;
+      const dySq = dy * dy;
+      if (dySq > rSq) continue;
+      let spanStart = -1;
+      for (let px = xMin; px <= xMax; px++) {
+        const dx = px + 0.5 - cxPt;
+        const inside =
+          dx * dx + dySq <= rSq &&
+          isDepthPointVisible({
+            screenX: px,
+            screenY: py,
+            width: W,
+            height: H,
+            shouldMirror,
+            depthBuf,
+            pointDepthZ: depthZ,
+            zTolerance,
+          });
+        if (inside) {
+          if (spanStart < 0) spanStart = px;
+        } else if (spanStart >= 0) {
+          ctx.fillRect(spanStart, py, px - spanStart, 1);
+          spanStart = -1;
+        }
+      }
+      if (spanStart >= 0) {
+        ctx.fillRect(spanStart, py, xMax - spanStart + 1, 1);
+      }
+    }
+    ctx.restore();
+  };
 
+  if (!isWrecked) {
     if (isBraking) {
       for (const side of [-1, 1]) {
         const tp = project({ x: side * hw * 0.64, y: yBeltRear - 0.14, z: zRear - 0.05 });
         const tx = Math.round(shouldMirror ? W - 1 - tp.x : tp.x);
         const ty = Math.round(tp.y);
-        ctx.fillStyle = 'rgba(255, 59, 48, 0.48)';
-        ctx.beginPath();
-        ctx.arc(tx, ty, 8.5, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = 'rgba(254, 202, 202, 0.55)';
-        ctx.beginPath();
-        ctx.arc(tx, ty, 3.2, 0, Math.PI * 2);
-        ctx.fill();
+        drawZTestedDisc(tx, ty, 8.5 * HERO_SCALE_FACTOR, tp.z, '#ff3b30', 0.48, 0.15);
+        drawZTestedDisc(tx, ty, 3.2 * HERO_SCALE_FACTOR, tp.z, '#fecaca', 0.55, 0.15);
       }
     } else {
       // Subtle ambient LED taillight aura
@@ -3567,10 +3722,7 @@ export function getPixelCarCanvas(
         const tp = project({ x: side * hw * 0.64, y: yBeltRear - 0.14, z: zRear - 0.05 });
         const tx = Math.round(shouldMirror ? W - 1 - tp.x : tp.x);
         const ty = Math.round(tp.y);
-        ctx.fillStyle = 'rgba(239, 68, 68, 0.20)';
-        ctx.beginPath();
-        ctx.arc(tx, ty, 5.5, 0, Math.PI * 2);
-        ctx.fill();
+        drawZTestedDisc(tx, ty, 5.5 * HERO_SCALE_FACTOR, tp.z, '#ef4444', 0.20, 0.15);
       }
 
       const isBoss = car.id === 'matte_boss' || car.id === 'apex_valkyrie';
@@ -3611,8 +3763,8 @@ export function getPixelCarCanvas(
               ]
             : exhaustStyle === 'hood_exit'
             ? [
-                { x: -0.21, y: yBeltFront + 0.16, z: zHoodBase + 0.36, sy: 0.26, sz: -0.10 },
-                { x: 0.25, y: yBeltFront + 0.16, z: zHoodBase + 0.36, sy: 0.26, sz: -0.10 },
+                { x: -0.21, y: yBeltFront + 0.18, z: zHoodBase + 0.36, sy: 0.26, sz: -0.10 },
+                { x: 0.25, y: yBeltFront + 0.18, z: zHoodBase + 0.36, sy: 0.26, sz: -0.10 },
               ]
             : exhaustStyle === 'dual_diesel_stacks'
             ? [
@@ -3641,42 +3793,39 @@ export function getPixelCarCanvas(
           const y0 = p0.y;
           const y1 = p1.y;
 
-          // Soft translucent exhaust nozzle plasma halo
-          ctx.save();
-          ctx.globalAlpha = isFever ? 0.34 : 0.24;
-          ctx.fillStyle = flameOuter;
-          ctx.beginPath();
-          ctx.arc(x0, y0, isFever ? 5.6 : 4.4, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.restore();
+          drawZTestedDisc(
+            x0,
+            y0,
+            (isFever ? 5.6 : 4.4) * HERO_SCALE_FACTOR,
+            p0.z,
+            flameOuter,
+            isFever ? 0.34 : 0.24,
+            0.14
+          );
 
           const steps = 8;
           for (let s = 0; s <= steps; s++) {
             const t = s / steps;
             const px = x0 + (x1 - x0) * t;
             const py = y0 + (y1 - y0) * t;
-            const rad = t < 0.35 ? 2.6 : t < 0.72 ? 1.8 : 0.9;
-            ctx.fillStyle = flameOuter;
-            ctx.beginPath();
-            ctx.arc(px, py, rad, 0, Math.PI * 2);
-            ctx.fill();
+            const pz = p0.z + (p1.z - p0.z) * t;
+            const rad = (t < 0.35 ? 2.6 : t < 0.72 ? 1.8 : 0.9) * HERO_SCALE_FACTOR;
+            drawZTestedDisc(px, py, rad, pz, flameOuter, 1, 0.12);
             if (t < 0.65) {
-              ctx.fillStyle = flameCore;
-              ctx.beginPath();
-              ctx.arc(px, py, rad * 0.52, 0, Math.PI * 2);
-              ctx.fill();
+              drawZTestedDisc(px, py, rad * 0.52, pz, flameCore, 1, 0.12);
             }
           }
         }
       }
     }
   } else {
+    const u = HERO_SCALE_FACTOR;
     ctx.fillStyle = '#ef4444';
-    ctx.fillRect(Math.round(cx - 13), Math.round(cy - 24), 4, 4);
-    ctx.fillRect(Math.round(cx - 9), Math.round(cy - 20), 4, 4);
-    ctx.fillRect(Math.round(cx - 5), Math.round(cy - 16), 4, 4);
-    ctx.fillRect(Math.round(cx - 1), Math.round(cy - 20), 4, 4);
-    ctx.fillRect(Math.round(cx + 3), Math.round(cy - 24), 4, 4);
+    ctx.fillRect(Math.round(cx - 13 * u), Math.round(cy - 24 * u), Math.round(4 * u), Math.round(4 * u));
+    ctx.fillRect(Math.round(cx - 9 * u), Math.round(cy - 20 * u), Math.round(4 * u), Math.round(4 * u));
+    ctx.fillRect(Math.round(cx - 5 * u), Math.round(cy - 16 * u), Math.round(4 * u), Math.round(4 * u));
+    ctx.fillRect(Math.round(cx - 1 * u), Math.round(cy - 20 * u), Math.round(4 * u), Math.round(4 * u));
+    ctx.fillRect(Math.round(cx + 3 * u), Math.round(cy - 24 * u), Math.round(4 * u), Math.round(4 * u));
   }
 
   if (spriteCache.size >= MAX_HERO_CACHE) {
@@ -3724,7 +3873,7 @@ export function getTrafficVehicleCanvas(
 
   const cx = TW * 0.5;
   const cy = TH * TRAFFIC_SPRITE_GROUND_V;
-  const scale = 23.914;
+  const scale = 23.914 * TRAFFIC_SCALE_FACTOR;
 
   const project = (v: Vec3): ScreenPt => {
     const rx = v.x * cosY + v.z * sinY;
@@ -4223,8 +4372,7 @@ export function getTrafficVehicleCanvas(
     }
   }
 
-  // 1px Dark Pixel Outline Pass (#090d16)
-  const outlineCol = packHex('#090d16');
+  // Sub-pixel anti-aliased edge feathering pass (no hard black cartoon borders)
   const outlinedBuf = trOutlinedBuf;
   outlinedBuf.set(colorBuf);
   for (let y = 1; y < TH - 1; y++) {
@@ -4232,13 +4380,27 @@ export function getTrafficVehicleCanvas(
     for (let x = 1; x < TW - 1; x++) {
       const idx = row + x;
       if (colorBuf[idx] === 0) {
-        if (
-          colorBuf[idx - 1] !== 0 ||
-          colorBuf[idx + 1] !== 0 ||
-          colorBuf[idx - TW] !== 0 ||
-          colorBuf[idx + TW] !== 0
-        ) {
-          outlinedBuf[idx] = outlineCol;
+        let sumR = 0;
+        let sumG = 0;
+        let sumB = 0;
+        let hits = 0;
+        const nL = colorBuf[idx - 1];
+        const nR = colorBuf[idx + 1];
+        const nU = colorBuf[idx - TW];
+        const nD = colorBuf[idx + TW];
+        if (nL !== 0) { sumR += nL & 0xff; sumG += (nL >> 8) & 0xff; sumB += (nL >> 16) & 0xff; hits++; }
+        if (nR !== 0) { sumR += nR & 0xff; sumG += (nR >> 8) & 0xff; sumB += (nR >> 16) & 0xff; hits++; }
+        if (nU !== 0) { sumR += nU & 0xff; sumG += (nU >> 8) & 0xff; sumB += (nU >> 16) & 0xff; hits++; }
+        if (nD !== 0) { sumR += nD & 0xff; sumG += (nD >> 8) & 0xff; sumB += (nD >> 16) & 0xff; hits++; }
+        if (hits > 0) {
+          const inv = 1 / hits;
+          const edgeAlpha = Math.min(195, 70 + hits * 30);
+          outlinedBuf[idx] = packAbgr(
+            Math.round(sumR * inv * 0.85),
+            Math.round(sumG * inv * 0.85),
+            Math.round(sumB * inv * 0.85),
+            edgeAlpha
+          );
         }
       }
     }
@@ -4248,15 +4410,15 @@ export function getTrafficVehicleCanvas(
   c.width = TW;
   c.height = TH;
   const ctx = c.getContext('2d')!;
-  ctx.imageSmoothingEnabled = false;
+  ctx.imageSmoothingEnabled = true;
 
   // Grounded contact shadow ellipse
   const shCenter = project({ x: 0, y: 0.02, z: 0 });
   const shX = Math.round(shCenter.x);
-  const shY = Math.round(shCenter.y + 1.5);
-  ctx.fillStyle = 'rgba(9, 13, 22, 0.48)';
+  const shY = Math.round(shCenter.y + 1.5 * TRAFFIC_SCALE_FACTOR);
+  ctx.fillStyle = 'rgba(9, 13, 22, 0.46)';
   ctx.beginPath();
-  ctx.ellipse(shX, shY, isTruck ? 36 : 31, 11.5, 0, 0, Math.PI * 2);
+  ctx.ellipse(shX, shY, (isTruck ? 36 : 31) * TRAFFIC_SCALE_FACTOR, 11.5 * TRAFFIC_SCALE_FACTOR, 0, 0, Math.PI * 2);
   ctx.fill();
 
   if (!trScratchCanvas) {
@@ -4278,7 +4440,7 @@ export function getTrafficVehicleCanvas(
       const hy = Math.round(hp.y);
       ctx.fillStyle = isNight ? 'rgba(254, 249, 195, 0.58)' : 'rgba(254, 240, 138, 0.38)';
       ctx.beginPath();
-      ctx.arc(hx, hy, isNight ? 7 : 5, 0, Math.PI * 2);
+      ctx.arc(hx, hy, (isNight ? 7 : 5) * TRAFFIC_SCALE_FACTOR, 0, Math.PI * 2);
       ctx.fill();
     }
   } else {
@@ -4288,7 +4450,7 @@ export function getTrafficVehicleCanvas(
       const ty = Math.round(tp.y);
       ctx.fillStyle = isNight ? 'rgba(239, 68, 68, 0.42)' : 'rgba(239, 68, 68, 0.24)';
       ctx.beginPath();
-      ctx.arc(tx, ty, isNight ? 5.5 : 4, 0, Math.PI * 2);
+      ctx.arc(tx, ty, (isNight ? 5.5 : 4) * TRAFFIC_SCALE_FACTOR, 0, Math.PI * 2);
       ctx.fill();
     }
   }

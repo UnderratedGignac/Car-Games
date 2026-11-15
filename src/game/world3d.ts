@@ -9,6 +9,7 @@ import {
   resolveAdventureZone,
   sampleAdventureTerrainElevation,
 } from './adventure';
+import { sampleMountainTerrainElevation } from './mountain';
 import {
   deterministicNoise,
   getChapterTerrainRamps,
@@ -218,8 +219,9 @@ export function renderTerrainMesh3D(params: {
   biome: RoadBiomeConfig;
   nowMs: number;
   projectInto: Project3DIntoFn;
+  webglBackdropActive?: boolean;
 }) {
-  const { ctx, visibleSlices, visibleCount, biome, projectInto } = params;
+  const { ctx, visibleSlices, visibleCount, biome, projectInto, webglBackdropActive = false } = params;
   const pal = BIOME_TERRAIN_PALETTE[biome.id];
 
   let farRow = terrainRowA;
@@ -234,7 +236,6 @@ export function renderTerrainMesh3D(params: {
 
     const fpt = far.pt;
     const npt = near.pt;
-    const isEven = Math.floor(fpt.index / 2) % 2 === 0;
     const fogAlpha = computeDistanceFogAlpha(far.rawZ, 108, 152);
     if (fogAlpha <= 0.02) continue;
 
@@ -255,15 +256,17 @@ export function renderTerrainMesh3D(params: {
 
     ctx.globalAlpha = fogAlpha;
 
-    // 1. Outer 3D hills / canyon ridges / neon waterfront decks
-    if (fo[0] && fo[1] && no[1] && no[0]) {
-      drawQuadDirect(ctx, fp[0], fp[1], np[1], np[0], isEven ? pal.hillLight : pal.hillDark);
-    }
-    if (fo[6] && fo[7] && no[7] && no[6]) {
-      drawQuadDirect(ctx, fp[6], fp[7], np[7], np[6], isEven ? pal.hillDark : pal.hillLight);
+    // 1. Outer 3D hills / canyon ridges / neon waterfront decks (skipped when WebGL 3D backdrop renders terrain & water)
+    if (!webglBackdropActive) {
+      if (fo[0] && fo[1] && no[1] && no[0]) {
+        drawQuadDirect(ctx, fp[0], fp[1], np[1], np[0], pal.hillDark);
+      }
+      if (fo[6] && fo[7] && no[7] && no[6]) {
+        drawQuadDirect(ctx, fp[6], fp[7], np[7], np[6], pal.hillLight);
+      }
     }
 
-    // 2 & 3. Sloped embankment walls + valley floor banks (batched by shared parity color)
+    // 2 & 3. Sloped embankment walls + valley floor banks (smooth directional lighting, zero parity banding)
     const canSlopeL = fo[1] && fo[2] && no[2] && no[1];
     const canSlopeR = fo[5] && fo[6] && no[6] && no[5];
     const canBankL = fo[2] && fo[3] && no[3] && no[2];
@@ -273,26 +276,32 @@ export function renderTerrainMesh3D(params: {
       ctx.beginPath();
       if (canSlopeL) addQuadSubpath(ctx, fp[1], fp[2], np[2], np[1]);
       if (canBankR) addQuadSubpath(ctx, fp[4], fp[5], np[5], np[4]);
-      ctx.fillStyle = isEven ? pal.bankLight : pal.bankDark;
+      ctx.fillStyle = pal.bankDark;
       ctx.fill();
+      ctx.strokeStyle = pal.bankDark;
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
     }
     if (canSlopeR || canBankL) {
       ctx.beginPath();
       if (canSlopeR) addQuadSubpath(ctx, fp[5], fp[6], np[6], np[5]);
       if (canBankL) addQuadSubpath(ctx, fp[2], fp[3], np[3], np[2]);
-      ctx.fillStyle = isEven ? pal.bankDark : pal.bankLight;
+      ctx.fillStyle = pal.bankLight;
       ctx.fill();
+      ctx.strokeStyle = pal.bankLight;
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
     }
 
-    // Crisp outer + inner ridge crest rim highlights (steady across frames)
-    if (far.rawZ < 105 && fpt.index % 2 === 0) {
+    // Subtle outer + inner ridge crest rim highlights (continuous smooth aerial depth)
+    if (far.rawZ < 105) {
       const hasL = fo[1] && no[1];
       const hasR = fo[6] && no[6];
       const hasOutL = fo[0] && no[0];
       const hasOutR = fo[7] && no[7];
       if (hasL || hasR || hasOutL || hasOutR) {
         ctx.strokeStyle = pal.ridgeCap;
-        ctx.globalAlpha = fogAlpha * (biome.id === 'neon' ? 0.36 : 0.26);
+        ctx.globalAlpha = fogAlpha * (biome.id === 'neon' ? 0.24 : 0.14);
         ctx.lineWidth = 1.25;
         ctx.beginPath();
         if (hasL) {
@@ -316,8 +325,8 @@ export function renderTerrainMesh3D(params: {
       }
     }
 
-    // 4. Calm central river / canal / canyon wash beneath viaduct (no 8Hz strobing)
-    if (fo[3] && fo[4] && no[4] && no[3]) {
+    // 4. Calm central river / canal / canyon wash beneath viaduct (let WebGL shader water show when active)
+    if (!webglBackdropActive && fo[3] && fo[4] && no[4] && no[3]) {
       drawQuadDirect(ctx, fp[3], fp[4], np[4], np[3], pal.riverBase);
       if (far.rawZ < 92) {
         // Crisp riverbank shoreline bevel highlight along both water edges
@@ -427,9 +436,7 @@ export function renderWorldObject3D(params: {
         wp1,
         wp2,
         wp3,
-        prop.shade > 0.5 ? '#1e293b' : '#172033',
-        nearOutline ? '#090d16' : undefined,
-        1
+        prop.shade > 0.5 ? '#1e293b' : '#172033'
       );
 
       ctx.strokeStyle = trimCol;
@@ -439,26 +446,26 @@ export function renderWorldObject3D(params: {
       ctx.lineTo(Math.round(wp2.x), Math.round(wp2.y));
       ctx.stroke();
 
-      // Lit glass facade floor bands & window mullions
+      // Lit glass facade floor bands & window mullions (LOD step for smooth frame times)
       const bW = Math.round(Math.abs(wp1.x - wp0.x));
       const bH = Math.round(Math.abs(wp0.y - wp3.y));
-      if (rawZ < 92 && bW >= 6 && bH >= 12) {
+      if (rawZ < 76 && bW >= 7 && bH >= 14) {
         const leftX = Math.round(Math.min(wp0.x, wp1.x));
         const topY = Math.round(wp3.y);
         const maxWX = leftX + bW - 3;
         const maxWY = topY + bH - 3;
 
         ctx.fillStyle = trimCol;
-        for (let wy = topY + 3; wy < maxWY; wy += 4) {
-          for (let wx = leftX + 2; wx < maxWX; wx += 3) {
+        for (let wy = topY + 3; wy < maxWY; wy += 6) {
+          for (let wx = leftX + 2; wx < maxWX; wx += 5) {
             if ((wx + wy + prop.variant) % 3 !== 0 && (wx + wy) % 2 === 0) {
               ctx.fillRect(wx, wy, 2, 2);
             }
           }
         }
         ctx.fillStyle = '#fef08a';
-        for (let wy = topY + 3; wy < maxWY; wy += 4) {
-          for (let wx = leftX + 2; wx < maxWX; wx += 3) {
+        for (let wy = topY + 3; wy < maxWY; wy += 6) {
+          for (let wx = leftX + 2; wx < maxWX; wx += 5) {
             if ((wx + wy + prop.variant) % 3 !== 0 && (wx + wy) % 2 !== 0) {
               ctx.fillRect(wx, wy, 2, 2);
             }
@@ -469,7 +476,7 @@ export function renderWorldObject3D(params: {
       if (okSB && okST) {
         const edgeBot = isLeft ? wp1 : wp0;
         const edgeTop = isLeft ? wp2 : wp3;
-        drawQuadDirect(ctx, edgeBot, wp4, wp5, edgeTop, '#0f172a', nearOutline ? '#090d16' : undefined, 1);
+        drawQuadDirect(ctx, edgeBot, wp4, wp5, edgeTop, '#0f172a');
       }
 
       if (prop.variant === 0 && rawZ < 96) {
@@ -553,10 +560,6 @@ export function renderWorldObject3D(params: {
     // 3D Shaded Saguaro Cactus
     const th = Math.max(7, Math.round(5.2 * s * sc));
     const cw = Math.max(2, Math.round(0.75 * s * sc));
-    if (nearOutline) {
-      ctx.fillStyle = '#090d16';
-      ctx.fillRect(bx - Math.round(cw * 0.5) - 1, by - th - 1, cw + 2, th + 2);
-    }
     ctx.fillStyle = '#15803d';
     ctx.fillRect(bx - Math.round(cw * 0.5), by - th, cw, th);
     ctx.fillStyle = '#22c55e';
@@ -582,15 +585,10 @@ export function renderWorldObject3D(params: {
       const okCapR = projectInto(prop.x + gw * 0.68, groundY + gh + 0.3, prop.z, wp5);
       if (okL && okR && okTL && okTR && okCapL && okCapR) {
         const postW = Math.max(2, Math.round(0.32 * sc));
-        if (nearOutline) {
-          ctx.fillStyle = '#090d16';
-          ctx.fillRect(Math.round(wp0.x - postW * 0.5) - 1, Math.round(wp2.y), postW + 2, Math.round(wp0.y - wp2.y));
-          ctx.fillRect(Math.round(wp1.x - postW * 0.5) - 1, Math.round(wp3.y), postW + 2, Math.round(wp1.y - wp3.y));
-        }
         ctx.fillStyle = '#dc2626';
         ctx.fillRect(Math.round(wp0.x - postW * 0.5), Math.round(wp2.y), postW, Math.round(wp0.y - wp2.y));
         ctx.fillRect(Math.round(wp1.x - postW * 0.5), Math.round(wp3.y), postW, Math.round(wp1.y - wp3.y));
-        ctx.fillStyle = '#090d16';
+        ctx.fillStyle = '#1e293b';
         ctx.fillRect(Math.round(wp4.x), Math.round(wp4.y - postW * 0.8), Math.round(wp5.x - wp4.x), Math.max(2, Math.round(postW * 0.9)));
         ctx.fillStyle = '#ef4444';
         ctx.fillRect(Math.round(wp4.x + 1), Math.round(wp4.y), Math.round(wp5.x - wp4.x - 2), Math.max(2, Math.round(postW * 0.75)));
@@ -892,15 +890,6 @@ export function renderBridgeTrussArch3D(params: {
   const tRy = Math.round(wp3.y);
 
   ctx.globalAlpha = fogAlpha;
-  ctx.strokeStyle = '#090d16';
-  ctx.lineWidth = beamW + 2;
-  ctx.beginPath();
-  ctx.moveTo(bLx, bLy);
-  ctx.lineTo(tLx, tLy);
-  ctx.lineTo(tRx, tRy);
-  ctx.lineTo(bRx, bRy);
-  ctx.stroke();
-
   ctx.strokeStyle = biome.isNight ? '#334155' : '#94a3b8';
   ctx.lineWidth = beamW;
   ctx.beginPath();
@@ -981,17 +970,6 @@ export function renderRealisticRoadsideLandmarks3D(params: {
       const ok4 = projectInto(pt.x + pt.nx * (hw + 0.5), pt.y + gateH, pt.z + pt.nz * (hw + 0.5), wp3, 0.55);
       if (ok1 && ok2 && ok3 && ok4) {
         const beamW = Math.max(2, Math.round(0.30 * far.cM.scale));
-        ctx.strokeStyle = '#090d16';
-        ctx.lineWidth = beamW + 2;
-        ctx.beginPath();
-        ctx.moveTo(Math.round(wp0.x), Math.round(wp0.y));
-        ctx.lineTo(Math.round(wp2.x), Math.round(wp2.y));
-        ctx.moveTo(Math.round(wp1.x), Math.round(wp1.y));
-        ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y));
-        ctx.moveTo(Math.round(wp2.x - 4), Math.round(wp2.y + 1));
-        ctx.lineTo(Math.round(wp3.x + 4), Math.round(wp3.y + 1));
-        ctx.stroke();
-
         ctx.strokeStyle = '#b91c1c';
         ctx.lineWidth = beamW;
         ctx.beginPath();
@@ -1063,18 +1041,7 @@ export function renderRealisticRoadsideLandmarks3D(params: {
           ctx.lineTo(Math.round(wp5.x), Math.round(wp5.y));
           ctx.stroke();
         }
-        ctx.strokeStyle = '#090d16';
-        ctx.lineWidth = beamW + 2;
-        ctx.beginPath();
-        ctx.moveTo(Math.round(wp0.x), Math.round(wp0.y));
-        ctx.lineTo(Math.round(wp2.x), Math.round(wp2.y));
-        ctx.moveTo(Math.round(wp1.x), Math.round(wp1.y));
-        ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y));
-        ctx.moveTo(Math.round(wp2.x), Math.round(wp2.y + 4));
-        ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y + 4));
-        ctx.stroke();
-
-        ctx.strokeStyle = '#e2e8f0';
+        ctx.strokeStyle = '#cbd5e1';
         ctx.lineWidth = beamW;
         ctx.beginPath();
         ctx.moveTo(Math.round(wp0.x), Math.round(wp0.y));
@@ -1215,15 +1182,6 @@ export function renderFinishGate3D(params: {
   }
 
   // Twin Red/White Motorsport Tower Pylons
-  ctx.strokeStyle = '#090d16';
-  ctx.lineWidth = pylonW + 2;
-  ctx.beginPath();
-  ctx.moveTo(wp0.x, wp0.y);
-  ctx.lineTo(wp2.x, wp2.y);
-  ctx.moveTo(wp1.x, wp1.y);
-  ctx.lineTo(wp3.x, wp3.y);
-  ctx.stroke();
-
   ctx.strokeStyle = '#ef4444';
   ctx.lineWidth = pylonW;
   ctx.beginPath();
@@ -2207,20 +2165,20 @@ export function renderCaveTunnelSegment3D(params: {
     : fogAlpha * Math.min(1, 0.55 + blend * 0.45);
   const illum = Math.max(0, Math.min(1.25, headlightWallIllum));
   const wallRamp =
-    illum > 0.24
+    illum > 0.18
       ? ramps.caveWallLit
-      : illum > 0.06 || far.rawZ <= 42
+      : illum > 0.04 || far.rawZ <= 68
       ? ramps.caveWall
       : ramps.caveWallDeep;
-  const ceilRamp = illum > 0.3 ? ramps.caveCeilingLit : ramps.caveCeiling;
-  const wallTintBias = illum * 0.32;
+  const ceilRamp = illum > 0.2 ? ramps.caveCeilingLit : ramps.caveCeiling;
+  const wallTintBias = 0.14 + illum * 0.34;
 
   ctx.save();
 
-  // Deep cavern blackness backdrop on portal mouth and mid-to-far cave slices so sky/hills NEVER leak through
-  if (farZone.isCavePortalIn || (blend > 0.14 && far.rawZ > 15)) {
+  // Cavern depth backdrop on portal mouth from outside, or at far vanishing depth (>106m) so mid-tunnel walls & road stay visible
+  if ((!playerInCave && farZone.isCavePortalIn) || (playerInCave && !farZone.isCavePortalOut && blend > 0.45 && far.rawZ > 106)) {
     ctx.globalAlpha = Math.max(fogAlpha, 0.92);
-    ctx.fillStyle = illum > 0.28 ? pickRampColor(ramps.caveCeilingLit, 0.12) : ch.caveCeiling;
+    ctx.fillStyle = illum > 0.2 ? pickRampColor(ramps.caveCeilingLit, 0.34) : pickRampColor(ramps.caveWall, 0.32);
     ctx.beginPath();
     ctx.moveTo(cvFL0.x, cvFL0.y + 4);
     ctx.lineTo(cvFL_S.x, cvFL_S.y);
@@ -2371,13 +2329,13 @@ export function renderCaveTunnelSegment3D(params: {
     const pulse = 0.72 + 0.28 * Math.sin(nowMs * 0.004 + fpt.index);
     const cryCol = fpt.index % 8 === 1 ? ch.crystalPrimary : ch.crystalSecondary;
 
-    ctx.globalAlpha = fogAlpha * 0.18 * pulse;
+    ctx.globalAlpha = fogAlpha * 0.26 * pulse;
     ctx.fillStyle = cryCol;
     ctx.beginPath();
-    ctx.arc(wallX + dir * len * 0.35, wallY, Math.max(5, len * 1.45), 0, Math.PI * 2);
+    ctx.arc(wallX + dir * len * 0.35, wallY, Math.max(5, len * 1.65), 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.globalAlpha = fogAlpha * 0.92;
+    ctx.globalAlpha = fogAlpha * 0.94;
     for (let k = -1; k <= 1; k++) {
       const prongLen = len * (k === 0 ? 1.05 : 0.72);
       const tilt = k * thick * 1.45;
@@ -2401,17 +2359,17 @@ export function renderCaveTunnelSegment3D(params: {
     const lx = isLeft ? cvFL1.x + (cvFL_S.x - cvFL1.x) * 0.45 : cvFR1.x + (cvFR_S.x - cvFR1.x) * 0.45;
     const ly = isLeft ? cvFL1.y + (cvFL_S.y - cvFL1.y) * 0.45 : cvFR1.y + (cvFR_S.y - cvFR1.y) * 0.45;
     const sc = far.cM.scale;
-    const glowR = Math.max(7, sc * 1.65);
+    const glowR = Math.max(9, sc * 2.15);
 
-    ctx.globalAlpha = fogAlpha * 0.11;
+    ctx.globalAlpha = fogAlpha * 0.18;
     ctx.fillStyle = ch.lanternGlow;
     ctx.beginPath();
     ctx.arc(lx, ly, glowR, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.globalAlpha = fogAlpha * 0.22;
+    ctx.globalAlpha = fogAlpha * 0.34;
     ctx.beginPath();
-    ctx.arc(lx, ly, glowR * 0.52, 0, Math.PI * 2);
+    ctx.arc(lx, ly, glowR * 0.54, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.globalAlpha = fogAlpha;
@@ -2575,10 +2533,10 @@ export function renderAdventureRoadSlice3D(params: {
     drawQuadPtsDirect(ctx, far.pR, near.pR, near.uR, far.uR, '#42240d', far.rawZ < 64 ? '#291507' : undefined);
   } else {
     const sideWallL = inCave
-      ? roadIllum > 0.25 ? '#3b3c42' : '#1b1a19'
+      ? roadIllum > 0.25 ? '#4b5263' : '#393f4c'
       : '#35482b';
     const sideWallR = inCave
-      ? roadIllum > 0.25 ? '#2d2e33' : '#141313'
+      ? roadIllum > 0.25 ? '#3e4452' : '#2f3440'
       : '#263420';
     drawQuadPtsDirect(ctx, far.pL, near.pL, near.uL, far.uL, sideWallL);
     drawQuadPtsDirect(ctx, far.pR, near.pR, near.uR, far.uR, sideWallR);
@@ -2589,10 +2547,10 @@ export function renderAdventureRoadSlice3D(params: {
     ? plankTone > 0.5 ? '#7c4a21' : '#6b3e1b'
     : inCave
     ? roadIllum > 0.45
-      ? plankTone > 0.5 ? '#3c404b' : '#353944'
+      ? plankTone > 0.5 ? '#4e5668' : '#474e5e'
       : roadIllum > 0.14
-      ? plankTone > 0.5 ? '#2c2f38' : '#262931'
-      : plankTone > 0.5 ? '#16171c' : '#131419'
+      ? plankTone > 0.5 ? '#3f4656' : '#393f4d'
+      : plankTone > 0.5 ? '#323845' : '#2d323e'
     : plankTone > 0.5 ? '#3b3f45' : '#373b40';
   drawQuadPtsDirect(ctx, far.pL, far.pR, near.pR, near.pL, deckColor);
 
@@ -2641,10 +2599,10 @@ export function renderAdventureRoadSlice3D(params: {
     ? '#b45309'
     : inCave
     ? roadIllum > 0.08
-      ? getHeadlightRgba(headlightBeamColor, Math.min(0.88, 0.34 + roadIllum * 0.54))
-      : 'rgba(148, 163, 184, 0.20)'
+      ? getHeadlightRgba(headlightBeamColor, Math.min(0.88, 0.42 + roadIllum * 0.46))
+      : 'rgba(203, 213, 225, 0.36)'
     : 'rgba(226, 232, 240, 0.42)';
-  ctx.globalAlpha = fogAlpha * (inCave ? (roadIllum > 0.08 ? 0.85 : 0.32) : 0.46);
+  ctx.globalAlpha = fogAlpha * (inCave ? (roadIllum > 0.08 ? 0.88 : 0.48) : 0.46);
   ctx.lineWidth = Math.max(1.1, 0.09 * nearLineScale);
   ctx.beginPath();
   ctx.moveTo(far.pL.x, far.pL.y);
@@ -2659,8 +2617,8 @@ export function renderAdventureRoadSlice3D(params: {
       ? 'rgba(254, 243, 199, 0.38)'
       : inCave
       ? roadIllum > 0.08
-        ? getHeadlightRgba(headlightBeamColor, Math.min(0.9, 0.36 + roadIllum * 0.52))
-        : 'rgba(148, 163, 184, 0.22)'
+        ? getHeadlightRgba(headlightBeamColor, Math.min(0.9, 0.44 + roadIllum * 0.46))
+        : 'rgba(203, 213, 225, 0.38)'
       : 'rgba(253, 224, 71, 0.42)';
     ctx.lineWidth = Math.max(1.1, 0.08 * nearLineScale);
     ctx.beginPath();
@@ -2673,8 +2631,8 @@ export function renderAdventureRoadSlice3D(params: {
     const isInsideLeft = fpt.curvature < 0;
     const curbCol = inCave
       ? roadIllum > 0.22
-        ? fpt.index % 2 === 0 ? '#4b5263' : '#636c80'
-        : fpt.index % 2 === 0 ? '#1c1e24' : '#24262e'
+        ? fpt.index % 2 === 0 ? '#5c6478' : '#737d94'
+        : fpt.index % 2 === 0 ? '#3a404f' : '#464d5e'
       : fpt.index % 2 === 0 ? '#4d5444' : '#5e5b52';
     if (isInsideLeft) {
       wp0.x = far.pL.x + (far.pR.x - far.pL.x) * 0.065;
@@ -2893,6 +2851,632 @@ function drawQuadPtsDirect(
     ctx.stroke();
   }
 }
+
+// ===========================================================================
+// MOUNTAIN DRIVE 3D RENDERING (Natural Roadless Dirt Mountains & Peak Jumps)
+// ===========================================================================
+
+const MTN_TERRAIN_LATS = [-82.0, -32.0, -13.5, -5.8, 5.8, 13.5, 32.0, 82.0];
+
+function fillMountainTerrainRow(
+  pt: SCurvePoint,
+  projectInto: Project3DIntoFn,
+  row: TerrainRow
+) {
+  const refY = pt.isChasmGap ? pt.y - 3.2 : pt.y;
+  for (let k = 0; k < 8; k++) {
+    const lat = MTN_TERRAIN_LATS[k];
+    const wx = pt.x + pt.nx * lat;
+    const wz = pt.z + pt.nz * lat;
+    const wy = sampleMountainTerrainElevation(lat, wz, refY, Boolean(pt.isChasmGap));
+    row.ok[k] = projectInto(wx, wy, wz, row.pts[k], 0.55);
+  }
+}
+
+/**
+ * Renders sculpted alpine mountain slopes, earthy shoulders, granite crags, and deep canyon chasms
+ * with zero per-frame allocations.
+ */
+export function renderMountainTerrainMesh3D(params: {
+  ctx: CanvasRenderingContext2D;
+  visibleSlices: RoadSlice3D[];
+  visibleCount: number;
+  projectInto: Project3DIntoFn;
+  skyIsNight: boolean;
+}) {
+  const { ctx, visibleSlices, visibleCount, projectInto, skyIsNight } = params;
+
+  let farRow = terrainRowA;
+  let nearRow = terrainRowB;
+  let prevNearIndex = -999999;
+
+  const ridgeOuterL = skyIsNight ? '#1c2a24' : '#3d5a45';
+  const ridgeOuterR = skyIsNight ? '#15201b' : '#2e4736';
+  const midSlopeL = skyIsNight ? '#212c25' : '#4a5c42';
+  const midSlopeR = skyIsNight ? '#19221c' : '#3b4b35';
+  const shoulderDirtL = skyIsNight ? '#2b241f' : '#6a523e';
+  const shoulderDirtR = skyIsNight ? '#231d19' : '#574232';
+  const canyonFloor = skyIsNight ? '#0f172a' : '#2d353a';
+  const chasmMist = skyIsNight ? '#1e293b' : '#475569';
+
+  for (let i = 0; i < visibleCount - 1; i++) {
+    const far = visibleSlices[i];
+    const near = visibleSlices[i + 1];
+    if (Math.abs(far.pt.index - near.pt.index) > 2) continue;
+    if (far.rawZ > 154) continue;
+
+    const fpt = far.pt;
+    const npt = near.pt;
+    const fogAlpha = computeDistanceFogAlpha(far.rawZ, 108, 154);
+    if (fogAlpha <= 0.02) continue;
+
+    if (fpt.index === prevNearIndex) {
+      const tmp = farRow;
+      farRow = nearRow;
+      nearRow = tmp;
+    } else {
+      fillMountainTerrainRow(fpt, projectInto, farRow);
+    }
+    fillMountainTerrainRow(npt, projectInto, nearRow);
+    prevNearIndex = npt.index;
+
+    const fp = farRow.pts;
+    const fo = farRow.ok;
+    const np = nearRow.pts;
+    const no = nearRow.ok;
+    const inGap = Boolean(fpt.isChasmGap || npt.isChasmGap);
+    const alt = (fpt.index & 1) === 0;
+
+    ctx.globalAlpha = fogAlpha;
+
+    if (fo[0] && fo[1] && no[1] && no[0]) {
+      drawQuadDirect(ctx, fp[0], fp[1], np[1], np[0], ridgeOuterL);
+    }
+    if (fo[6] && fo[7] && no[7] && no[6]) {
+      drawQuadDirect(ctx, fp[6], fp[7], np[7], np[6], ridgeOuterR);
+    }
+    if (fo[1] && fo[2] && no[2] && no[1]) {
+      drawQuadDirect(
+        ctx,
+        fp[1],
+        fp[2],
+        np[2],
+        np[1],
+        inGap ? chasmMist : alt ? midSlopeL : '#43543b'
+      );
+    }
+    if (fo[5] && fo[6] && no[6] && no[5]) {
+      drawQuadDirect(
+        ctx,
+        fp[5],
+        fp[6],
+        np[6],
+        np[5],
+        inGap ? chasmMist : alt ? midSlopeR : '#35442f'
+      );
+    }
+    if (fo[2] && fo[3] && no[3] && no[2]) {
+      drawQuadDirect(
+        ctx,
+        fp[2],
+        fp[3],
+        np[3],
+        np[2],
+        inGap ? '#44403c' : alt ? shoulderDirtL : '#614a37'
+      );
+    }
+    if (fo[4] && fo[5] && no[5] && no[4]) {
+      drawQuadDirect(
+        ctx,
+        fp[4],
+        fp[5],
+        np[5],
+        np[4],
+        inGap ? '#3b3734' : alt ? shoulderDirtR : '#4f3c2d'
+      );
+    }
+    if (fo[3] && fo[4] && no[4] && no[3]) {
+      drawQuadDirect(
+        ctx,
+        fp[3],
+        fp[4],
+        np[4],
+        np[3],
+        inGap ? canyonFloor : skyIsNight ? '#261f1a' : '#5e4937'
+      );
+    }
+
+    // Crisp snow/granite rim highlights along distant outer mountain peaks
+    if (far.rawZ < 105 && !inGap) {
+      ctx.strokeStyle = skyIsNight ? 'rgba(148, 163, 184, 0.16)' : 'rgba(226, 232, 240, 0.28)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      if (fo[1] && no[1]) {
+        ctx.moveTo(fp[1].x, fp[1].y);
+        ctx.lineTo(np[1].x, np[1].y);
+      }
+      if (fo[6] && no[6]) {
+        ctx.moveTo(fp[6].x, fp[6].y);
+        ctx.lineTo(np[6].x, np[6].y);
+      }
+      ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1.0;
+}
+
+/**
+ * Renders Mountain Drive natural props: snow-dusted pines, granite boulders, highland scrub bushes,
+ * and rocky dirt outcrops anchored directly on the mountainside.
+ */
+export function renderMountainProp3D(params: {
+  ctx: CanvasRenderingContext2D;
+  prop: WorldProp3D;
+  roadY: number;
+  isChasmGap: boolean;
+  nowMs: number;
+  pxW: number;
+  projectInto: Project3DIntoFn;
+}) {
+  const { ctx, prop, roadY, isChasmGap, pxW, projectInto } = params;
+  if (isChasmGap && Math.abs(prop.lateralOffset) < 22) return;
+
+  const groundY = sampleMountainTerrainElevation(prop.lateralOffset, prop.z, roadY, isChasmGap);
+  if (!projectInto(prop.x, groundY, prop.z, wpBase)) return;
+  if (wpBase.x < -44 || wpBase.x > pxW + 44 || wpBase.z > 158) return;
+
+  const s = prop.scale;
+  const sc = wpBase.scale;
+  const rawZ = wpBase.z;
+  const fogAlpha = computeDistanceFogAlpha(rawZ, 102, 154);
+  if (fogAlpha <= 0.02) return;
+
+  const bx = Math.round(wpBase.x);
+  const by = Math.round(wpBase.y);
+  ctx.globalAlpha = fogAlpha;
+
+  if (prop.variant === 2) {
+    // Faceted granite mountain boulder cluster with earthy base
+    const bw = 2.1 * s;
+    const bh = 1.65 * s;
+    const okL = projectInto(prop.x - bw * 0.52, groundY, prop.z, wp0);
+    const okR = projectInto(prop.x + bw * 0.52, groundY, prop.z, wp1);
+    const okTop = projectInto(prop.x - bw * 0.12, groundY + bh, prop.z, wp2);
+    const okMid = projectInto(prop.x + bw * 0.16, groundY + bh * 0.62, prop.z + 0.4, wp3);
+    if (okL && okR && okTop && okMid) {
+      drawQuadDirect(ctx, wp0, wp3, wp2, wp0, prop.shade > 0.5 ? '#94a3b8' : '#a8a29e');
+      ctx.beginPath();
+      ctx.moveTo(wp3.x, wp3.y);
+      ctx.lineTo(wp1.x, wp1.y);
+      ctx.lineTo(wp2.x, wp2.y);
+      ctx.closePath();
+      ctx.fillStyle = '#57534e';
+      ctx.fill();
+
+      // Earth/dirt mound collar around boulder base
+      const baseRx = Math.max(3, Math.round(Math.abs(wp1.x - wp0.x) * 0.58));
+      ctx.fillStyle = '#57412f';
+      ctx.beginPath();
+      ctx.ellipse(bx, by + 1, baseRx, Math.max(1.5, baseRx * 0.28), 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1.0;
+    return;
+  }
+
+  if (prop.variant === 3) {
+    // Highland alpine scrub / dry heather bush clump
+    const bushR = Math.max(3, Math.round(0.88 * s * sc));
+    const bushH = Math.max(3, Math.round(0.75 * s * sc));
+    ctx.fillStyle = '#3f5233';
+    ctx.beginPath();
+    ctx.ellipse(bx, by - Math.round(bushH * 0.35), bushR, Math.max(2, Math.round(bushH * 0.65)), 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = prop.shade > 0.5 ? '#657c46' : '#586d3e';
+    ctx.beginPath();
+    ctx.ellipse(
+      bx - Math.round(bushR * 0.28),
+      by - Math.round(bushH * 0.55),
+      Math.max(2, Math.round(bushR * 0.62)),
+      Math.max(2, Math.round(bushH * 0.5)),
+      0,
+      0,
+      Math.PI * 2
+    );
+    ctx.ellipse(
+      bx + Math.round(bushR * 0.3),
+      by - Math.round(bushH * 0.48),
+      Math.max(2, Math.round(bushR * 0.52)),
+      Math.max(2, Math.round(bushH * 0.44)),
+      0,
+      0,
+      Math.PI * 2
+    );
+    ctx.fill();
+    ctx.globalAlpha = 1.0;
+    return;
+  }
+
+  if (prop.variant === 4) {
+    // Earthy dirt mound & rugged rock cluster / mountain stump
+    const mw = Math.max(4, Math.round(1.25 * s * sc));
+    const mh = Math.max(2, Math.round(0.55 * s * sc));
+    ctx.fillStyle = '#6e5038';
+    ctx.beginPath();
+    ctx.ellipse(bx, by, mw, mh, 0, Math.PI, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#78716c';
+    ctx.beginPath();
+    ctx.moveTo(bx - Math.round(mw * 0.45), by);
+    ctx.lineTo(bx - Math.round(mw * 0.1), by - Math.round(mh * 1.65));
+    ctx.lineTo(bx + Math.round(mw * 0.35), by);
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 1.0;
+    return;
+  }
+
+  // Snow-dusted alpine pine tree
+  if (!projectInto(prop.x, groundY + 5.8 * s, prop.z, wp0)) {
+    ctx.globalAlpha = 1.0;
+    return;
+  }
+  const th = Math.max(7, Math.round(by - wp0.y));
+  const tw = Math.max(5, Math.round(th * 0.54));
+  const trunkH = Math.max(2, Math.round(th * 0.18));
+  const trunkW = Math.max(1, Math.round(tw * 0.2));
+
+  ctx.fillStyle = '#47362b';
+  ctx.fillRect(bx - Math.round(trunkW * 0.5), by - trunkH, trunkW, trunkH);
+
+  const t0Top = by - Math.round(th * 0.52);
+  const t0Bot = by - trunkH;
+  const t0HW = Math.round(tw * 0.52);
+  const t1Top = by - Math.round(th * 0.78);
+  const t1Bot = by - Math.round(th * 0.36);
+  const t1HW = Math.round(tw * 0.41);
+  const t2Top = by - th;
+  const t2Bot = by - Math.round(th * 0.62);
+  const t2HW = Math.round(tw * 0.28);
+
+  ctx.fillStyle = prop.shade > 0.5 ? '#4e8462' : '#3d6f50';
+  ctx.beginPath();
+  ctx.moveTo(bx, t0Top);
+  ctx.lineTo(bx + t0HW, t0Bot);
+  ctx.lineTo(bx - t0HW, t0Bot);
+  ctx.closePath();
+  ctx.moveTo(bx, t1Top);
+  ctx.lineTo(bx + t1HW, t1Bot);
+  ctx.lineTo(bx - t1HW, t1Bot);
+  ctx.closePath();
+  ctx.moveTo(bx, t2Top);
+  ctx.lineTo(bx + t2HW, t2Bot);
+  ctx.lineTo(bx - t2HW, t2Bot);
+  ctx.closePath();
+  ctx.fill();
+
+  // Snow cap tip on high mountain pines
+  if (rawZ < 92 && th >= 14) {
+    ctx.fillStyle = '#e2e8f0';
+    ctx.beginPath();
+    ctx.moveTo(bx, t2Top);
+    ctx.lineTo(bx + Math.max(2, Math.round(t2HW * 0.48)), t2Top + Math.max(2, Math.round(th * 0.14)));
+    ctx.lineTo(bx - Math.max(2, Math.round(t2HW * 0.48)), t2Top + Math.max(2, Math.round(th * 0.14)));
+    ctx.closePath();
+    ctx.fill();
+  }
+  if (rawZ < 76) {
+    ctx.strokeStyle = '#14241c';
+    ctx.lineWidth = Math.max(1, Math.min(1.5, sc * 0.05));
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1.0;
+}
+
+/**
+ * Renders the roadless Mountain Drive ridge crest directly as packed mountain dirt, gravel pebbles,
+ * mossy alpine shoulders, natural wheel ruts, rock-and-earth peak jump crests, and mountain-to-mountain
+ * chasm cliff drops (zero asphalt roads or street lane markings!).
+ */
+export function renderMountainRoadSlice3D(params: {
+  ctx: CanvasRenderingContext2D;
+  far: RoadSlice3D;
+  near: RoadSlice3D;
+  fogAlpha: number;
+  nowMs: number;
+  projectInto: Project3DIntoFn;
+}) {
+  const { ctx, far, near, fogAlpha, nowMs, projectInto } = params;
+  const fpt = far.pt;
+  const npt = near.pt;
+  const farIsGap = Boolean(fpt.isChasmGap);
+  const nearIsGap = Boolean(npt.isChasmGap);
+
+  ctx.globalAlpha = fogAlpha;
+
+  // 1. Open Chasm Gap between two mountains: completely empty open canyon air!
+  if (farIsGap && nearIsGap) {
+    ctx.globalAlpha = 1.0;
+    return;
+  }
+
+  if (farIsGap && !nearIsGap) {
+    // Near slice is the takeoff mountain's sheer dirt & granite cliff face!
+    const hw = npt.width * 0.55;
+    if (
+      projectInto(npt.x - npt.nx * hw, npt.y - 18, npt.z - npt.nz * hw, wp0, 0.55) &&
+      projectInto(npt.x + npt.nx * hw, npt.y - 18, npt.z + npt.nz * hw, wp1, 0.55) &&
+      projectInto(npt.x - npt.nx * hw, npt.y - 2.6, npt.z - npt.nz * hw, wp2, 0.55) &&
+      projectInto(npt.x + npt.nx * hw, npt.y - 2.6, npt.z + npt.nz * hw, wp3, 0.55)
+    ) {
+      drawQuadDirect(ctx, wp2, wp3, wp1, wp0, '#44403c');
+      drawQuadDirect(ctx, near.pL, near.pR, wp3, wp2, '#6b4c35');
+    }
+    ctx.globalAlpha = 1.0;
+    return;
+  }
+
+  if (!farIsGap && nearIsGap) {
+    // Far slice is the opposite mountain peak rising across the chasm!
+    const hw = fpt.width * 0.58;
+    if (
+      projectInto(fpt.x - fpt.nx * hw, fpt.y - 20, fpt.z - fpt.nz * hw, wp0, 0.55) &&
+      projectInto(fpt.x + fpt.nx * hw, fpt.y - 20, fpt.z + fpt.nz * hw, wp1, 0.55) &&
+      projectInto(fpt.x - fpt.nx * hw, fpt.y - 2.8, fpt.z - fpt.nz * hw, wp2, 0.55) &&
+      projectInto(fpt.x + fpt.nx * hw, fpt.y - 2.8, fpt.z + fpt.nz * hw, wp3, 0.55)
+    ) {
+      // Lower jagged granite cliff wall + upper warm soil strata cap
+      drawQuadDirect(ctx, wp2, wp3, wp1, wp0, '#57534e');
+      drawQuadDirect(ctx, far.pL, far.pR, wp3, wp2, '#7c583c');
+      // Natural sunlit dusty sandstone/ochre rim highlight on opposite mountain crest
+      ctx.strokeStyle = '#d99058';
+      ctx.lineWidth = Math.max(2, 0.2 * far.cM.scale);
+      ctx.beginPath();
+      ctx.moveTo(far.pL.x, far.pL.y);
+      ctx.lineTo(far.pR.x, far.pR.y);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1.0;
+    return;
+  }
+
+  const isRamp = Boolean(fpt.isMountainRamp || npt.isMountainRamp);
+  const isNearMid = far.rawZ < 72;
+  const nearScale = Math.min(near.cM.scale, 95);
+  const farScale = Math.min(far.cM.scale, 95);
+  const alt = (fpt.index & 1) === 0;
+
+  // 2. Sculpted Rocky & Earthy Mountain Side Flanks blending seamlessly into terrain mesh
+  if (isRamp) {
+    drawQuadPtsDirect(ctx, far.pL, near.pL, near.uL, far.uL, '#735036');
+    drawQuadPtsDirect(ctx, far.pR, near.pR, near.uR, far.uR, '#573d29');
+  } else {
+    drawQuadPtsDirect(ctx, far.pL, near.pL, near.uL, far.uL, alt ? '#664e3a' : '#5e4735');
+    drawQuadPtsDirect(ctx, far.pR, near.pR, near.uR, far.uR, alt ? '#523e2e' : '#4a3829');
+  }
+
+  // 3. Natural Mountain Dirt Surface (NO asphalt!)
+  const patchMod = Math.abs(Math.sin(fpt.index * 2.31)) % 1;
+  const dirtDeckCol = isRamp
+    ? alt
+      ? '#946239'
+      : '#875731'
+    : patchMod > 0.66
+    ? '#7e5d40'
+    : alt
+    ? '#74543a'
+    : '#6b4d35';
+  drawQuadPtsDirect(ctx, far.pL, far.pR, near.pR, near.pL, dirtDeckCol);
+
+  // Irregular mossy alpine grass & rocky soil encroachment along rugged ridge edges
+  const farEdgeWL = 0.065 + 0.075 * (0.5 + 0.5 * Math.sin(fpt.index * 1.43));
+  const nearEdgeWL = 0.065 + 0.075 * (0.5 + 0.5 * Math.sin(npt.index * 1.43));
+  const farEdgeWR = 0.065 + 0.075 * (0.5 + 0.5 * Math.cos(fpt.index * 1.27));
+  const nearEdgeWR = 0.065 + 0.075 * (0.5 + 0.5 * Math.cos(npt.index * 1.27));
+  const grassL = alt ? '#4d683b' : '#587143';
+  const grassR = alt ? '#415831' : '#4b6239';
+
+  wp0.x = far.pL.x + (far.pR.x - far.pL.x) * farEdgeWL;
+  wp0.y = far.pL.y + (far.pR.y - far.pL.y) * farEdgeWL;
+  wp1.x = near.pL.x + (near.pR.x - near.pL.x) * nearEdgeWL;
+  wp1.y = near.pL.y + (near.pR.y - near.pL.y) * nearEdgeWL;
+  drawQuadPtsDirect(ctx, far.pL, wp0, wp1, near.pL, isRamp ? '#7d5b3b' : grassL);
+
+  wp0.x = far.pR.x - (far.pR.x - far.pL.x) * farEdgeWR;
+  wp0.y = far.pR.y - (far.pR.y - far.pL.y) * farEdgeWR;
+  wp1.x = near.pR.x - (near.pR.x - near.pL.x) * nearEdgeWR;
+  wp1.y = near.pR.y - (near.pR.y - near.pL.y) * nearEdgeWR;
+  drawQuadPtsDirect(ctx, wp0, far.pR, near.pR, wp1, isRamp ? '#6b4d31' : grassR);
+
+  // Subtle sun-baked lighter dirt center mound & packed twin tire trail ruts
+  const rutSwayF = Math.sin(fpt.index * 0.35) * 0.04;
+  const rutSwayN = Math.sin(npt.index * 0.35) * 0.04;
+  const crownLF = 0.39 + rutSwayF;
+  const crownRF = 0.61 + rutSwayF;
+  const crownLN = 0.39 + rutSwayN;
+  const crownRN = 0.61 + rutSwayN;
+  wp0.x = far.pL.x + (far.pR.x - far.pL.x) * crownLF;
+  wp0.y = far.pL.y + (far.pR.y - far.pL.y) * crownLF;
+  wp1.x = far.pL.x + (far.pR.x - far.pL.x) * crownRF;
+  wp1.y = far.pL.y + (far.pR.y - far.pL.y) * crownRF;
+  wp2.x = near.pL.x + (near.pR.x - near.pL.x) * crownRN;
+  wp2.y = near.pL.y + (near.pR.y - near.pL.y) * crownRN;
+  wp3.x = near.pL.x + (near.pR.x - near.pL.x) * crownLN;
+  wp3.y = near.pL.y + (near.pR.y - near.pL.y) * crownLN;
+  drawQuadPtsDirect(ctx, wp0, wp1, wp2, wp3, isRamp ? '#a16f44' : alt ? '#8a6648' : '#805e41');
+
+  // Natural worn dark-earth tire ruts meandering slightly along the mountain dirt
+  if (far.rawZ < 92) {
+    ctx.strokeStyle = isRamp ? 'rgba(92, 52, 24, 0.56)' : 'rgba(72, 49, 31, 0.52)';
+    ctx.lineWidth = Math.max(1.5, 0.28 * nearScale);
+    const lRutF = 0.33 + rutSwayF;
+    const lRutN = 0.33 + rutSwayN;
+    const rRutF = 0.67 + rutSwayF;
+    const rRutN = 0.67 + rutSwayN;
+    ctx.beginPath();
+    ctx.moveTo(far.pL.x + (far.pR.x - far.pL.x) * lRutF, far.pL.y + (far.pR.y - far.pL.y) * lRutF);
+    ctx.lineTo(near.pL.x + (near.pR.x - near.pL.x) * lRutN, near.pL.y + (near.pR.y - near.pL.y) * lRutN);
+    ctx.moveTo(far.pL.x + (far.pR.x - far.pL.x) * rRutF, far.pL.y + (far.pR.y - far.pL.y) * rRutF);
+    ctx.lineTo(near.pL.x + (near.pR.x - near.pL.x) * rRutN, near.pL.y + (near.pR.y - near.pL.y) * rRutN);
+    ctx.stroke();
+  }
+
+  // Scattered mountain dirt details: organic rounded dirt clods, stones & mossy earth clumps
+  if (isNearMid) {
+    const hash = Math.abs(Math.sin(fpt.index * 12.9898) * 43758.5453) % 1;
+    const p1u = 0.16 + ((hash * 3.7) % 0.68);
+    const p2u = 0.14 + ((hash * 7.3) % 0.72);
+    const p1x = far.pL.x + (far.pR.x - far.pL.x) * p1u;
+    const p1y = far.pL.y + (far.pR.y - far.pL.y) * p1u;
+    const p2x = near.pL.x + (near.pR.x - near.pL.x) * p2u;
+    const p2y = near.pL.y + (near.pR.y - near.pL.y) * p2u;
+    const clodRx = Math.min(8, Math.max(2, Math.round(0.24 * farScale)));
+    const clodRy = Math.min(4, Math.max(1.2, Math.round(0.11 * farScale)));
+
+    ctx.fillStyle = hash > 0.55 ? '#543c29' : '#8c694a';
+    ctx.beginPath();
+    ctx.ellipse(p1x, p1y, clodRx, clodRy, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = hash > 0.35 ? '#78716c' : '#5e432d';
+    ctx.beginPath();
+    ctx.ellipse(p2x, p2y, Math.max(1.5, clodRx * 0.78), Math.max(1, clodRy * 0.78), 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Scattered mossy earth & small shoulder rocks along irregular ridge edge
+    if (fpt.index % 2 === 0) {
+      const tuftR = Math.min(7, Math.max(2, Math.round(0.22 * farScale)));
+      ctx.fillStyle = '#57534e';
+      ctx.beginPath();
+      ctx.arc(far.pL.x + tuftR * 0.6, far.pL.y, tuftR, 0, Math.PI * 2);
+      ctx.arc(far.pR.x - tuftR * 0.6, far.pR.y, tuftR * 0.85, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // 4. Mountain Peak Jump Crest Indicators (dust chevrons + backcountry expedition flags)
+  if (isRamp) {
+    const pulse = (Math.floor(nowMs / 140) + fpt.index) % 2 === 0;
+    const chevW = Math.max(5, Math.round(1.85 * farScale));
+    const chevH = Math.max(3, Math.round(1.05 * farScale));
+    ctx.strokeStyle = pulse ? '#fbbf24' : '#f97316';
+    ctx.lineWidth = Math.max(2, Math.round(0.22 * farScale));
+    ctx.beginPath();
+    ctx.moveTo(far.cM.x - chevW, far.cM.y + chevH * 0.4);
+    ctx.lineTo(far.cM.x, far.cM.y - chevH * 0.55);
+    ctx.lineTo(far.cM.x + chevW, far.cM.y + chevH * 0.4);
+    ctx.stroke();
+
+    // Rustic wooden trail stakes & fluttering orange expedition flags at jump entry & takeoff cliff lip
+    if (!npt.isMountainRamp || !trackPointHasPrevRamp(fpt)) {
+      const flagH = Math.max(6, 2.25 * farScale);
+      const flagW = Math.max(4, 1.05 * farScale);
+      const wave = Math.sin(nowMs * 0.01 + fpt.index) * (flagW * 0.25);
+      for (const sideBase of [far.pL, far.pR]) {
+        ctx.strokeStyle = '#5c3a21';
+        ctx.lineWidth = Math.max(1.5, 0.16 * farScale);
+        ctx.beginPath();
+        ctx.moveTo(sideBase.x, sideBase.y);
+        ctx.lineTo(sideBase.x, sideBase.y - flagH);
+        ctx.stroke();
+
+        ctx.fillStyle = '#f97316';
+        ctx.beginPath();
+        ctx.moveTo(sideBase.x, sideBase.y - flagH);
+        ctx.lineTo(sideBase.x + flagW, sideBase.y - flagH + flagH * 0.18 + wave);
+        ctx.lineTo(sideBase.x, sideBase.y - flagH + flagH * 0.38);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+  } else if (fpt.hasJumpChevron && isNearMid) {
+    // Opposite mountain landing zone: dusty emerald backcountry trail flags + earth arrow
+    const lcW = Math.max(4, Math.round(1.4 * farScale));
+    const lcH = Math.max(2.5, Math.round(0.75 * farScale));
+    ctx.strokeStyle = 'rgba(110, 231, 183, 0.72)';
+    ctx.lineWidth = Math.max(1.8, Math.round(0.18 * farScale));
+    ctx.beginPath();
+    ctx.moveTo(far.cM.x - lcW, far.cM.y + lcH * 0.45);
+    ctx.lineTo(far.cM.x, far.cM.y - lcH * 0.45);
+    ctx.lineTo(far.cM.x + lcW, far.cM.y + lcH * 0.45);
+    ctx.stroke();
+
+    if (fpt.index % 2 === 0) {
+      const stH = Math.max(4, 1.35 * farScale);
+      const stW = Math.max(3, 0.75 * farScale);
+      for (const sideBase of [far.pL, far.pR]) {
+        ctx.strokeStyle = '#5c3a21';
+        ctx.lineWidth = Math.max(1.5, 0.14 * farScale);
+        ctx.beginPath();
+        ctx.moveTo(sideBase.x, sideBase.y);
+        ctx.lineTo(sideBase.x, sideBase.y - stH);
+        ctx.stroke();
+        ctx.fillStyle = '#34d399';
+        ctx.fillRect(sideBase.x, sideBase.y - stH, stW, Math.max(2, stH * 0.32));
+      }
+    }
+  }
+
+  // 5. Embedded Nitro Wind-Trail Crystal / Dirt Boost Chevron
+  if (fpt.hasBoostPad && !fpt.boostTriggered) {
+    const padW = Math.max(4, Math.round(1.5 * farScale));
+    ctx.fillStyle = '#06b6d4';
+    ctx.beginPath();
+    ctx.moveTo(Math.round(far.cM.x), Math.round(far.cM.y - padW * 0.65));
+    ctx.lineTo(Math.round(far.cM.x + padW), Math.round(far.cM.y + padW * 0.5));
+    ctx.lineTo(Math.round(far.cM.x - padW), Math.round(far.cM.y + padW * 0.5));
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#cffafe';
+    ctx.fillRect(Math.round(far.cM.x - 1), Math.round(far.cM.y - padW * 0.25), 2, Math.max(2, Math.round(padW * 0.5)));
+  }
+
+  // 6. Rustic Timber Alpine Trailhead Archway (`PEAK N`)
+  if (!isRamp && fpt.index > 16 && (fpt.index - 11) % 40 === 14 && far.rawZ > 11 && far.rawZ < 122) {
+    const hw = fpt.width * 0.56;
+    const archH = 5.1;
+    if (
+      projectInto(fpt.x - fpt.nx * hw, fpt.y, fpt.z - fpt.nz * hw, wp0, 0.55) &&
+      projectInto(fpt.x + fpt.nx * hw, fpt.y, fpt.z + fpt.nz * hw, wp1, 0.55) &&
+      projectInto(fpt.x - fpt.nx * hw, fpt.y + archH, fpt.z - fpt.nz * hw, wp2, 0.55) &&
+      projectInto(fpt.x + fpt.nx * hw, fpt.y + archH, fpt.z + fpt.nz * hw, wp3, 0.55)
+    ) {
+      const colW = Math.min(11, Math.max(2.5, Math.round(0.28 * farScale)));
+      ctx.strokeStyle = '#5c3a21';
+      ctx.lineWidth = colW;
+      ctx.beginPath();
+      ctx.moveTo(wp0.x, wp0.y);
+      ctx.lineTo(wp2.x, wp2.y);
+      ctx.moveTo(wp1.x, wp1.y);
+      ctx.lineTo(wp3.x, wp3.y);
+      ctx.stroke();
+
+      const midX = (wp2.x + wp3.x) * 0.5;
+      const midY = (wp2.y + wp3.y) * 0.5;
+      const banW = Math.max(16, Math.abs(wp3.x - wp2.x));
+      const banH = Math.min(32, Math.max(5, 0.85 * farScale));
+      ctx.fillStyle = '#3b2414';
+      ctx.fillRect(midX - banW * 0.5, midY - banH * 0.5, banW, banH);
+      ctx.fillStyle = '#d97706';
+      ctx.fillRect(midX - banW * 0.5, midY - banH * 0.5, banW, Math.max(1.5, banH * 0.22));
+      if (banW >= 34) {
+        ctx.textAlign = 'center';
+        ctx.font = `bold ${Math.max(6, Math.round(banH * 0.56))}px "Chakra Petch", monospace`;
+        ctx.fillStyle = '#fef3c7';
+        ctx.fillText(`PEAK ${fpt.mountainPeakNum ?? 1}`, midX, midY + banH * 0.28);
+      }
+    }
+  }
+
+  ctx.globalAlpha = 1.0;
+}
+
+function trackPointHasPrevRamp(pt: SCurvePoint): boolean {
+  const c = (pt.index - 11) % 40;
+  return c > 29 && c < 33;
+}
+
+
 
 
 

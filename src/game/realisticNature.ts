@@ -72,13 +72,25 @@ export function sampleCaveWallProfile(sliceIndex: number, side: -1 | 1): CaveWal
   };
 }
 
-function parseHexRgb(hex: string): [number, number, number] {
-  const clean = hex.replace('#', '');
+function parseHexRgb(hexOrRgb: string): [number, number, number] {
+  const trimmed = hexOrRgb.trim();
+  if (trimmed.startsWith('rgb')) {
+    const parts = trimmed.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+    if (parts) {
+      return [
+        Math.max(0, Math.min(255, Number(parts[1]))),
+        Math.max(0, Math.min(255, Number(parts[2]))),
+        Math.max(0, Math.min(255, Number(parts[3]))),
+      ];
+    }
+  }
+  const clean = trimmed.replace('#', '');
   const full =
     clean.length === 3
       ? clean[0] + clean[0] + clean[1] + clean[1] + clean[2] + clean[2]
       : clean;
   const num = parseInt(full, 16);
+  if (Number.isNaN(num)) return [64, 72, 92];
   return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
 }
 
@@ -123,10 +135,10 @@ export function getChapterTerrainRamps(ch: AdventureChapterSpec): ChapterTerrain
   const caveWallLit: string[] = [];
   const caveCeilingLit: string[] = [];
 
-  const litWallLow = lerpHexColor(ch.caveWallMid, '#6f737d', 0.42);
-  const litWallHigh = ch.featureBias === 'amber_cave' ? '#9e826b' : '#8e96a6';
-  const litCeilLow = lerpHexColor(ch.caveCeiling, ch.caveWallMid, 0.55);
-  const litCeilHigh = lerpHexColor(ch.caveWallMid, '#697080', 0.35);
+  const litWallLow = lerpHexColor(ch.caveWallMid, '#8d96a8', 0.45);
+  const litWallHigh = ch.featureBias === 'amber_cave' ? '#bfa086' : '#aeb8cc';
+  const litCeilLow = lerpHexColor(ch.caveCeiling, ch.caveWallMid, 0.72);
+  const litCeilHigh = lerpHexColor(ch.caveWallMid, '#8b95a8', 0.45);
 
   for (let i = 0; i < RAMP_STEPS; i++) {
     const t = i / (RAMP_STEPS - 1);
@@ -136,7 +148,7 @@ export function getChapterTerrainRamps(ch: AdventureChapterSpec): ChapterTerrain
     hillMist.push(lerpHexColor(ch.terrainHillDark, '#3b5849', 0.45 + t * 0.42));
     bank.push(lerpHexColor(ch.terrainBankDark, ch.terrainBankLight, t));
     caveWall.push(lerpHexColor(ch.caveWallDark, ch.caveWallMid, t));
-    caveWallDeep.push(lerpHexColor('#08090c', ch.caveWallDark, t * 0.78));
+    caveWallDeep.push(lerpHexColor(ch.caveCeiling, ch.caveWallDark, 0.25 + t * 0.75));
     caveCeiling.push(lerpHexColor(ch.caveCeiling, ch.caveWallDark, t));
     caveWallLit.push(lerpHexColor(litWallLow, litWallHigh, t));
     caveCeilingLit.push(lerpHexColor(litCeilLow, litCeilHigh, t));

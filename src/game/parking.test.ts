@@ -14,25 +14,56 @@ import {
   stepParkingPhysics,
 } from './parking';
 
-test('createParkingStages returns 6 distinct isolated precision parking & gymkhana stages', () => {
+test('createParkingStages returns 12 distinct isolated precision parking & gymkhana stages', () => {
   const stagesA = createParkingStages();
   const stagesB = createParkingStages();
 
-  assert.equal(stagesA.length, 6);
+  assert.equal(stagesA.length, 12);
   assert.deepEqual(
     stagesA.map((s) => s.maneuverType),
-    ['nose_in', 'reverse_bay', 'parallel', 'slalom_reverse', 'chicane_diagonal', 'gymkhana_180']
+    [
+      'nose_in',
+      'reverse_bay',
+      'parallel',
+      'slalom_reverse',
+      'chicane_diagonal',
+      'gymkhana_180',
+      'underground_tight',
+      'loading_dock',
+      'three_point_turn',
+      'offset_chicane_parallel',
+      'double_slalom_bay',
+      'valet_gauntlet',
+    ]
   );
 
   // Mutating stage clone A must not leak into stage clone B
   stagesA[0].cones[0].knocked = true;
   assert.equal(stagesB[0].cones[0].knocked, false);
 
+  const ids = new Set<string>();
   for (let i = 0; i < stagesA.length; i++) {
-    assert.equal(stagesA[i].stageNumber, i + 1);
-    assert.ok(stagesA[i].targetBay.width >= 3.0);
-    assert.ok(stagesA[i].targetBay.length >= 5.0);
-    assert.ok(stagesA[i].parkedCars.length >= 2);
+    const st = stagesA[i];
+    assert.equal(st.stageNumber, i + 1);
+    assert.equal(ids.has(st.id), false, `Duplicate stage id: ${st.id}`);
+    ids.add(st.id);
+    assert.ok(st.targetBay.width >= 3.0);
+    assert.ok(st.targetBay.length >= 5.0);
+    assert.ok(st.parkedCars.length >= 2);
+
+    // Every stage spawn must have generous clearance from parked cars & barriers
+    const spawnState = createInitialParkingState(st);
+    const spawnProx = evaluateParkingProximity(spawnState, st);
+    assert.ok(spawnProx.minClearanceM > 0.75, `Stage ${st.stageNumber} spawn too tight: ${spawnProx.minClearanceM}m`);
+
+    // Every stage target bay must accept a perfectly aligned stopped car once gates are cleared
+    for (const g of st.slalomGates) g.passed = true;
+    const goalState = createInitialParkingState(st);
+    goalState.x = st.targetBay.x;
+    goalState.z = st.targetBay.z;
+    goalState.heading = st.targetBay.heading;
+    const bayStatus = evaluateParkingBayStatus(goalState, st);
+    assert.equal(bayStatus.readyToLock, true, `Stage ${st.stageNumber} targetBay should lock cleanly`);
   }
 });
 

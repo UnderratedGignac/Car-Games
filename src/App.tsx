@@ -14,11 +14,17 @@ import {
   DEFAULT_CUSTOMIZATION,
   ENGINE_OPTIONS,
   GameModeId,
+  ModCostCategory,
   ROAD_MODE_OPTIONS,
   RoadSelectionMode,
+  appendRecentRunRank,
   computeEffectiveCarStats,
   getDriftRank,
+  getModOwnershipKey,
   getUpgradeCost,
+  purchaseCarModUpgrade,
+  purchaseCarStylePackage,
+  purchaseGaragePreviewBundle,
   resolveCarAppearance,
   resolveRoadBiome,
 } from './game/rules';
@@ -55,10 +61,17 @@ import { LeaderboardEntry, LeaderboardModal } from './components/LeaderboardModa
 import { ArtGalleryModal } from './components/ArtGalleryModal';
 import { SteeringWheel } from './components/SteeringWheel';
 import { DailyRewardModal, isDailySpinReady } from './components/DailyRewardModal';
-import { MissionModal } from './components/MissionModal';
-import { GameSettings, SettingsModal, loadGameSettings } from './components/SettingsModal';
+import { MissionModal, MissionModalTab } from './components/MissionModal';
+import { BookOpen, ChevronRight } from 'lucide-react';
+import {
+  GameSettings,
+  SettingsModal,
+  getActiveHapticCalibration,
+  loadGameSettings,
+} from './components/SettingsModal';
 import { ShareCardModal } from './components/ShareCardModal';
 import { LevelSelectModal } from './components/LevelSelectModal';
+import { QuickGuideModal } from './components/QuickGuideModal';
 import {
   CampaignLevel,
   LevelProgressMap,
@@ -74,6 +87,7 @@ import {
 import {
   MissionType,
   getDailyMissions,
+  getRandomMissions,
   getTechnicalMissions,
   getTotalClaimableMissionsCount,
   recordMissionProgress,
@@ -155,6 +169,19 @@ export default function App() {
   });
   const [bestScore, setBestScore] = useState<number>(0);
   const [bestCombo, setBestCombo] = useState<number>(1);
+  const [recentRunRanks, setRecentRunRanks] = useState<string[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const saved = window.localStorage.getItem('neon_recent_run_ranks_v1');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((r): r is string => typeof r === 'string');
+        }
+      }
+    } catch {}
+    return [];
+  });
   const [selectedCarId, setSelectedCarId] = useState<string>('blue_jdm');
   const [unlockedCarIds, setUnlockedCarIds] = useState<string[]>(['blue_jdm']);
   const [carUpgrades, setCarUpgrades] =
@@ -171,6 +198,45 @@ export default function App() {
       }
     } catch {}
     return {};
+  });
+  const [ownedCarMods, setOwnedCarMods] = useState<Record<string, string[]>>(() => {
+    if (typeof window === 'undefined') return {};
+    const out: Record<string, string[]> = {};
+    try {
+      const saved = window.localStorage.getItem('neon_owned_mods_v1');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === 'object') {
+          for (const [carId, arr] of Object.entries(parsed)) {
+            if (Array.isArray(arr)) {
+              out[carId] = arr.filter((x): x is string => typeof x === 'string');
+            }
+          }
+        }
+      }
+      // Preserve any previously equipped non-stock items saved before ownership tracking
+      const legacyCustom = window.localStorage.getItem('apex_slash_custom_v1');
+      if (legacyCustom) {
+        const parsedCustom = JSON.parse(legacyCustom);
+        if (parsedCustom && typeof parsedCustom === 'object') {
+          for (const [carId, customObj] of Object.entries(parsedCustom)) {
+            if (!customObj || typeof customObj !== 'object') continue;
+            const ownedSet = new Set<string>(out[carId] || []);
+            for (const [k, v] of Object.entries(customObj as Record<string, unknown>)) {
+              if (typeof v !== 'string' || !v || v === 'stock' || v === 'none' || v === 'dual') continue;
+              if (k === 'underglowColor') ownedSet.add(getModOwnershipKey('underglow', v));
+              else if (k === 'hornType') ownedSet.add(getModOwnershipKey('horn', v));
+              else if (k === 'stylePackageId') ownedSet.add(getModOwnershipKey('style', v));
+              else if (k !== 'number' && k !== 'underglow' && k !== 'horn') {
+                ownedSet.add(getModOwnershipKey(k as ModCostCategory, v));
+              }
+            }
+            if (ownedSet.size > 0) out[carId] = Array.from(ownedSet);
+          }
+        }
+      }
+    } catch {}
+    return out;
   });
   const [customSpriteUrl, setCustomSpriteUrl] = useState<string>('');
   const [carDamageMap, setCarDamageMap] = useState<CarDamageMap>(() => loadSavedDamageMap());
@@ -198,10 +264,11 @@ export default function App() {
     const qMode = params.get('mode');
     if (qMode === 'traffic' || qMode === 'highway_traffic') return 'highway_traffic';
     if (qMode === 'parking' || qMode === 'park') return 'parking';
+    if (qMode === 'mountain' || qMode === 'mountain_drive') return 'mountain_drive';
     if (qMode === 'drift') return 'drift';
     try {
       const saved = window.localStorage.getItem('apex_slash_mode_v1');
-      if (saved === 'highway_traffic' || saved === 'drift' || saved === 'parking') return saved;
+      if (saved === 'highway_traffic' || saved === 'drift' || saved === 'parking' || saved === 'mountain_drive') return saved;
     } catch {}
     return 'drift';
   });
@@ -390,6 +457,8 @@ export default function App() {
     coinsCollected: number;
     overtakes?: number;
     nearMisses?: number;
+    jumpsCleared?: number;
+    bestAirTimeSec?: number;
     crashReason?: string;
     isVictory?: boolean;
   }>({
@@ -399,6 +468,8 @@ export default function App() {
     coinsCollected: 0,
     overtakes: 0,
     nearMisses: 0,
+    jumpsCleared: 0,
+    bestAirTimeSec: 0,
     crashReason: 'Guardrail Breached',
     isVictory: false,
   });
@@ -416,8 +487,9 @@ export default function App() {
   const [isArtGalleryOpen, setIsArtGalleryOpen] = useState<boolean>(false);
   const [isDailySpinOpen, setIsDailySpinOpen] = useState<boolean>(false);
   const [isMissionsOpen, setIsMissionsOpen] = useState<boolean>(false);
-  const [missionModalTab, setMissionModalTab] = useState<'daily' | 'tech'>('daily');
+  const [missionModalTab, setMissionModalTab] = useState<MissionModalTab>('daily');
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+  const [isQuickGuideOpen, setIsQuickGuideOpen] = useState<boolean>(false);
   const [isShareCardOpen, setIsShareCardOpen] = useState<boolean>(false);
   const [gameSettings, setGameSettings] = useState<GameSettings>(() => loadGameSettings());
   const steerPtrRef = useRef<{ id: number; dir: number } | null>(null);
@@ -593,7 +665,7 @@ export default function App() {
     return unsub;
   }, []);
 
-  // Sync gameSettings volumes & haptics to audio engine
+  // Sync gameSettings volumes & per-device haptic calibration to audio engine
   useEffect(() => {
     soundFX.setMixerVolumes({
       master: gameSettings.masterVolume,
@@ -602,6 +674,7 @@ export default function App() {
       engine: gameSettings.engineVolume,
     });
     soundFX.setHapticsEnabled(gameSettings.hapticsEnabled);
+    soundFX.setHapticCalibration(getActiveHapticCalibration(gameSettings).calibration);
   }, [gameSettings]);
 
   // Firebase Auth listener + Cloud SQL Profile Load
@@ -732,6 +805,8 @@ export default function App() {
       coinsCollected: number;
       overtakes?: number;
       nearMisses?: number;
+      jumpsCleared?: number;
+      bestAirTimeSec?: number;
       crashReason?: string;
       isVictory?: boolean;
     }) => {
@@ -801,6 +876,13 @@ export default function App() {
       } catch {}
       setBestScore(nextBestScore);
       setBestCombo(nextBestCombo);
+      setRecentRunRanks((prev) => {
+        const next = appendRecentRunRank(prev, finalStats.score);
+        try {
+          window.localStorage.setItem('neon_recent_run_ranks_v1', JSON.stringify(next));
+        } catch {}
+        return next;
+      });
       document.body.dataset.state = 'gameover';
       setGamePhase('gameover');
 
@@ -979,6 +1061,7 @@ export default function App() {
         isDailySpinOpen ||
         isMissionsOpen ||
         isSettingsOpen ||
+        isQuickGuideOpen ||
         isShareCardOpen ||
         isLevelSelectOpen
       ) {
@@ -989,6 +1072,7 @@ export default function App() {
           setIsDailySpinOpen(false);
           setIsMissionsOpen(false);
           setIsSettingsOpen(false);
+          setIsQuickGuideOpen(false);
           setIsShareCardOpen(false);
           setIsLevelSelectOpen(false);
         }
@@ -1182,6 +1266,221 @@ export default function App() {
     });
   };
 
+  const handlePurchaseModUpgrade = useCallback(
+    (car: CarSpec, category: ModCostCategory, optionId: string): boolean => {
+      if (!unlockedCarIds.includes(car.id)) return false;
+      const saved = carCustomizations[car.id];
+      const curCustom: CarCustomization = {
+        ...DEFAULT_CUSTOMIZATION,
+        ...saved,
+        number: saved?.number || car.decalText || '73',
+      };
+      const result = purchaseCarModUpgrade({
+        car,
+        currentCustom: curCustom,
+        ownedMods: ownedCarMods[car.id] || [],
+        coins,
+        category,
+        optionId,
+      });
+      if (!result.ok) return false;
+
+      if (result.cost > 0) {
+        setCoins(result.coins);
+        try {
+          window.localStorage.setItem('neon_coins_v1', String(result.coins));
+        } catch {}
+        soundFX.playCoinPickup(2);
+      } else {
+        soundFX.playGearShift();
+      }
+
+      const nextCustomMap = { ...carCustomizations, [car.id]: result.nextCustom };
+      const nextOwnedMap = { ...ownedCarMods, [car.id]: result.nextOwnedMods };
+      setCarCustomizations(nextCustomMap);
+      setOwnedCarMods(nextOwnedMap);
+      try {
+        window.localStorage.setItem('apex_slash_custom_v1', JSON.stringify(nextCustomMap));
+        window.localStorage.setItem('neon_owned_mods_v1', JSON.stringify(nextOwnedMap));
+      } catch {}
+
+      if (result.cost > 0) {
+        syncGarageToCloudSql({
+          coins: result.coins,
+          bestScore,
+          bestCombo,
+          selectedCarId,
+          unlockedCarIds,
+          carUpgrades,
+          customSpriteUrl,
+        });
+      }
+      return true;
+    },
+    [
+      unlockedCarIds,
+      carCustomizations,
+      ownedCarMods,
+      coins,
+      bestScore,
+      bestCombo,
+      selectedCarId,
+      carUpgrades,
+      customSpriteUrl,
+      syncGarageToCloudSql,
+    ]
+  );
+
+  const handlePurchaseStylePackage = useCallback(
+    (car: CarSpec, packageId: string): boolean => {
+      if (!unlockedCarIds.includes(car.id)) return false;
+      const saved = carCustomizations[car.id];
+      const curCustom: CarCustomization = {
+        ...DEFAULT_CUSTOMIZATION,
+        ...saved,
+        number: saved?.number || car.decalText || '73',
+      };
+      const result = purchaseCarStylePackage({
+        car,
+        currentCustom: curCustom,
+        ownedMods: ownedCarMods[car.id] || [],
+        coins,
+        packageId,
+      });
+      if (!result.ok) return false;
+
+      if (result.cost > 0) {
+        setCoins(result.coins);
+        try {
+          window.localStorage.setItem('neon_coins_v1', String(result.coins));
+        } catch {}
+        soundFX.playFeverBurst();
+      } else {
+        soundFX.playGearShift();
+      }
+
+      const nextCustomMap = { ...carCustomizations, [car.id]: result.nextCustom };
+      const nextOwnedMap = { ...ownedCarMods, [car.id]: result.nextOwnedMods };
+      setCarCustomizations(nextCustomMap);
+      setOwnedCarMods(nextOwnedMap);
+      try {
+        window.localStorage.setItem('apex_slash_custom_v1', JSON.stringify(nextCustomMap));
+        window.localStorage.setItem('neon_owned_mods_v1', JSON.stringify(nextOwnedMap));
+      } catch {}
+
+      if (result.cost > 0) {
+        syncGarageToCloudSql({
+          coins: result.coins,
+          bestScore,
+          bestCombo,
+          selectedCarId,
+          unlockedCarIds,
+          carUpgrades,
+          customSpriteUrl,
+        });
+      }
+      return true;
+    },
+    [
+      unlockedCarIds,
+      carCustomizations,
+      ownedCarMods,
+      coins,
+      bestScore,
+      bestCombo,
+      selectedCarId,
+      carUpgrades,
+      customSpriteUrl,
+      syncGarageToCloudSql,
+    ]
+  );
+
+  const handlePurchasePreviewBundle = useCallback(
+    (car: CarSpec, draftCustom: CarCustomization): boolean => {
+      if (!unlockedCarIds.includes(car.id)) return false;
+      const saved = carCustomizations[car.id];
+      const curCustom: CarCustomization = {
+        ...DEFAULT_CUSTOMIZATION,
+        ...saved,
+        number: saved?.number || car.decalText || '73',
+      };
+      const result = purchaseGaragePreviewBundle({
+        car,
+        savedCustom: curCustom,
+        draftCustom,
+        ownedMods: ownedCarMods[car.id] || [],
+        coins,
+      });
+      if (!result.ok) return false;
+
+      if (result.cost > 0) {
+        setCoins(result.coins);
+        try {
+          window.localStorage.setItem('neon_coins_v1', String(result.coins));
+        } catch {}
+        if (result.summary.pendingStylePackage) {
+          soundFX.playFeverBurst();
+        } else {
+          soundFX.playCoinPickup(2);
+        }
+      } else {
+        soundFX.playGearShift();
+      }
+
+      const nextCustomMap = { ...carCustomizations, [car.id]: result.nextCustom };
+      const nextOwnedMap = { ...ownedCarMods, [car.id]: result.nextOwnedMods };
+      setCarCustomizations(nextCustomMap);
+      setOwnedCarMods(nextOwnedMap);
+      try {
+        window.localStorage.setItem('apex_slash_custom_v1', JSON.stringify(nextCustomMap));
+        window.localStorage.setItem('neon_owned_mods_v1', JSON.stringify(nextOwnedMap));
+      } catch {}
+
+      if (result.cost > 0) {
+        syncGarageToCloudSql({
+          coins: result.coins,
+          bestScore,
+          bestCombo,
+          selectedCarId,
+          unlockedCarIds,
+          carUpgrades,
+          customSpriteUrl,
+        });
+      }
+      return true;
+    },
+    [
+      unlockedCarIds,
+      carCustomizations,
+      ownedCarMods,
+      coins,
+      bestScore,
+      bestCombo,
+      selectedCarId,
+      carUpgrades,
+      customSpriteUrl,
+      syncGarageToCloudSql,
+    ]
+  );
+
+  const handleResetCarCustomization = useCallback(
+    (car: CarSpec) => {
+      const nextCustomMap: Record<string, CarCustomization> = {
+        ...carCustomizations,
+        [car.id]: {
+          ...DEFAULT_CUSTOMIZATION,
+          number: car.decalText || '73',
+        },
+      };
+      setCarCustomizations(nextCustomMap);
+      try {
+        window.localStorage.setItem('apex_slash_custom_v1', JSON.stringify(nextCustomMap));
+      } catch {}
+      soundFX.playGearShift();
+    },
+    [carCustomizations]
+  );
+
   const handleGoogleSignIn = async () => {
     if (!auth) return;
     try {
@@ -1213,6 +1512,7 @@ export default function App() {
         carUpgrades={activeCarUpgrades}
         carCustom={activeCarCustom}
         carDamage={activeCarDamage}
+        recentRunRanks={recentRunRanks}
         onCarDamageChange={handleActiveCarDamageChange}
         customSpriteUrl={customSpriteUrl}
         roadMode={roadMode}
@@ -1390,7 +1690,7 @@ export default function App() {
               viewBox="0 0 440 112"
               className="w-full max-w-[260px] sm:max-w-[390px] mx-auto drop-shadow-[0_8px_24px_rgba(0,0,0,0.9)]"
               role="img"
-              aria-label="Neon Redline: 3D Touge & Highway Drift"
+              aria-label="Neon Redline: Touge & Highway Drift"
             >
               <polygon
                 points="26,12 418,6 396,84 10,90"
@@ -1421,13 +1721,15 @@ export default function App() {
                 fill="#06b6d4"
                 fontFamily="'JetBrains Mono', monospace"
                 fontWeight="700"
-                fontSize="10"
-                letterSpacing="1.8"
+                fontSize={gameMode === 'mountain_drive' ? '9.2' : '10'}
+                letterSpacing={gameMode === 'mountain_drive' ? '1.3' : '1.8'}
               >
                 {gameMode === 'parking'
                   ? 'PRECISION PARKING · VALET & GYMKHANA'
                   : gameMode === 'highway_traffic'
                   ? 'HIGHWAY TRAFFIC · OVERTAKE CLASH'
+                  : gameMode === 'mountain_drive'
+                  ? 'ALPINE PEAKS · SLOPES & JUMPS'
                   : 'FOREST & CAVES · ADVENTURE DRIFT'}
               </text>
             </svg>
@@ -1510,8 +1812,8 @@ export default function App() {
               </button>
             </div>
 
-            {/* 3-Mode Switcher + 5-Road Selector */}
-            <div className="grid grid-cols-3 gap-1.5" role="group" aria-label="Select Game Mode">
+            {/* 4-Mode Switcher + 5-Road Selector */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5" role="group" aria-label="Select Game Mode">
               <button
                 type="button"
                 data-mode-id="drift"
@@ -1547,6 +1849,18 @@ export default function App() {
                 }`}
               >
                 Parking
+              </button>
+              <button
+                type="button"
+                data-mode-id="mountain_drive"
+                onClick={() => handleSelectGameMode('mountain_drive')}
+                className={`min-h-[38px] sm:min-h-[40px] px-2 py-1.5 rounded-lg text-xs font-display font-bold tracking-wide transition-colors whitespace-nowrap ${
+                  gameMode === 'mountain_drive'
+                    ? 'bg-orange-400 text-slate-950'
+                    : 'bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-800'
+                }`}
+              >
+                Mountain
               </button>
             </div>
 
@@ -1630,6 +1944,8 @@ export default function App() {
                 ? 'Launch Parking Test'
                 : gameMode === 'highway_traffic'
                 ? 'Launch Highway Run'
+                : gameMode === 'mountain_drive'
+                ? 'Launch Mountain Drive'
                 : 'Launch Drift Run'}
             </button>
 
@@ -1653,16 +1969,35 @@ export default function App() {
               </button>
             </div>
 
-            <p className="text-center text-[10px] sm:text-xs text-slate-300 pt-0.5 leading-tight flex items-center justify-center gap-1.5 font-mono truncate">
-              <span className="text-cyan-400">📱 Controls:</span>
-              <span>
-                {gameSettings.controlScheme === 'swipe'
-                  ? 'Swipe Screen · Wheel · Pedals'
-                  : gameSettings.controlScheme === 'wheel'
-                  ? 'Steering Wheel · Gas / Brake'
-                  : 'Left / Right · Wheel · Pedals'}
+            <button
+              type="button"
+              data-testid="btn-quick-guide"
+              onClick={() => setIsQuickGuideOpen(true)}
+              className="w-full min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 hover:border-cyan-500/60 flex items-center justify-between gap-2 text-xs transition-colors"
+            >
+              <span className="flex items-center gap-2 font-display font-bold text-slate-100 whitespace-nowrap shrink-0">
+                <BookOpen className="w-3.5 h-3.5 text-cyan-400 shrink-0" aria-hidden="true" />
+                <span>Quick Guide</span>
               </span>
-            </p>
+              <span className="flex items-center gap-1 min-w-0 font-mono text-[10px] sm:text-[11px] text-slate-300">
+                <span className="truncate">
+                  {gameMode === 'parking'
+                    ? 'Parking'
+                    : gameMode === 'highway_traffic'
+                    ? 'Traffic'
+                    : gameMode === 'mountain_drive'
+                    ? 'Mountain'
+                    : 'S-Curve'}
+                  {' · '}
+                  {gameSettings.controlScheme === 'swipe'
+                    ? 'Swipe · Pedals'
+                    : gameSettings.controlScheme === 'wheel'
+                    ? 'Wheel · Pedals'
+                    : 'Arrows · Pedals'}
+                </span>
+                <ChevronRight className="w-3.5 h-3.5 text-cyan-400 shrink-0" aria-hidden="true" />
+              </span>
+            </button>
           </div>
         </div>
       )}
@@ -1719,6 +2054,8 @@ export default function App() {
                       ? 'STAGE'
                       : gameMode === 'highway_traffic'
                       ? 'PASSES'
+                      : gameMode === 'mountain_drive'
+                      ? 'PEAK'
                       : 'DIR'}
                   </span>
                   <span
@@ -1728,13 +2065,17 @@ export default function App() {
                         ? 'hud-stage'
                         : gameMode === 'highway_traffic'
                         ? 'hud-passes'
+                        : gameMode === 'mountain_drive'
+                        ? 'hud-peak'
                         : 'hud-dir'
                     }
                   >
                     {gameMode === 'parking'
-                      ? `${telemetry.parking?.stageNum || 1}/${telemetry.parking?.totalStages || 6}`
+                      ? `${telemetry.parking?.stageNum || 1}/${telemetry.parking?.totalStages || 12}`
                       : gameMode === 'highway_traffic'
                       ? Math.round(telemetry.overtakes || 0)
+                      : gameMode === 'mountain_drive'
+                      ? `${telemetry.mountain?.currentPeakNum || 1}`
                       : telemetry.direction === 'right'
                       ? '/'
                       : '\\'}
@@ -1896,14 +2237,12 @@ export default function App() {
                     </span>
                     <span
                       className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold border ${
-                        pk.hits >= pk.maxHits - 1
-                          ? 'bg-rose-500/20 border-rose-400/60 text-rose-300'
-                          : pk.hits > 0
+                        pk.hits > 0
                           ? 'bg-amber-500/20 border-amber-400/60 text-amber-300'
                           : 'bg-slate-800/90 border-slate-700 text-slate-300'
                       }`}
                     >
-                      HITS {pk.hits}/{pk.maxHits}
+                      HITS {pk.hits}
                     </span>
                   </div>
 
@@ -2029,6 +2368,37 @@ export default function App() {
             );
           })()}
 
+          {/* Mountain Drive Slope, Jumps & Airborne Telemetry Pill */}
+          {gameMode === 'mountain_drive' && telemetry.mountain && (
+            <div className="mx-auto mt-1.5 flex items-center gap-2 px-3 py-1 rounded-full border border-orange-400/40 bg-slate-950/85 text-[11px] font-mono tabular-nums shadow-md">
+              <span
+                className={
+                  telemetry.mountain.currentSlopePct > 6
+                    ? 'text-orange-300 font-bold'
+                    : telemetry.mountain.currentSlopePct < -6
+                    ? 'text-emerald-300 font-bold'
+                    : 'text-slate-300'
+                }
+              >
+                {telemetry.mountain.currentSlopePct >= 0
+                  ? `+${Math.round(telemetry.mountain.currentSlopePct)}% UP`
+                  : `${Math.round(telemetry.mountain.currentSlopePct)}% DOWN`}
+              </span>
+              <span className="text-slate-600" aria-hidden="true">·</span>
+              <span className="text-amber-300 font-bold">
+                JUMPS {telemetry.mountain.jumpsCleared}
+              </span>
+              {telemetry.mountain.isAirborne && (
+                <>
+                  <span className="text-slate-600" aria-hidden="true">·</span>
+                  <span className="px-1.5 py-0.5 rounded bg-cyan-400/20 border border-cyan-400/60 text-cyan-300 font-bold animate-pulse">
+                    AIRTIME {telemetry.mountain.airTimeSec.toFixed(1)}s
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+
           {/* Ephemeral Near-Miss / Fever / Flash / Stage Callout Banner */}
           {telemetry.nearMissText && (
             <div
@@ -2037,7 +2407,8 @@ export default function App() {
                 telemetry.nearMissText.includes('FEVER') ||
                 telemetry.nearMissText.includes('NITRO') ||
                 telemetry.nearMissText.includes('FLASH') ||
-                telemetry.nearMissText.includes('HORN')
+                telemetry.nearMissText.includes('HORN') ||
+                telemetry.nearMissText.includes('MEGA AIR')
                   ? 'bg-cyan-400 text-slate-950'
                   : telemetry.nearMissText.includes('RANK') ||
                     telemetry.nearMissText.includes('SECTOR') ||
@@ -2045,11 +2416,16 @@ export default function App() {
                     telemetry.nearMissText.includes('UNSTOPPABLE') ||
                     telemetry.nearMissText.includes('STAGE') ||
                     telemetry.nearMissText.includes('PARKED') ||
-                    telemetry.nearMissText.includes('GATE')
+                    telemetry.nearMissText.includes('GATE') ||
+                    telemetry.nearMissText.includes('LAUNCH') ||
+                    telemetry.nearMissText.includes('PEAK')
                   ? 'bg-emerald-400 text-slate-950'
                   : telemetry.nearMissText.includes('HIT') ||
                     telemetry.nearMissText.includes('CONE') ||
-                    telemetry.nearMissText.includes('STRIKE')
+                    telemetry.nearMissText.includes('STRIKE') ||
+                    telemetry.nearMissText.includes('CHASM') ||
+                    telemetry.nearMissText.includes('CLIFF') ||
+                    telemetry.nearMissText.includes('WRECKED')
                   ? 'bg-rose-500 text-white'
                   : 'bg-amber-500 text-slate-950'
               }`}
@@ -2686,9 +3062,11 @@ export default function App() {
                   : lastRunStats.isVictory
                   ? 'Parking Mastery Complete!'
                   : gameMode === 'parking'
-                  ? 'Parking Test Failed'
+                  ? 'Car Destroyed in Lot'
                   : gameMode === 'highway_traffic' && lastRunStats.crashReason !== 'Guardrail Breached'
                   ? 'Highway Pileup!'
+                  : gameMode === 'mountain_drive'
+                  ? 'Wrecked on the Mountain'
                   : 'Wrecked in the Abyss'}
               </h2>
               {lastLevelResult && lastRunStats.isVictory && (
@@ -2758,6 +3136,8 @@ export default function App() {
                 <span className="block text-[9px] sm:text-[10px] text-slate-400 mt-0.5">
                   {gameMode === 'highway_traffic'
                     ? `${Math.round(lastRunStats.nearMisses || 0)} NEAR MISS`
+                    : gameMode === 'mountain_drive'
+                    ? `${Math.round(lastRunStats.jumpsCleared || 0)} JUMPS · ${(lastRunStats.bestAirTimeSec || 0).toFixed(1)}s AIR`
                     : `COMBO x${Math.round(lastRunStats.maxCombo)}`}
                 </span>
               </div>
@@ -2887,9 +3267,13 @@ export default function App() {
               </div>
             )}
 
-            {/* Compact Daily + Technical Missions Progress Card */}
+            {/* Compact Daily + Random + Technical Missions Progress Card */}
             {(() => {
-              const allMissions = [...getDailyMissions(), ...getTechnicalMissions()];
+              const allMissions = [
+                ...getDailyMissions(),
+                ...getRandomMissions(),
+                ...getTechnicalMissions(),
+              ];
               const completedCount = allMissions.filter((m) => m.completed).length;
               const claimableCount = allMissions.filter((m) => m.completed && !m.claimed).length;
 
@@ -2901,7 +3285,7 @@ export default function App() {
                     </div>
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
-                        <span className="text-xs font-bold text-slate-200 truncate">Missions &amp; Car Craft</span>
+                        <span className="text-xs font-bold text-slate-200 truncate">Missions &amp; Bounties</span>
                         {claimableCount > 0 && (
                           <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-400 text-slate-950 font-bold uppercase tracking-wider shrink-0">
                             {claimableCount} Ready
@@ -2916,7 +3300,10 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => {
-                      setMissionModalTab(gameMode === 'parking' ? 'tech' : 'daily');
+                      const hasRandomReady = getRandomMissions().some((m) => m.completed && !m.claimed);
+                      setMissionModalTab(
+                        gameMode === 'parking' ? 'tech' : hasRandomReady ? 'random' : 'daily'
+                      );
                       setIsMissionsOpen(true);
                     }}
                     className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-purple-600/30 hover:bg-purple-600/50 border border-purple-500/60 text-purple-200 text-xs font-semibold whitespace-nowrap shrink-0 transition-colors"
@@ -3015,6 +3402,7 @@ export default function App() {
           unlockedCarIds={unlockedCarIds}
           carUpgrades={carUpgrades}
           carCustomizations={carCustomizations}
+          ownedCarMods={ownedCarMods}
           carDamageMap={carDamageMap}
           initialTab={garageInitialTab}
           customSpriteUrl={customSpriteUrl}
@@ -3032,6 +3420,10 @@ export default function App() {
           }}
           onUnlockCar={handleUnlockCar}
           onUpgradeStat={handleUpgradeStat}
+          onPurchaseMod={handlePurchaseModUpgrade}
+          onPurchaseStylePackage={handlePurchaseStylePackage}
+          onPurchasePreviewBundle={handlePurchasePreviewBundle}
+          onResetCustomization={handleResetCarCustomization}
           onRepairPart={handleRepairPart}
           onRepairAll={handleRepairAll}
           onUpdateCustomization={(carId, nextCustom) => {
@@ -3126,6 +3518,15 @@ export default function App() {
           selectedLevelId={selectedLevelId}
           progress={levelProgress}
           onSelectLevel={handleSelectCampaignLevel}
+        />
+      )}
+
+      {isQuickGuideOpen && (
+        <QuickGuideModal
+          isOpen={isQuickGuideOpen}
+          onClose={() => setIsQuickGuideOpen(false)}
+          gameMode={gameMode}
+          controlScheme={gameSettings.controlScheme}
         />
       )}
     </main>

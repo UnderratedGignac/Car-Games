@@ -236,6 +236,8 @@ export const ShareCardModal: React.FC<ShareCardModalProps> = ({
         ? 'PRECISION PARKING · VALET & GYMKHANA'
         : gameMode === 'highway_traffic'
         ? 'HIGHWAY TRAFFIC · OVERTAKE CLASH'
+        : gameMode === 'mountain_drive'
+        ? 'ALPINE PEAKS · MOUNTAIN DRIVE'
         : 'TOKYO TOUGE · S-CURVE DRIFT';
     ctx.shadowBlur = 0;
     ctx.font = '700 10px "JetBrains Mono", monospace';
@@ -776,6 +778,8 @@ export const ShareCardModal: React.FC<ShareCardModalProps> = ({
       `⚡ Max Combo: x${maxCombo}`,
       gameMode === 'highway_traffic'
         ? `🛣️ Overtakes: ${overtakes} Passes (${nearMisses} Near Misses)`
+        : gameMode === 'mountain_drive'
+        ? `🏔️ Alpine Distance: ${Math.round(distance).toLocaleString()}m`
         : `🛣️ Touge Distance: ${Math.round(distance).toLocaleString()}m`,
       '━━━━━━━━━━━━━━━━━━━━━━━━━',
       '🎮 Can you beat my record? Play free:',

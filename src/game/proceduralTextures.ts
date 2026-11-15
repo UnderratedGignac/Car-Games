@@ -140,17 +140,61 @@ export function computeTurntableCollarMask(rNorm: number): number {
   return 0.78;
 }
 
+/**
+ * Converts a scalar height buffer (values in [0, 1]) into a seamless tangent-space
+ * RGBA normal-map byte buffer using wrapped central Sobel-style finite differences.
+ */
+export function computeHeightmapNormalRgba(
+  heights: Float32Array,
+  width: number,
+  height: number,
+  strength = 2.2
+): Uint8ClampedArray {
+  const out = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    const ym = (y - 1 + height) % height;
+    const yp = (y + 1) % height;
+    for (let x = 0; x < width; x++) {
+      const xm = (x - 1 + width) % width;
+      const xp = (x + 1) % width;
+
+      const hL = heights[y * width + xm];
+      const hR = heights[y * width + xp];
+      const hD = heights[ym * width + x];
+      const hU = heights[yp * width + x];
+
+      const dx = (hL - hR) * strength;
+      const dy = (hD - hU) * strength;
+      const dz = 1.0;
+      const invLen = 1 / Math.hypot(dx, dy, dz);
+
+      const idx = (y * width + x) * 4;
+      out[idx] = clampByte((dx * invLen * 0.5 + 0.5) * 255);
+      out[idx + 1] = clampByte((dy * invLen * 0.5 + 0.5) * 255);
+      out[idx + 2] = clampByte((dz * invLen * 0.5 + 0.5) * 255);
+      out[idx + 3] = 255;
+    }
+  }
+  return out;
+}
+
 export interface ShowroomTexturePack {
   paintFlakeRoughness: THREE.CanvasTexture;
+  paintFlakeNormal: THREE.CanvasTexture;
   carbonAlbedo: THREE.CanvasTexture;
   carbonBump: THREE.CanvasTexture;
+  carbonNormal: THREE.CanvasTexture;
   tireBump: THREE.CanvasTexture;
+  tireNormal: THREE.CanvasTexture;
   rotorAlbedo: THREE.CanvasTexture;
   rotorBump: THREE.CanvasTexture;
+  rotorNormal: THREE.CanvasTexture;
   turntableAlbedo: THREE.CanvasTexture;
   turntableRoughness: THREE.CanvasTexture;
+  turntableNormal: THREE.CanvasTexture;
   studioFloorAlbedo: THREE.CanvasTexture;
   studioFloorRoughness: THREE.CanvasTexture;
+  studioFloorNormal: THREE.CanvasTexture;
   contactShadowAlpha: THREE.CanvasTexture;
   dispose: () => void;
 }
@@ -187,23 +231,50 @@ function configureTexture(
   return tex;
 }
 
+function normalCanvasTexture(
+  heights: Float32Array,
+  w: number,
+  h: number,
+  strength: number,
+  repeatX: number,
+  repeatY: number,
+  anisotropy: number
+): THREE.CanvasTexture {
+  const [c, ctx] = makeCanvas(w, h);
+  const rgba = computeHeightmapNormalRgba(heights, w, h, strength);
+  const img = new ImageData(rgba as Uint8ClampedArray<ArrayBuffer>, w, h);
+  ctx.putImageData(img, 0, 0);
+  return configureTexture(new THREE.CanvasTexture(c), {
+    srgb: false,
+    repeatX,
+    repeatY,
+    anisotropy,
+  });
+}
+
 /**
- * Generates a cohesive, high-craft procedural PBR texture suite for the 3D Showroom
- * using multi-octave `simplex-noise` and radial studio graphics.
+ * Generates a cohesive, high-craft procedural PBR texture suite (albedo, roughness, bump,
+ * and tangent-space normal maps) for the 3D Showroom using multi-octave `simplex-noise`.
  */
 export function createShowroomTexturePack(maxAnisotropy = 4): ShowroomTexturePack {
   const aniso = Math.max(1, Math.min(8, maxAnisotropy));
   const noiseFlake = createNoise2D(createSeededRng(104729));
   const noiseSlate = createNoise2D(createSeededRng(88171));
+  const flakeRng = createSeededRng(31337);
 
-  // 1. Metallic Paint Flake Roughness (linear data texture)
-  const [flakeC, flakeCtx] = makeCanvas(128, 128);
-  const flakeImg = flakeCtx.createImageData(128, 128);
-  for (let y = 0; y < 128; y++) {
-    for (let x = 0; x < 128; x++) {
-      const idx = (y * 128 + x) * 4;
-      const micro = noiseFlake(x * 0.85, y * 0.85);
-      const val = clampByte(56 + micro * 24);
+  // 1. Metallic Paint Flake Roughness + Clearcoat Micro-Flake Normal (linear data textures)
+  const flakeW = 192;
+  const [flakeC, flakeCtx] = makeCanvas(flakeW, flakeW);
+  const flakeImg = flakeCtx.createImageData(flakeW, flakeW);
+  const flakeHeights = new Float32Array(flakeW * flakeW);
+  for (let y = 0; y < flakeW; y++) {
+    for (let x = 0; x < flakeW; x++) {
+      const i = y * flakeW + x;
+      const idx = i * 4;
+      const micro = noiseFlake(x * 0.9, y * 0.9);
+      const sparkle = flakeRng() > 0.72 ? (flakeRng() - 0.5) * 0.45 : 0;
+      flakeHeights[i] = 0.5 + micro * 0.18 + sparkle;
+      const val = clampByte(50 + micro * 22 + Math.abs(sparkle) * 34);
       flakeImg.data[idx] = val;
       flakeImg.data[idx + 1] = val;
       flakeImg.data[idx + 2] = val;
@@ -213,26 +284,32 @@ export function createShowroomTexturePack(maxAnisotropy = 4): ShowroomTexturePac
   flakeCtx.putImageData(flakeImg, 0, 0);
   const paintFlakeRoughness = configureTexture(new THREE.CanvasTexture(flakeC), {
     srgb: false,
-    repeatX: 6,
-    repeatY: 6,
+    repeatX: 7,
+    repeatY: 7,
     anisotropy: aniso,
   });
+  const paintFlakeNormal = normalCanvasTexture(flakeHeights, flakeW, flakeW, 0.9, 7, 7, aniso);
 
-  // 2. Twill Carbon Fiber Albedo (sRGB) + Bump (linear)
-  const [carbAlbC, carbAlbCtx] = makeCanvas(64, 64);
-  const [carbBmpC, carbBmpCtx] = makeCanvas(64, 64);
-  const carbAlbImg = carbAlbCtx.createImageData(64, 64);
-  const carbBmpImg = carbBmpCtx.createImageData(64, 64);
-  for (let y = 0; y < 64; y++) {
-    for (let x = 0; x < 64; x++) {
-      const idx = (y * 64 + x) * 4;
+  // 2. Twill Carbon Fiber Albedo (sRGB) + Bump + Normal (linear)
+  const carbSize = 128;
+  const [carbAlbC, carbAlbCtx] = makeCanvas(carbSize, carbSize);
+  const [carbBmpC, carbBmpCtx] = makeCanvas(carbSize, carbSize);
+  const carbAlbImg = carbAlbCtx.createImageData(carbSize, carbSize);
+  const carbBmpImg = carbBmpCtx.createImageData(carbSize, carbSize);
+  const carbHeights = new Float32Array(carbSize * carbSize);
+  for (let y = 0; y < carbSize; y++) {
+    for (let x = 0; x < carbSize; x++) {
+      const i = y * carbSize + x;
+      const idx = i * 4;
       const lum = computeCarbonWeavePixel(x, y);
-      carbAlbImg.data[idx] = clampByte(lum * 0.94);
-      carbAlbImg.data[idx + 1] = clampByte(lum * 0.97);
-      carbAlbImg.data[idx + 2] = clampByte(lum * 1.08);
+      carbAlbImg.data[idx] = clampByte(lum * 0.92);
+      carbAlbImg.data[idx + 1] = clampByte(lum * 0.96);
+      carbAlbImg.data[idx + 2] = clampByte(lum * 1.1);
       carbAlbImg.data[idx + 3] = 255;
 
-      const bmp = clampByte((lum / 54) * 235);
+      const norm = lum / 54;
+      carbHeights[i] = norm;
+      const bmp = clampByte(norm * 235);
       carbBmpImg.data[idx] = bmp;
       carbBmpImg.data[idx + 1] = bmp;
       carbBmpImg.data[idx + 2] = bmp;
@@ -243,26 +320,33 @@ export function createShowroomTexturePack(maxAnisotropy = 4): ShowroomTexturePac
   carbBmpCtx.putImageData(carbBmpImg, 0, 0);
   const carbonAlbedo = configureTexture(new THREE.CanvasTexture(carbAlbC), {
     srgb: true,
-    repeatX: 9,
-    repeatY: 9,
+    repeatX: 10,
+    repeatY: 10,
     anisotropy: aniso,
   });
   const carbonBump = configureTexture(new THREE.CanvasTexture(carbBmpC), {
     srgb: false,
-    repeatX: 9,
-    repeatY: 9,
+    repeatX: 10,
+    repeatY: 10,
     anisotropy: aniso,
   });
+  const carbonNormal = normalCanvasTexture(carbHeights, carbSize, carbSize, 2.4, 10, 10, aniso);
 
-  // 3. Sport Tire Tread Bump (linear)
-  const [tireC, tireCtx] = makeCanvas(128, 64);
-  const tireImg = tireCtx.createImageData(128, 64);
-  for (let y = 0; y < 64; y++) {
-    for (let x = 0; x < 128; x++) {
-      const idx = (y * 128 + x) * 4;
-      const mask = computeTreadGrooveMask(x / 128, y / 64);
-      const rubberGrain = sampleFractalNoise2D(noiseSlate, x * 0.35, y * 0.35, 2) * 14;
-      const v = clampByte(mask * 215 + rubberGrain);
+  // 3. Sport Tire Tread Bump + Normal (linear)
+  const tireW = 256;
+  const tireH = 128;
+  const [tireC, tireCtx] = makeCanvas(tireW, tireH);
+  const tireImg = tireCtx.createImageData(tireW, tireH);
+  const tireHeights = new Float32Array(tireW * tireH);
+  for (let y = 0; y < tireH; y++) {
+    for (let x = 0; x < tireW; x++) {
+      const i = y * tireW + x;
+      const idx = i * 4;
+      const mask = computeTreadGrooveMask(x / tireW, y / tireH);
+      const rubberGrain = sampleFractalNoise2D(noiseSlate, x * 0.25, y * 0.25, 2) * 0.06;
+      const hVal = Math.max(0, Math.min(1, mask * 0.88 + rubberGrain));
+      tireHeights[i] = hVal;
+      const v = clampByte(hVal * 235);
       tireImg.data[idx] = v;
       tireImg.data[idx + 1] = v;
       tireImg.data[idx + 2] = v;
@@ -273,25 +357,30 @@ export function createShowroomTexturePack(maxAnisotropy = 4): ShowroomTexturePac
   const tireBump = configureTexture(new THREE.CanvasTexture(tireC), {
     srgb: false,
     repeatX: 1,
-    repeatY: 6,
+    repeatY: 8,
     anisotropy: aniso,
   });
+  const tireNormal = normalCanvasTexture(tireHeights, tireW, tireH, 3.0, 1, 8, aniso);
 
-  // 4. Cross-Drilled Ventilated Brake Rotor Albedo (sRGB) & Bump (linear)
-  const [rotAlbC, rotAlbCtx] = makeCanvas(128, 128);
-  const [rotBmpC, rotBmpCtx] = makeCanvas(128, 128);
-  const rotAlbImg = rotAlbCtx.createImageData(128, 128);
-  const rotBmpImg = rotBmpCtx.createImageData(128, 128);
-  for (let y = 0; y < 128; y++) {
-    for (let x = 0; x < 128; x++) {
-      const idx = (y * 128 + x) * 4;
-      const dx = (x / 127) * 2 - 1;
-      const dy = (y / 127) * 2 - 1;
+  // 4. Cross-Drilled Ventilated Brake Rotor Albedo (sRGB), Bump & Normal (linear)
+  const rotSize = 256;
+  const [rotAlbC, rotAlbCtx] = makeCanvas(rotSize, rotSize);
+  const [rotBmpC, rotBmpCtx] = makeCanvas(rotSize, rotSize);
+  const rotAlbImg = rotAlbCtx.createImageData(rotSize, rotSize);
+  const rotBmpImg = rotBmpCtx.createImageData(rotSize, rotSize);
+  const rotHeights = new Float32Array(rotSize * rotSize);
+  for (let y = 0; y < rotSize; y++) {
+    for (let x = 0; x < rotSize; x++) {
+      const i = y * rotSize + x;
+      const idx = i * 4;
+      const dx = (x / (rotSize - 1)) * 2 - 1;
+      const dy = (y / (rotSize - 1)) * 2 - 1;
       const k = computeRadialRotorIntensity(dx, dy);
-      const base = clampByte(k * 210);
+      rotHeights[i] = k;
+      const base = clampByte(k * 218);
       rotAlbImg.data[idx] = base;
       rotAlbImg.data[idx + 1] = clampByte(base * 1.02);
-      rotAlbImg.data[idx + 2] = clampByte(base * 1.07);
+      rotAlbImg.data[idx + 2] = clampByte(base * 1.08);
       rotAlbImg.data[idx + 3] = 255;
 
       const bv = clampByte(k * 255);
@@ -311,30 +400,36 @@ export function createShowroomTexturePack(maxAnisotropy = 4): ShowroomTexturePac
     srgb: false,
     anisotropy: aniso,
   });
+  const rotorNormal = normalCanvasTexture(rotHeights, rotSize, rotSize, 2.8, 1, 1, aniso);
 
-  // 5. Brushed Basalt & Telemetry Turntable Floor (512x512 sRGB Albedo + Linear Roughness)
+  // 5. Brushed Basalt & Telemetry Turntable Floor (512x512 sRGB Albedo + Linear Roughness + Normal)
   const [ttAlbC, ttAlbCtx] = makeCanvas(512, 512);
   const [ttRoughC, ttRoughCtx] = makeCanvas(512, 512);
   const ttAlbImg = ttAlbCtx.createImageData(512, 512);
   const ttRoughImg = ttRoughCtx.createImageData(512, 512);
+  const ttHeights = new Float32Array(512 * 512);
 
   for (let y = 0; y < 512; y++) {
     for (let x = 0; x < 512; x++) {
-      const idx = (y * 512 + x) * 4;
+      const i = y * 512 + x;
+      const idx = i * 4;
       const n = sampleFractalNoise2D(noiseSlate, x * 0.045, y * 0.045, 3, 0.55, 2.2);
       const dx = (x - 256) / 256;
       const dy = (y - 256) / 256;
       const dist = Math.hypot(dx, dy);
       const collarMask = computeTurntableCollarMask(dist);
+      const radialBrush = Math.sin(dist * 240) * 0.04;
       const radialVignette = Math.max(0.55, 1.05 - dist * 0.42);
-      const baseLum = (22 + n * 7) * radialVignette * (0.68 + collarMask * 0.42);
+      const baseLum = (24 + n * 7) * radialVignette * (0.68 + collarMask * 0.42);
+
+      ttHeights[i] = collarMask * 0.72 + n * 0.1 + radialBrush;
 
       ttAlbImg.data[idx] = clampByte(baseLum * 0.85);
       ttAlbImg.data[idx + 1] = clampByte(baseLum * 1.02);
       ttAlbImg.data[idx + 2] = clampByte(baseLum * 1.38);
       ttAlbImg.data[idx + 3] = 255;
 
-      const rVal = clampByte(70 + n * 28 + dist * 24 + (1 - collarMask) * 42);
+      const rVal = clampByte(62 + n * 24 + dist * 22 + (1 - collarMask) * 44);
       ttRoughImg.data[idx] = rVal;
       ttRoughImg.data[idx + 1] = rVal;
       ttRoughImg.data[idx + 2] = rVal;
@@ -344,10 +439,10 @@ export function createShowroomTexturePack(maxAnisotropy = 4): ShowroomTexturePac
   ttAlbCtx.putImageData(ttAlbImg, 0, 0);
   ttRoughCtx.putImageData(ttRoughImg, 0, 0);
 
-  // Subtle architectural radial degree ticks & precision pit-bay ring on turntable Albedo
+  // Architectural radial degree ticks & precision pit-bay ring on turntable Albedo
   ttAlbCtx.save();
   ttAlbCtx.translate(256, 256);
-  ttAlbCtx.strokeStyle = 'rgba(56, 189, 248, 0.28)';
+  ttAlbCtx.strokeStyle = 'rgba(56, 189, 248, 0.30)';
   ttAlbCtx.lineWidth = 2;
   ttAlbCtx.beginPath();
   ttAlbCtx.arc(0, 0, 212, 0, Math.PI * 2);
@@ -386,26 +481,31 @@ export function createShowroomTexturePack(maxAnisotropy = 4): ShowroomTexturePac
     srgb: false,
     anisotropy: aniso,
   });
+  const turntableNormal = normalCanvasTexture(ttHeights, 512, 512, 1.8, 1, 1, aniso);
 
-  // 5b. Sealed Studio Concrete Expansion-Joint Paddock Floor (256x256 tiled sRGB Albedo + Linear Roughness)
-  const [sfAlbC, sfAlbCtx] = makeCanvas(256, 256);
-  const [sfRoughC, sfRoughCtx] = makeCanvas(256, 256);
-  const sfAlbImg = sfAlbCtx.createImageData(256, 256);
-  const sfRoughImg = sfRoughCtx.createImageData(256, 256);
-  for (let y = 0; y < 256; y++) {
-    for (let x = 0; x < 256; x++) {
-      const idx = (y * 256 + x) * 4;
-      const tileMask = computePaddockTileMask(x / 128, y / 128);
-      const micro = sampleFractalNoise2D(noiseSlate, x * 0.08, y * 0.08, 3, 0.5, 2.0);
-      const slabLum = (14 + micro * 4.5) * tileMask;
+  // 5b. Sealed Studio Concrete Expansion-Joint Paddock Floor (512x512 tiled sRGB Albedo + Roughness + Normal)
+  const sfSize = 512;
+  const [sfAlbC, sfAlbCtx] = makeCanvas(sfSize, sfSize);
+  const [sfRoughC, sfRoughCtx] = makeCanvas(sfSize, sfSize);
+  const sfAlbImg = sfAlbCtx.createImageData(sfSize, sfSize);
+  const sfRoughImg = sfRoughCtx.createImageData(sfSize, sfSize);
+  const sfHeights = new Float32Array(sfSize * sfSize);
+  for (let y = 0; y < sfSize; y++) {
+    for (let x = 0; x < sfSize; x++) {
+      const i = y * sfSize + x;
+      const idx = i * 4;
+      const tileMask = computePaddockTileMask(x / 256, y / 256);
+      const micro = sampleFractalNoise2D(noiseSlate, x * 0.055, y * 0.055, 3, 0.5, 2.0);
+      const slabLum = (15 + micro * 4.2) * tileMask;
+      sfHeights[i] = tileMask * 0.78 + micro * 0.08;
 
-      sfAlbImg.data[idx] = clampByte(slabLum * 0.78);
-      sfAlbImg.data[idx + 1] = clampByte(slabLum * 0.96);
-      sfAlbImg.data[idx + 2] = clampByte(slabLum * 1.38);
+      sfAlbImg.data[idx] = clampByte(slabLum * 0.8);
+      sfAlbImg.data[idx + 1] = clampByte(slabLum * 0.98);
+      sfAlbImg.data[idx + 2] = clampByte(slabLum * 1.36);
       sfAlbImg.data[idx + 3] = 255;
 
-      // Grout seams are rough/matte (210), sealed slab concrete is semi-glossy (~108) to catch neon pillar reflections
-      const rVal = tileMask < 0.35 ? 215 : clampByte(108 + micro * 22);
+      // Grout seams are matte (218), sealed epoxy slab is smooth (~95) to reflect lights cleanly
+      const rVal = tileMask < 0.35 ? 218 : clampByte(92 + micro * 20);
       sfRoughImg.data[idx] = rVal;
       sfRoughImg.data[idx + 1] = rVal;
       sfRoughImg.data[idx + 2] = rVal;
@@ -427,12 +527,13 @@ export function createShowroomTexturePack(maxAnisotropy = 4): ShowroomTexturePac
     repeatY: 16,
     anisotropy: aniso,
   });
+  const studioFloorNormal = normalCanvasTexture(sfHeights, sfSize, sfSize, 1.9, 16, 16, aniso);
 
   // 6. Soft Radial Alpha Disc (white RGB + smooth radial alpha falloff, tintable for AO shadow & neon underglow)
   const [shadC, shadCtx] = makeCanvas(256, 256);
   const shadGrad = shadCtx.createRadialGradient(128, 128, 20, 128, 128, 124);
-  shadGrad.addColorStop(0.0, 'rgba(255, 255, 255, 0.94)');
-  shadGrad.addColorStop(0.46, 'rgba(255, 255, 255, 0.68)');
+  shadGrad.addColorStop(0.0, 'rgba(255, 255, 255, 0.96)');
+  shadGrad.addColorStop(0.46, 'rgba(255, 255, 255, 0.70)');
   shadGrad.addColorStop(0.76, 'rgba(255, 255, 255, 0.24)');
   shadGrad.addColorStop(1.0, 'rgba(255, 255, 255, 0.0)');
   shadCtx.fillStyle = shadGrad;
@@ -443,27 +544,39 @@ export function createShowroomTexturePack(maxAnisotropy = 4): ShowroomTexturePac
 
   return {
     paintFlakeRoughness,
+    paintFlakeNormal,
     carbonAlbedo,
     carbonBump,
+    carbonNormal,
     tireBump,
+    tireNormal,
     rotorAlbedo,
     rotorBump,
+    rotorNormal,
     turntableAlbedo,
     turntableRoughness,
+    turntableNormal,
     studioFloorAlbedo,
     studioFloorRoughness,
+    studioFloorNormal,
     contactShadowAlpha,
     dispose: () => {
       paintFlakeRoughness.dispose();
+      paintFlakeNormal.dispose();
       carbonAlbedo.dispose();
       carbonBump.dispose();
+      carbonNormal.dispose();
       tireBump.dispose();
+      tireNormal.dispose();
       rotorAlbedo.dispose();
       rotorBump.dispose();
+      rotorNormal.dispose();
       turntableAlbedo.dispose();
       turntableRoughness.dispose();
+      turntableNormal.dispose();
       studioFloorAlbedo.dispose();
       studioFloorRoughness.dispose();
+      studioFloorNormal.dispose();
       contactShadowAlpha.dispose();
     },
   };

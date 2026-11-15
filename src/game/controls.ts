@@ -158,6 +158,17 @@ export function resolveDrivingPedals(inputs: {
     };
   }
 
+  if (inputs.mode === 'mountain_drive') {
+    const brakeInput = brakeHeld ? 1 : 0;
+    const gasInput = brakeHeld ? 0 : gasHeld ? 1 : 0;
+    return {
+      gasInput,
+      brakeInput,
+      throttle: brakeHeld ? 0.34 : gasHeld ? 1.32 : 0.88,
+      handbrake,
+    };
+  }
+
   // Touge S-Curve Drift mode: effortless auto-cruise baseline + real Gas surge & Brake modulation
   const brakeInput = brakeHeld ? 1 : 0;
   const gasInput = brakeHeld ? 0 : gasHeld ? 1 : 0;

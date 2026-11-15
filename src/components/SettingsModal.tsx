@@ -3,8 +3,39 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import {
+  Activity,
+  ChevronRight,
+  Gamepad2,
+  Monitor,
+  RotateCcw,
+  Shield,
+  Sliders,
+  Smartphone,
+  Tablet,
+  Vibrate,
+  Volume2,
+  X,
+  Zap,
+} from 'lucide-react';
 import { soundFX, triggerHaptic } from '../game/audio';
+import {
+  ActiveHapticDeviceMode,
+  DeviceHapticCalibration,
+  HAPTIC_DEVICE_PROFILES,
+  HapticCalibrationsByDevice,
+  HapticDeviceProfileId,
+  HapticEnvironmentSnapshot,
+  clampHapticIntensity,
+  createDefaultHapticCalibrations,
+  detectCurrentHapticDevice,
+  formatHapticPatternPreview,
+  getHapticDeviceMeta,
+  isHapticDeviceProfileId,
+  normalizeHapticCalibrations,
+  resolveActiveHapticDeviceId,
+} from '../game/haptics';
 
 export interface GameSettings {
   masterVolume: number; // 0.0 - 1.0 (default 1.0)
@@ -14,6 +45,8 @@ export interface GameSettings {
   screenShake: number;  // 0.0 - 1.0 (default 1.0, 0.0 = motion safe)
   controlScheme: 'classic' | 'wheel' | 'swipe'; // default 'classic'
   hapticsEnabled: boolean; // default true
+  hapticDeviceMode: ActiveHapticDeviceMode; // 'auto' | specific device profile
+  hapticCalibrations: HapticCalibrationsByDevice; // per-device collision & drift intensities
   highFpsMode: boolean; // default false (false = 60fps, true = uncapped / 120fps)
 }
 
@@ -27,15 +60,37 @@ export const DEFAULT_SETTINGS: GameSettings = {
   screenShake: 1.0,
   controlScheme: 'classic',
   hapticsEnabled: true,
+  hapticDeviceMode: 'auto',
+  hapticCalibrations: createDefaultHapticCalibrations(),
   highFpsMode: false,
 };
+
+export function getActiveHapticCalibration(
+  settings: GameSettings,
+  env?: HapticEnvironmentSnapshot
+): {
+  detected: ReturnType<typeof detectCurrentHapticDevice>;
+  activeDeviceId: HapticDeviceProfileId;
+  calibration: DeviceHapticCalibration;
+} {
+  const detected = detectCurrentHapticDevice(env);
+  const activeDeviceId = resolveActiveHapticDeviceId(settings.hapticDeviceMode, detected);
+  const calibration = settings.hapticCalibrations[activeDeviceId] ?? {
+    collisionIntensity: 1.0,
+    driftIntensity: 1.0,
+  };
+  return { detected, activeDeviceId, calibration };
+}
 
 /**
  * Loads game settings from localStorage with safe fallbacks and bounds clamping.
  */
 export function loadGameSettings(): GameSettings {
   if (typeof window === 'undefined') {
-    return { ...DEFAULT_SETTINGS };
+    return {
+      ...DEFAULT_SETTINGS,
+      hapticCalibrations: createDefaultHapticCalibrations(),
+    };
   }
   try {
     const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
@@ -56,6 +111,11 @@ export function loadGameSettings(): GameSettings {
             ? parsed.controlScheme
             : DEFAULT_SETTINGS.controlScheme;
 
+        const hapticDeviceMode: ActiveHapticDeviceMode =
+          parsed.hapticDeviceMode === 'auto' || isHapticDeviceProfileId(parsed.hapticDeviceMode)
+            ? parsed.hapticDeviceMode
+            : DEFAULT_SETTINGS.hapticDeviceMode;
+
         return {
           masterVolume: clamp01(parsed.masterVolume, DEFAULT_SETTINGS.masterVolume),
           musicVolume: clamp01(parsed.musicVolume, DEFAULT_SETTINGS.musicVolume),
@@ -67,6 +127,8 @@ export function loadGameSettings(): GameSettings {
             typeof parsed.hapticsEnabled === 'boolean'
               ? parsed.hapticsEnabled
               : DEFAULT_SETTINGS.hapticsEnabled,
+          hapticDeviceMode,
+          hapticCalibrations: normalizeHapticCalibrations(parsed.hapticCalibrations),
           highFpsMode:
             typeof parsed.highFpsMode === 'boolean'
               ? parsed.highFpsMode
@@ -77,7 +139,10 @@ export function loadGameSettings(): GameSettings {
   } catch (err) {
     console.warn('Failed to parse saved game settings, falling back to defaults', err);
   }
-  return { ...DEFAULT_SETTINGS };
+  return {
+    ...DEFAULT_SETTINGS,
+    hapticCalibrations: createDefaultHapticCalibrations(),
+  };
 }
 
 /**
@@ -99,7 +164,22 @@ export interface SettingsModalProps {
   onUpdateSettings: (newSettings: GameSettings) => void;
 }
 
-type SettingsTab = 'audio' | 'accessibility' | 'controls';
+type SettingsTab = 'audio' | 'accessibility' | 'controls' | 'haptics';
+
+function renderDeviceProfileIcon(profileId: HapticDeviceProfileId, className = 'w-4 h-4') {
+  switch (profileId) {
+    case 'mobile_android':
+    case 'mobile_ios':
+      return <Smartphone className={className} />;
+    case 'tablet_touch':
+      return <Tablet className={className} />;
+    case 'handheld_gamepad':
+      return <Gamepad2 className={className} />;
+    case 'desktop_browser':
+    default:
+      return <Monitor className={className} />;
+  }
+}
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
@@ -107,8 +187,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   settings,
   onUpdateSettings,
 }) => {
+  const detectedDevice = useMemo(() => detectCurrentHapticDevice(), []);
+  const activeDeviceId = useMemo(
+    () => resolveActiveHapticDeviceId(settings.hapticDeviceMode, detectedDevice),
+    [settings.hapticDeviceMode, detectedDevice]
+  );
+
   const [activeTab, setActiveTab] = useState<SettingsTab>('audio');
+  const [selectedHapticDeviceId, setSelectedHapticDeviceId] = useState<HapticDeviceProfileId>(
+    () => activeDeviceId
+  );
   const [hapticFeedbackNotice, setHapticFeedbackNotice] = useState<string | null>(null);
+  const [pulseHighlight, setPulseHighlight] = useState<'collision' | 'drift' | null>(null);
+
+  // Sync selected device editor to active device when modal opens
+  useEffect(() => {
+    if (isOpen) {
+      setSelectedHapticDeviceId(activeDeviceId);
+    }
+  }, [isOpen, activeDeviceId]);
 
   // Close on Escape key
   useEffect(() => {
@@ -122,34 +219,78 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
 
+  const applySettingsUpdate = useCallback(
+    (nextSettings: GameSettings) => {
+      onUpdateSettings(nextSettings);
+      saveGameSettings(nextSettings);
+      soundFX.setMixerVolumes({
+        master: nextSettings.masterVolume,
+        music: nextSettings.musicVolume,
+        sfx: nextSettings.sfxVolume,
+        engine: nextSettings.engineVolume,
+      });
+      soundFX.setHapticsEnabled(nextSettings.hapticsEnabled);
+      const nextActiveId = resolveActiveHapticDeviceId(
+        nextSettings.hapticDeviceMode,
+        detectedDevice
+      );
+      soundFX.setHapticCalibration(nextSettings.hapticCalibrations[nextActiveId]);
+    },
+    [onUpdateSettings, detectedDevice]
+  );
+
   const updateSetting = useCallback(
     <K extends keyof GameSettings>(key: K, value: GameSettings[K]) => {
       const nextSettings: GameSettings = {
         ...settings,
         [key]: value,
       };
-      onUpdateSettings(nextSettings);
-      saveGameSettings(nextSettings);
-
-      // Keep soundFX volumes & haptics synchronized in real-time (no double-multiplication)
-      if (
-        key === 'masterVolume' ||
-        key === 'musicVolume' ||
-        key === 'sfxVolume' ||
-        key === 'engineVolume'
-      ) {
-        soundFX.setMixerVolumes({
-          master: nextSettings.masterVolume,
-          music: nextSettings.musicVolume,
-          sfx: nextSettings.sfxVolume,
-          engine: nextSettings.engineVolume,
-        });
-      }
-      if (key === 'hapticsEnabled') {
-        soundFX.setHapticsEnabled(nextSettings.hapticsEnabled);
-      }
+      applySettingsUpdate(nextSettings);
     },
-    [settings, onUpdateSettings]
+    [settings, applySettingsUpdate]
+  );
+
+  const updateDeviceCalibration = useCallback(
+    (
+      deviceId: HapticDeviceProfileId,
+      field: keyof DeviceHapticCalibration,
+      value: number
+    ) => {
+      const clamped = clampHapticIntensity(value, 1.0);
+      const existing = settings.hapticCalibrations[deviceId] ?? {
+        collisionIntensity: 1.0,
+        driftIntensity: 1.0,
+      };
+      const nextSettings: GameSettings = {
+        ...settings,
+        hapticCalibrations: {
+          ...settings.hapticCalibrations,
+          [deviceId]: {
+            ...existing,
+            [field]: clamped,
+          },
+        },
+      };
+      applySettingsUpdate(nextSettings);
+    },
+    [settings, applySettingsUpdate]
+  );
+
+  const handleResetDeviceCalibration = useCallback(
+    (deviceId: HapticDeviceProfileId) => {
+      const meta = getHapticDeviceMeta(deviceId);
+      const nextSettings: GameSettings = {
+        ...settings,
+        hapticCalibrations: {
+          ...settings.hapticCalibrations,
+          [deviceId]: { ...meta.recommended },
+        },
+      };
+      applySettingsUpdate(nextSettings);
+      setHapticFeedbackNotice(`${meta.shortLabel} calibration reset to 100% / 100%`);
+      setTimeout(() => setHapticFeedbackNotice(null), 2600);
+    },
+    [settings, applySettingsUpdate]
   );
 
   const handleTestSfx = useCallback(() => {
@@ -159,38 +300,70 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   }, [settings.hapticsEnabled]);
 
-  const handleTestHaptics = useCallback(() => {
-    const success = triggerHaptic('medium', true);
-    setHapticFeedbackNotice(
-      success ? '⚡ Haptic pulse triggered!' : '⚠️ Vibration unsupported on this device/browser'
-    );
-    setTimeout(() => setHapticFeedbackNotice(null), 2500);
-  }, []);
+  const handleTestCategoryHaptic = useCallback(
+    (category: 'collision' | 'drift') => {
+      const cal = settings.hapticCalibrations[selectedHapticDeviceId] ?? {
+        collisionIntensity: 1.0,
+        driftIntensity: 1.0,
+      };
+      const intensity = category === 'collision' ? cal.collisionIntensity : cal.driftIntensity;
+      const basePattern = category === 'collision' ? 65 : [25, 45, 35];
+      const preview = formatHapticPatternPreview(basePattern, intensity);
+      const type = category === 'collision' ? 'heavy' : 'double';
+      const triggered = triggerHaptic(type, true, category, cal);
+
+      setPulseHighlight(category);
+      setTimeout(() => setPulseHighlight((prev) => (prev === category ? null : prev)), 320);
+
+      if (intensity <= 0) {
+        setHapticFeedbackNotice(
+          `${category === 'collision' ? 'Collision' : 'Drift'} haptics set to 0% (muted for ${getHapticDeviceMeta(selectedHapticDeviceId).shortLabel})`
+        );
+      } else if (triggered) {
+        setHapticFeedbackNotice(
+          `${category === 'collision' ? 'Collision' : 'Drift'} pulse triggered (${preview})`
+        );
+      } else {
+        setHapticFeedbackNotice(
+          `Calibrated ${category === 'collision' ? 'Collision' : 'Drift'} pulse at ${preview} (vibration API unavailable on this browser)`
+        );
+      }
+      setTimeout(() => setHapticFeedbackNotice(null), 3000);
+    },
+    [settings.hapticCalibrations, selectedHapticDeviceId]
+  );
 
   const handleResetDefaults = useCallback(() => {
-    onUpdateSettings({ ...DEFAULT_SETTINGS });
-    saveGameSettings({ ...DEFAULT_SETTINGS });
-    soundFX.setMixerVolumes({
-      master: DEFAULT_SETTINGS.masterVolume,
-      music: DEFAULT_SETTINGS.musicVolume,
-      sfx: DEFAULT_SETTINGS.sfxVolume,
-      engine: DEFAULT_SETTINGS.engineVolume,
-    });
-    soundFX.setHapticsEnabled(DEFAULT_SETTINGS.hapticsEnabled);
+    const freshDefaults: GameSettings = {
+      ...DEFAULT_SETTINGS,
+      hapticCalibrations: createDefaultHapticCalibrations(),
+    };
+    applySettingsUpdate(freshDefaults);
+    setSelectedHapticDeviceId(detectedDevice.profileId);
     soundFX.playCoinPickup(1);
-  }, [onUpdateSettings]);
+  }, [applySettingsUpdate, detectedDevice.profileId]);
 
   if (!isOpen) return null;
 
+  const selectedDeviceMeta = getHapticDeviceMeta(selectedHapticDeviceId);
+  const selectedCalibration = settings.hapticCalibrations[selectedHapticDeviceId] ?? {
+    collisionIntensity: 1.0,
+    driftIntensity: 1.0,
+  };
+  const activeCalibration = settings.hapticCalibrations[activeDeviceId] ?? {
+    collisionIntensity: 1.0,
+    driftIntensity: 1.0,
+  };
+
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/85 pointer-events-auto"
+      className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/85 pointer-events-auto touch-auto"
       role="dialog"
       aria-modal="true"
       aria-label="Settings and Accessibility"
     >
       <div
-        className="relative w-full max-w-lg rounded-2xl bg-slate-950/95 border border-cyan-500/40 shadow-[0_0_50px_rgba(6,182,212,0.2)] overflow-hidden flex flex-col max-h-[92dvh] text-slate-100"
+        className="relative w-full max-w-xl rounded-2xl bg-slate-950/95 border border-cyan-500/40 shadow-[0_0_50px_rgba(6,182,212,0.2)] overflow-hidden flex flex-col max-h-[92dvh] text-slate-100"
         style={{ backgroundColor: 'rgba(9, 14, 26, 0.98)' }}
       >
         {/* Ambient Top Cyber Glow */}
@@ -200,69 +373,93 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div className="shrink-0 flex items-center justify-between px-4 sm:px-5 pt-3.5 pb-3 border-b border-slate-800/80">
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="w-8 h-8 rounded-lg bg-cyan-950/70 border border-cyan-500/50 flex items-center justify-center text-cyan-300 font-bold text-sm shadow-[0_0_12px_rgba(6,182,212,0.3)] shrink-0">
-              ⚙️
+              <Sliders className="w-4 h-4" />
             </div>
             <div className="min-w-0">
               <h2 className="text-base sm:text-xl font-display font-bold tracking-wide text-white truncate">
                 GAME SETTINGS
               </h2>
               <p className="text-[10px] font-mono text-cyan-400 tracking-wider uppercase truncate">
-                AUDIO · ACCESSIBILITY · CONTROLS
+                AUDIO · MOTION · CONTROLS · HAPTICS
               </p>
             </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="w-9 h-9 rounded-full bg-slate-900 border border-slate-700 text-slate-400 hover:text-white hover:border-slate-500 flex items-center justify-center transition-colors text-sm shrink-0"
+            className="w-9 h-9 rounded-full bg-slate-900 border border-slate-700 text-slate-400 hover:text-white hover:border-slate-500 flex items-center justify-center transition-colors shrink-0"
             aria-label="Close Settings"
           >
-            ✕
+            <X className="w-4 h-4" />
           </button>
         </div>
 
         {/* Tab Navigation (Pinned) */}
-        <div className="shrink-0 grid grid-cols-3 p-2 gap-1.5 bg-slate-900/60 border-b border-slate-800/80">
+        <div
+          role="tablist"
+          aria-label="Settings Categories"
+          className="shrink-0 grid grid-cols-4 p-2 gap-1 sm:gap-1.5 bg-slate-900/60 border-b border-slate-800/80"
+        >
           <button
             type="button"
+            role="tab"
+            aria-selected={activeTab === 'audio'}
             onClick={() => setActiveTab('audio')}
-            className={`min-h-[38px] px-2 sm:px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+            className={`min-h-[38px] px-1.5 sm:px-3 py-1.5 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center justify-center gap-1 sm:gap-1.5 transition-all ${
               activeTab === 'audio'
                 ? 'bg-cyan-500 text-slate-950 shadow-[0_0_16px_rgba(6,182,212,0.4)] font-bold'
                 : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
             }`}
           >
-            <span>🔊</span>
+            <Volume2 className="w-3.5 h-3.5 shrink-0" />
             <span>Audio</span>
           </button>
           <button
             type="button"
+            role="tab"
+            aria-selected={activeTab === 'accessibility'}
             onClick={() => setActiveTab('accessibility')}
-            className={`min-h-[38px] px-2 sm:px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+            className={`min-h-[38px] px-1.5 sm:px-3 py-1.5 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center justify-center gap-1 sm:gap-1.5 transition-all ${
               activeTab === 'accessibility'
                 ? 'bg-cyan-500 text-slate-950 shadow-[0_0_16px_rgba(6,182,212,0.4)] font-bold'
                 : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
             }`}
           >
-            <span>🛡️</span>
+            <Shield className="w-3.5 h-3.5 shrink-0" />
             <span>Motion</span>
           </button>
           <button
             type="button"
+            role="tab"
+            aria-selected={activeTab === 'controls'}
             onClick={() => setActiveTab('controls')}
-            className={`min-h-[38px] px-2 sm:px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+            className={`min-h-[38px] px-1.5 sm:px-3 py-1.5 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center justify-center gap-1 sm:gap-1.5 transition-all ${
               activeTab === 'controls'
                 ? 'bg-cyan-500 text-slate-950 shadow-[0_0_16px_rgba(6,182,212,0.4)] font-bold'
                 : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
             }`}
           >
-            <span>🎮</span>
+            <Gamepad2 className="w-3.5 h-3.5 shrink-0" />
             <span>Controls</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'haptics'}
+            onClick={() => setActiveTab('haptics')}
+            className={`min-h-[38px] px-1.5 sm:px-3 py-1.5 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center justify-center gap-1 sm:gap-1.5 transition-all ${
+              activeTab === 'haptics'
+                ? 'bg-cyan-500 text-slate-950 shadow-[0_0_16px_rgba(6,182,212,0.4)] font-bold'
+                : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+            }`}
+          >
+            <Vibrate className="w-3.5 h-3.5 shrink-0" />
+            <span>Haptics</span>
           </button>
         </div>
 
         {/* Tab Content Body (Scrollable) */}
-        <div className="flex-1 min-h-0 p-3.5 sm:p-5 overflow-y-auto overscroll-contain space-y-3.5 sm:space-y-4">
+        <div className="flex-1 min-h-0 p-3.5 sm:p-5 overflow-y-auto overscroll-contain touch-pan-y space-y-3.5 sm:space-y-4">
           {/* TAB 1: AUDIO MIXER */}
           {activeTab === 'audio' && (
             <div className="space-y-4">
@@ -670,19 +867,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </button>
               </div>
 
-              {/* Mobile Haptics Toggle */}
-              <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h4 className="text-xs font-semibold text-white">Mobile Haptic Feedback</h4>
-                    <p className="text-[11px] text-slate-400">
-                      Tactile micro-vibrations on drift apexes, fever bursts, and guardrail scrapes.
+              {/* Compact Haptics Summary + Shortcut to Per-Device Calibration */}
+              <div className="p-3.5 sm:p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <h4 className="text-xs font-semibold text-white">Haptic Feedback Engine</h4>
+                    <p className="text-[11px] text-slate-400 truncate">
+                      {getHapticDeviceMeta(activeDeviceId).shortLabel}: Collision{' '}
+                      {Math.round(activeCalibration.collisionIntensity * 100)}% · Drift{' '}
+                      {Math.round(activeCalibration.driftIntensity * 100)}%
                     </p>
                   </div>
                   <button
                     type="button"
+                    role="switch"
+                    aria-checked={settings.hapticsEnabled}
                     onClick={() => updateSetting('hapticsEnabled', !settings.hapticsEnabled)}
-                    className={`w-12 h-6 flex items-center rounded-full p-1 transition-colors ${
+                    className={`w-12 h-6 flex items-center rounded-full p-1 transition-colors shrink-0 ${
                       settings.hapticsEnabled ? 'bg-cyan-500 justify-end' : 'bg-slate-700 justify-start'
                     }`}
                     aria-label="Toggle Mobile Haptics"
@@ -691,20 +892,381 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </button>
                 </div>
 
-                <div className="flex items-center justify-between pt-1">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('haptics')}
+                  className="w-full min-h-[38px] px-3 py-2 rounded-lg bg-slate-800/90 hover:bg-slate-800 border border-cyan-500/30 text-cyan-300 text-xs font-semibold flex items-center justify-between transition-colors"
+                >
+                  <span className="flex items-center gap-2">
+                    <Vibrate className="w-3.5 h-3.5" />
+                    <span>Calibrate Per-Device Collision &amp; Drift Intensity</span>
+                  </span>
+                  <ChevronRight className="w-4 h-4 shrink-0" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 4: PER-DEVICE HAPTIC CALIBRATION */}
+          {activeTab === 'haptics' && (
+            <div className="space-y-3.5" data-testid="haptics-calibration-panel">
+              {/* Global Haptic Master Switch & Current Device Hardware Detection */}
+              <div className="p-3.5 sm:p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2.5">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="text-xs sm:text-sm font-bold text-white flex items-center gap-1.5">
+                      <Vibrate className="w-4 h-4 text-cyan-400 shrink-0" />
+                      <span>Haptic Feedback Master</span>
+                    </h3>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      This Device: <span className="text-slate-200 font-medium">{detectedDevice.label}</span>{' '}
+                      <span
+                        className={`inline-block ml-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${
+                          detectedDevice.supportsVibration
+                            ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                            : 'bg-slate-800 text-slate-400 border border-slate-700'
+                        }`}
+                      >
+                        {detectedDevice.supportsVibration ? 'MOTOR READY' : 'FALLBACK MODE'}
+                      </span>
+                    </p>
+                  </div>
                   <button
                     type="button"
-                    onClick={handleTestHaptics}
-                    className="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs font-mono border border-cyan-500/30 flex items-center gap-1.5"
+                    role="switch"
+                    aria-checked={settings.hapticsEnabled}
+                    onClick={() => updateSetting('hapticsEnabled', !settings.hapticsEnabled)}
+                    className={`w-12 h-6 flex items-center rounded-full p-1 transition-colors shrink-0 ${
+                      settings.hapticsEnabled ? 'bg-cyan-500 justify-end' : 'bg-slate-700 justify-start'
+                    }`}
+                    aria-label="Toggle Mobile Haptics"
                   >
-                    <span>📳</span> Test Vibration Pulse
+                    <span className="w-4 h-4 rounded-full bg-slate-950 shadow-md transform" />
                   </button>
-                  {hapticFeedbackNotice && (
-                    <span className="text-[10px] font-mono text-amber-400">
-                      {hapticFeedbackNotice}
-                    </span>
-                  )}
                 </div>
+
+                {!settings.hapticsEnabled && (
+                  <p className="text-[11px] font-mono text-amber-300/90 bg-amber-500/10 border border-amber-500/30 rounded-lg px-2.5 py-1.5">
+                    Haptics are muted globally during runs. You can still tune and test device pulses below.
+                  </p>
+                )}
+              </div>
+
+              {/* Per-Device Profile Switcher */}
+              <div className="p-3.5 sm:p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2.5">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-[11px] font-mono uppercase tracking-wider text-slate-400">
+                    Per-Device Calibration Profiles
+                  </span>
+                  <span className="text-[10px] font-mono text-cyan-300">
+                    {settings.hapticDeviceMode === 'auto'
+                      ? `Auto (${detectedDevice.label.split(' ')[0]})`
+                      : `Active Override: ${getHapticDeviceMeta(activeDeviceId).shortLabel}`}
+                  </span>
+                </div>
+
+                <div
+                  className="grid grid-cols-2 sm:grid-cols-5 gap-1.5"
+                  role="group"
+                  aria-label="Device Haptic Profiles"
+                >
+                  {HAPTIC_DEVICE_PROFILES.map((profile) => {
+                    const isSelected = selectedHapticDeviceId === profile.id;
+                    const isDetected = detectedDevice.profileId === profile.id;
+                    const isActive = activeDeviceId === profile.id;
+                    const cal = settings.hapticCalibrations[profile.id] ?? profile.recommended;
+                    return (
+                      <button
+                        key={profile.id}
+                        type="button"
+                        data-testid={`haptic-device-${profile.id}`}
+                        aria-pressed={isSelected}
+                        onClick={() => setSelectedHapticDeviceId(profile.id)}
+                        className={`min-h-[54px] px-2 py-1.5 rounded-lg border text-left flex flex-col justify-between transition-colors ${
+                          isSelected
+                            ? 'bg-cyan-500/15 border-cyan-400 text-white shadow-[0_0_12px_rgba(6,182,212,0.22)]'
+                            : 'bg-slate-950/70 border-slate-800 text-slate-300 hover:border-slate-600'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-1 w-full">
+                          <span className="flex items-center gap-1 text-[11px] font-bold whitespace-nowrap min-w-0">
+                            {renderDeviceProfileIcon(profile.id, 'w-3.5 h-3.5 shrink-0 text-cyan-300')}
+                            <span className="truncate">{profile.shortLabel}</span>
+                          </span>
+                          {(isDetected || isActive) && (
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                isActive ? 'bg-emerald-400' : 'bg-cyan-400'
+                              }`}
+                              title={isActive ? 'Active on this device' : 'Detected device'}
+                            />
+                          )}
+                        </div>
+                        <span className="text-[9px] font-mono text-slate-400 tabular-nums whitespace-nowrap">
+                          {Math.round(cal.collisionIntensity * 100)}% / {Math.round(cal.driftIntensity * 100)}%
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Selected Device Hardware Summary & Active Binding */}
+                <div className="flex items-center justify-between gap-2 pt-1 flex-wrap text-[11px]">
+                  <div className="text-slate-300 min-w-0 flex flex-wrap items-center gap-1.5">
+                    <span className="font-semibold text-white">{selectedDeviceMeta.label}</span>
+                    <span className="text-slate-400">· {selectedDeviceMeta.actuatorHint}</span>
+                    {detectedDevice.profileId === selectedHapticDeviceId && (
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[9px] font-mono whitespace-nowrap">
+                        THIS DEVICE
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    {activeDeviceId !== selectedHapticDeviceId ? (
+                      <button
+                        type="button"
+                        onClick={() => updateSetting('hapticDeviceMode', selectedHapticDeviceId)}
+                        className="px-2 py-1 rounded bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/40 text-cyan-200 text-[10px] font-mono font-semibold"
+                      >
+                        Use Here
+                      </button>
+                    ) : settings.hapticDeviceMode !== 'auto' ? (
+                      <button
+                        type="button"
+                        onClick={() => updateSetting('hapticDeviceMode', 'auto')}
+                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-[10px] font-mono"
+                      >
+                        Restore Auto-Detect
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+
+              {/* Collision Events Calibration */}
+              <div
+                className={`p-3.5 sm:p-4 rounded-xl bg-slate-900/80 border transition-all space-y-2.5 ${
+                  pulseHighlight === 'collision'
+                    ? 'border-rose-400 shadow-[0_0_20px_rgba(244,63,94,0.35)]'
+                    : 'border-slate-800'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <label
+                    htmlFor="haptic-collision-slider"
+                    className="text-xs font-bold text-white flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Zap className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                    <span>Collision Events Intensity</span>
+                  </label>
+                  <span
+                    data-testid="haptic-collision-value"
+                    className={`font-mono text-xs font-bold tabular-nums px-2 py-0.5 rounded ${
+                      selectedCalibration.collisionIntensity === 0
+                        ? 'bg-slate-800 text-slate-400'
+                        : 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
+                    }`}
+                  >
+                    {selectedCalibration.collisionIntensity === 0
+                      ? 'OFF (0%)'
+                      : `${Math.round(selectedCalibration.collisionIntensity * 100)}%`}
+                  </span>
+                </div>
+
+                <p className="text-[11px] text-slate-400">
+                  Scales guardrail scrapes, traffic collisions, sideswipes &amp; parking obstacle hits for{' '}
+                  <span className="text-slate-200">{selectedDeviceMeta.shortLabel}</span>.
+                </p>
+
+                <input
+                  id="haptic-collision-slider"
+                  data-testid="haptic-collision-slider"
+                  type="range"
+                  min="0"
+                  max="2"
+                  step="0.05"
+                  value={selectedCalibration.collisionIntensity}
+                  onChange={(e) =>
+                    updateDeviceCalibration(
+                      selectedHapticDeviceId,
+                      'collisionIntensity',
+                      parseFloat(e.target.value)
+                    )
+                  }
+                  className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-rose-400"
+                />
+
+                <div className="grid grid-cols-5 gap-1">
+                  {[
+                    { label: 'Off', val: 0 },
+                    { label: '60%', val: 0.6 },
+                    { label: '100%', val: 1.0 },
+                    { label: '150%', val: 1.5 },
+                    { label: '200%', val: 2.0 },
+                  ].map((preset) => {
+                    const active = Math.abs(selectedCalibration.collisionIntensity - preset.val) < 0.01;
+                    return (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        onClick={() =>
+                          updateDeviceCalibration(
+                            selectedHapticDeviceId,
+                            'collisionIntensity',
+                            preset.val
+                          )
+                        }
+                        className={`min-h-[30px] rounded-md text-[10px] font-mono transition-colors ${
+                          active
+                            ? 'bg-rose-500 text-slate-950 font-bold'
+                            : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="flex items-center justify-between gap-2 pt-1 flex-wrap">
+                  <span className="text-[10px] font-mono text-slate-400 tabular-nums">
+                    Sideswipe {formatHapticPatternPreview(38, selectedCalibration.collisionIntensity)} · Crash{' '}
+                    {formatHapticPatternPreview(65, selectedCalibration.collisionIntensity)}
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="btn-test-collision-haptic"
+                    onClick={() => handleTestCategoryHaptic('collision')}
+                    className="min-h-[32px] px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-rose-500/35 text-rose-300 text-[11px] font-mono flex items-center gap-1.5"
+                  >
+                    <Vibrate className="w-3.5 h-3.5" />
+                    <span>Test Collision</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Drift Triggers Calibration */}
+              <div
+                className={`p-3.5 sm:p-4 rounded-xl bg-slate-900/80 border transition-all space-y-2.5 ${
+                  pulseHighlight === 'drift'
+                    ? 'border-cyan-400 shadow-[0_0_20px_rgba(34,211,238,0.35)]'
+                    : 'border-slate-800'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <label
+                    htmlFor="haptic-drift-slider"
+                    className="text-xs font-bold text-white flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Activity className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                    <span>Drift Triggers Intensity</span>
+                  </label>
+                  <span
+                    data-testid="haptic-drift-value"
+                    className={`font-mono text-xs font-bold tabular-nums px-2 py-0.5 rounded ${
+                      selectedCalibration.driftIntensity === 0
+                        ? 'bg-slate-800 text-slate-400'
+                        : 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30'
+                    }`}
+                  >
+                    {selectedCalibration.driftIntensity === 0
+                      ? 'OFF (0%)'
+                      : `${Math.round(selectedCalibration.driftIntensity * 100)}%`}
+                  </span>
+                </div>
+
+                <p className="text-[11px] text-slate-400">
+                  Scales drift entry, style switch flips (/ &harr; \), &amp; combo milestone bursts for{' '}
+                  <span className="text-slate-200">{selectedDeviceMeta.shortLabel}</span>.
+                </p>
+
+                <input
+                  id="haptic-drift-slider"
+                  data-testid="haptic-drift-slider"
+                  type="range"
+                  min="0"
+                  max="2"
+                  step="0.05"
+                  value={selectedCalibration.driftIntensity}
+                  onChange={(e) =>
+                    updateDeviceCalibration(
+                      selectedHapticDeviceId,
+                      'driftIntensity',
+                      parseFloat(e.target.value)
+                    )
+                  }
+                  className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-400"
+                />
+
+                <div className="grid grid-cols-5 gap-1">
+                  {[
+                    { label: 'Off', val: 0 },
+                    { label: '50%', val: 0.5 },
+                    { label: '100%', val: 1.0 },
+                    { label: '140%', val: 1.4 },
+                    { label: '200%', val: 2.0 },
+                  ].map((preset) => {
+                    const active = Math.abs(selectedCalibration.driftIntensity - preset.val) < 0.01;
+                    return (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        onClick={() =>
+                          updateDeviceCalibration(
+                            selectedHapticDeviceId,
+                            'driftIntensity',
+                            preset.val
+                          )
+                        }
+                        className={`min-h-[30px] rounded-md text-[10px] font-mono transition-colors ${
+                          active
+                            ? 'bg-cyan-500 text-slate-950 font-bold'
+                            : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="flex items-center justify-between gap-2 pt-1 flex-wrap">
+                  <span className="text-[10px] font-mono text-slate-400 tabular-nums">
+                    Entry {formatHapticPatternPreview(18, selectedCalibration.driftIntensity)} · Switch{' '}
+                    {formatHapticPatternPreview(38, selectedCalibration.driftIntensity)}
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="btn-test-drift-haptic"
+                    onClick={() => handleTestCategoryHaptic('drift')}
+                    className="min-h-[32px] px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-cyan-500/35 text-cyan-300 text-[11px] font-mono flex items-center gap-1.5"
+                  >
+                    <Vibrate className="w-3.5 h-3.5" />
+                    <span>Test Drift</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Feedback Notice + Per-Device Reset */}
+              <div className="flex items-center justify-between gap-2 flex-wrap pt-0.5">
+                <button
+                  type="button"
+                  data-testid="btn-reset-device-haptics"
+                  onClick={() => handleResetDeviceCalibration(selectedHapticDeviceId)}
+                  className="min-h-[34px] px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white text-[11px] font-mono flex items-center gap-1.5"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Reset {selectedDeviceMeta.shortLabel} Calibration</span>
+                </button>
+                {hapticFeedbackNotice && (
+                  <span
+                    data-testid="haptic-feedback-notice"
+                    className="text-[11px] font-mono text-amber-300"
+                  >
+                    {hapticFeedbackNotice}
+                  </span>
+                )}
               </div>
             </div>
           )}

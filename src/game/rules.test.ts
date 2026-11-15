@@ -33,10 +33,29 @@ import {
   stepTrafficCars,
   compactInPlace,
   ROAD_WIDTH,
+  DEFAULT_CUSTOMIZATION,
+  PAINT_OPTIONS,
+  WING_OPTIONS,
+  ENGINE_OPTIONS,
+  getCarStylePackages,
+  getCarCompatibleModSet,
+  getCustomizationOptionCost,
+  isCarModOwned,
+  purchaseCarModUpgrade,
+  purchaseCarStylePackage,
+  applyCarModPreview,
+  applyCarStylePackagePreview,
+  computeGaragePreviewSummary,
+  purchaseGaragePreviewBundle,
+  S_RANK_TRAFFIC_DENSITY_BOOST,
+  hasThreeConsecutiveSRanks,
+  appendRecentRunRank,
+  getAdaptiveHighwayTrafficDensity,
 } from './rules';
 import { computeMixerVolume, SoundFXSystem, soundFX } from './audio';
 import {
   getPixelCarTireAnchors,
+  isDepthPointVisible,
   isDoorNumberPixelVisible,
   resolveVehicleArchetype,
   resolveVisibleDoorRoundelSide,
@@ -1047,6 +1066,388 @@ test('resolveVisibleDoorRoundelSide and isDoorNumberPixelVisible prevent racing 
     false
   );
 });
+
+test('Per-car style packages and mod compatibility differ meaningfully by vehicle', () => {
+  const jdm = CAR_ROSTER.find((c) => c.id === 'blue_jdm')!;
+  const truck = CAR_ROSTER.find((c) => c.id === 'emerald_truck')!;
+  const muscle = CAR_ROSTER.find((c) => c.id === 'midnight_muscle')!;
+  const bike = CAR_ROSTER.find((c) => c.id === 'hayabusa_ghost')!;
+
+  const jdmPkgs = getCarStylePackages(jdm);
+  const truckPkgs = getCarStylePackages(truck);
+  const musclePkgs = getCarStylePackages(muscle);
+  const bikePkgs = getCarStylePackages(bike);
+
+  assert.equal(jdmPkgs.length, 3);
+  assert.equal(truckPkgs.length, 3);
+  assert.equal(musclePkgs.length, 3);
+  assert.equal(bikePkgs.length, 3);
+
+  // Every car has distinct style package IDs and names
+  const allPkgNames = new Set([
+    ...jdmPkgs.map((p) => p.name),
+    ...truckPkgs.map((p) => p.name),
+    ...musclePkgs.map((p) => p.name),
+    ...bikePkgs.map((p) => p.name),
+  ]);
+  assert.equal(allPkgNames.size, 12, 'Each car must have unique style upgrade package names');
+
+  // Every vehicle in the 90-car roster generates 3 valid paid packages
+  for (const car of CAR_ROSTER) {
+    const pkgs = getCarStylePackages(car);
+    assert.equal(pkgs.length, 3);
+    for (const pkg of pkgs) {
+      assert.ok(pkg.cost > 0, `${car.id} package ${pkg.id} must require CR`);
+      assert.ok(pkg.speedBonus > 0);
+      assert.ok(pkg.feverBonus > 0);
+    }
+  }
+
+  // Compatible mod sets tailor available hardware and labels per vehicle archetype
+  const bikeMods = getCarCompatibleModSet(bike);
+  const truckMods = getCarCompatibleModSet(truck);
+  assert.equal(bikeMods.showHood, false);
+  assert.equal(bikeMods.showRoof, false);
+  assert.equal(truckMods.showHood, true);
+  assert.equal(truckMods.showRoof, true);
+  assert.equal(
+    bikeMods.wings.find((w) => w.id === 'lip')?.displayLabel,
+    'GP Tail Tidy'
+  );
+  assert.equal(
+    truckMods.wings.find((w) => w.id === 'lip')?.displayLabel,
+    'Tailgate Lip'
+  );
+});
+
+test('Customization & style upgrades require and deduct CR money cleanly', () => {
+  const jdm = CAR_ROSTER.find((c) => c.id === 'blue_jdm')!;
+  const jdmPkgs = getCarStylePackages(jdm);
+  const streetPkg = jdmPkgs[0];
+
+  // Stock options cost 0; all non-stock options cost > 0
+  assert.equal(getCustomizationOptionCost('paint', 'stock'), 0);
+  for (const p of PAINT_OPTIONS) {
+    if (p.id !== 'stock') assert.ok(p.cost > 0, `Paint ${p.id} should cost > 0`);
+  }
+  for (const w of WING_OPTIONS) {
+    if (w.id !== 'stock') assert.ok(w.cost > 0, `Wing ${w.id} should cost > 0`);
+  }
+  for (const e of ENGINE_OPTIONS) {
+    if (e.id !== 'stock') assert.ok(e.cost > 0, `Engine ${e.id} should cost > 0`);
+  }
+
+  // Attempting to buy paint without enough CR fails without mutating coins or custom
+  const paintCost = getCustomizationOptionCost('paint', 'crimson_blaze');
+  const failPaint = purchaseCarModUpgrade({
+    car: jdm,
+    currentCustom: { ...DEFAULT_CUSTOMIZATION },
+    ownedMods: [],
+    coins: paintCost - 1,
+    category: 'paint',
+    optionId: 'crimson_blaze',
+  });
+  assert.equal(failPaint.ok, false);
+  assert.equal(failPaint.reason, 'insufficient_funds');
+  assert.equal(failPaint.coins, paintCost - 1);
+  assert.equal(failPaint.nextCustom.paint, 'stock');
+
+  // Purchasing paint with sufficient CR deducts exact cost, equips, and marks owned
+  const buyPaint = purchaseCarModUpgrade({
+    car: jdm,
+    currentCustom: { ...DEFAULT_CUSTOMIZATION },
+    ownedMods: [],
+    coins: 500,
+    category: 'paint',
+    optionId: 'crimson_blaze',
+  });
+  assert.equal(buyPaint.ok, true);
+  assert.equal(buyPaint.cost, paintCost);
+  assert.equal(buyPaint.coins, 500 - paintCost);
+  assert.equal(buyPaint.nextCustom.paint, 'crimson_blaze');
+  assert.equal(isCarModOwned(buyPaint.nextOwnedMods, 'paint', 'crimson_blaze'), true);
+
+  // Re-equipping an already-owned mod after switching back to stock costs 0 CR
+  const resetToStock = purchaseCarModUpgrade({
+    car: jdm,
+    currentCustom: buyPaint.nextCustom,
+    ownedMods: buyPaint.nextOwnedMods,
+    coins: buyPaint.coins,
+    category: 'paint',
+    optionId: 'stock',
+  });
+  assert.equal(resetToStock.ok, true);
+  assert.equal(resetToStock.cost, 0);
+  assert.equal(resetToStock.coins, buyPaint.coins);
+
+  const reEquip = purchaseCarModUpgrade({
+    car: jdm,
+    currentCustom: resetToStock.nextCustom,
+    ownedMods: resetToStock.nextOwnedMods,
+    coins: resetToStock.coins,
+    category: 'paint',
+    optionId: 'crimson_blaze',
+  });
+  assert.equal(reEquip.ok, true);
+  assert.equal(reEquip.alreadyOwned, true);
+  assert.equal(reEquip.cost, 0);
+  assert.equal(reEquip.coins, resetToStock.coins);
+  assert.equal(reEquip.nextCustom.paint, 'crimson_blaze');
+
+  // Style package fails when coins < pkg.cost
+  const failPkg = purchaseCarStylePackage({
+    car: jdm,
+    currentCustom: { ...DEFAULT_CUSTOMIZATION },
+    ownedMods: [],
+    coins: streetPkg.cost - 10,
+    packageId: streetPkg.id,
+  });
+  assert.equal(failPkg.ok, false);
+  assert.equal(failPkg.reason, 'insufficient_funds');
+  assert.equal(failPkg.nextCustom.stylePackageId, undefined);
+
+  // Style package succeeds when coins >= pkg.cost, unlocks bundled mods & adds stat bonuses
+  const buyPkg = purchaseCarStylePackage({
+    car: jdm,
+    currentCustom: { ...DEFAULT_CUSTOMIZATION },
+    ownedMods: [],
+    coins: 1000,
+    packageId: streetPkg.id,
+  });
+  assert.equal(buyPkg.ok, true);
+  assert.equal(buyPkg.cost, streetPkg.cost);
+  assert.equal(buyPkg.coins, 1000 - streetPkg.cost);
+  assert.equal(buyPkg.nextCustom.stylePackageId, streetPkg.id);
+  assert.equal(isCarModOwned(buyPkg.nextOwnedMods, 'style', streetPkg.id, streetPkg.cost), true);
+  if (streetPkg.patch.wing) {
+    assert.equal(isCarModOwned(buyPkg.nextOwnedMods, 'wing', streetPkg.patch.wing), true);
+  }
+
+  const baseStats = computeEffectiveCarStats(jdm, { speed: 1, handling: 1, magnet: 1 }, DEFAULT_CUSTOMIZATION);
+  const pkgStats = computeEffectiveCarStats(jdm, { speed: 1, handling: 1, magnet: 1 }, buyPkg.nextCustom);
+  assert.ok(pkgStats.topSpeed > baseStats.topSpeed, 'Style package should boost topSpeed');
+  assert.ok(pkgStats.feverGainRate > baseStats.feverGainRate, 'Style package should boost feverGainRate');
+});
+
+test('isDepthPointVisible occludes rear exhaust flames when car structure is in front', () => {
+  const w = 12;
+  const h = 12;
+  const depthBuf = new Float32Array(w * h).fill(Infinity);
+  // Car body pixels at (4..7, 4..7) with front-facing depth = -1.2
+  for (let y = 4; y <= 7; y++) {
+    for (let x = 4; x <= 7; x++) {
+      depthBuf[y * w + x] = -1.2;
+    }
+  }
+
+  // Rear exhaust flame at depth +1.5 overlapping front car structure (5, 5) MUST be occluded
+  assert.equal(
+    isDepthPointVisible({
+      screenX: 5,
+      screenY: 5,
+      width: w,
+      height: h,
+      shouldMirror: false,
+      depthBuf,
+      pointDepthZ: 1.5,
+    }),
+    false
+  );
+
+  // Neighboring 1px silhouette edge (3, 5) also guards against bleeding over car outline
+  assert.equal(
+    isDepthPointVisible({
+      screenX: 3,
+      screenY: 5,
+      width: w,
+      height: h,
+      shouldMirror: false,
+      depthBuf,
+      pointDepthZ: 1.5,
+    }),
+    false
+  );
+
+  // Clear open space outside the car silhouette (1, 1) remains visible
+  assert.equal(
+    isDepthPointVisible({
+      screenX: 1,
+      screenY: 1,
+      width: w,
+      height: h,
+      shouldMirror: false,
+      depthBuf,
+      pointDepthZ: 1.5,
+    }),
+    true
+  );
+
+  // Flame in front of rear bumper (depth -1.16 within tolerance of -1.2) remains visible
+  assert.equal(
+    isDepthPointVisible({
+      screenX: 5,
+      screenY: 5,
+      width: w,
+      height: h,
+      shouldMirror: false,
+      depthBuf,
+      pointDepthZ: -1.16,
+    }),
+    true
+  );
+
+  // Mirrored coordinate maps screenX = 6 -> bx = 5 (occluded by front body)
+  assert.equal(
+    isDepthPointVisible({
+      screenX: 6,
+      screenY: 5,
+      width: w,
+      height: h,
+      shouldMirror: true,
+      depthBuf,
+      pointDepthZ: 1.5,
+    }),
+    false
+  );
+});
+
+test('Garage preview-before-buying computes summary without double-charging and commits atomically', () => {
+  const jdm = CAR_ROSTER.find((c) => c.id === 'blue_jdm')!;
+  const streetPkg = getCarStylePackages(jdm)[0];
+  const saved = { ...DEFAULT_CUSTOMIZATION };
+
+  // Preview a style package plus an additional unowned underglow mod
+  const withKit = applyCarStylePackagePreview(jdm, saved, streetPkg.id).nextCustom;
+  const withKitAndGlow = applyCarModPreview(withKit, 'underglow', 'cyan');
+  const glowCost = getCustomizationOptionCost('underglow', 'cyan');
+
+  const summary = computeGaragePreviewSummary({
+    car: jdm,
+    savedCustom: saved,
+    draftCustom: withKitAndGlow,
+    ownedMods: [],
+  });
+  assert.equal(summary.hasChanges, true);
+  assert.equal(summary.pendingStylePackage?.id, streetPkg.id);
+  // Total must equal kit cost + extra underglow cost (bundled kit parts not double-charged)
+  assert.equal(summary.totalCost, streetPkg.cost + glowCost);
+
+  // Insufficient CR keeps saved customization untouched
+  const failBundle = purchaseGaragePreviewBundle({
+    car: jdm,
+    savedCustom: saved,
+    draftCustom: withKitAndGlow,
+    ownedMods: [],
+    coins: summary.totalCost - 1,
+  });
+  assert.equal(failBundle.ok, false);
+  assert.equal(failBundle.nextCustom.stylePackageId, undefined);
+
+  // Sufficient CR commits all previewed changes and marks kit, kit parts, and extra mod owned
+  const buyBundle = purchaseGaragePreviewBundle({
+    car: jdm,
+    savedCustom: saved,
+    draftCustom: withKitAndGlow,
+    ownedMods: [],
+    coins: 1000,
+  });
+  assert.equal(buyBundle.ok, true);
+  assert.equal(buyBundle.coins, 1000 - summary.totalCost);
+  assert.equal(buyBundle.nextCustom.stylePackageId, streetPkg.id);
+  assert.equal(buyBundle.nextCustom.underglowColor, 'cyan');
+  assert.equal(isCarModOwned(buyBundle.nextOwnedMods, 'style', streetPkg.id, streetPkg.cost), true);
+  assert.equal(isCarModOwned(buyBundle.nextOwnedMods, 'underglow', 'cyan', glowCost), true);
+});
+
+test('hasThreeConsecutiveSRanks & appendRecentRunRank track last 3 run ranks accurately', () => {
+  assert.equal(hasThreeConsecutiveSRanks([]), false);
+  assert.equal(hasThreeConsecutiveSRanks(['S', 'S']), false);
+  assert.equal(hasThreeConsecutiveSRanks(['S', 'S', 'A']), false);
+  assert.equal(hasThreeConsecutiveSRanks(['S', 'S', 'S', 'B']), false);
+  assert.equal(hasThreeConsecutiveSRanks(['SS', 'S', 'S']), false);
+  assert.equal(hasThreeConsecutiveSRanks(['S', 'S', 'S']), true);
+  assert.equal(hasThreeConsecutiveSRanks(['B', 'A', 'S', 'S', 'S']), true);
+
+  let history: string[] = [];
+  history = appendRecentRunRank(history, 4500); // A
+  history = appendRecentRunRank(history, 8500); // S
+  history = appendRecentRunRank(history, 9200); // S
+  assert.equal(hasThreeConsecutiveSRanks(history), false);
+  history = appendRecentRunRank(history, 11000); // S
+  assert.deepEqual(history, ['A', 'S', 'S', 'S']);
+  assert.equal(hasThreeConsecutiveSRanks(history), true);
+
+  // History trimming retains trailing 3 S ranks
+  let cappedHistory: string[] = [];
+  for (let i = 0; i < 6; i++) {
+    cappedHistory = appendRecentRunRank(cappedHistory, 8500, 4);
+  }
+  assert.equal(cappedHistory.length, 4);
+  assert.equal(hasThreeConsecutiveSRanks(cappedHistory), true);
+});
+
+test('getAdaptiveHighwayTrafficDensity slightly increases traffic density only in highway_traffic after 3 S ranks', () => {
+  const streak = ['A', 'S', 'S', 'S'];
+  const noStreak = ['S', 'S', 'A'];
+
+  // Ignored in non-highway modes
+  assert.equal(
+    getAdaptiveHighwayTrafficDensity({ mode: 'drift', baseDensity: 0.2, recentRunRanks: streak }),
+    0.2
+  );
+  assert.equal(
+    getAdaptiveHighwayTrafficDensity({ mode: 'parking', baseDensity: 0.2, recentRunRanks: streak }),
+    0.2
+  );
+
+  // Unchanged without 3 consecutive trailing S ranks
+  assert.equal(
+    getAdaptiveHighwayTrafficDensity({ mode: 'highway_traffic', baseDensity: 0.2, recentRunRanks: noStreak }),
+    0.2
+  );
+
+  // Slight positive bump in highway_traffic when last 3 runs are S
+  const boosted = getAdaptiveHighwayTrafficDensity({
+    mode: 'highway_traffic',
+    baseDensity: 0.2,
+    recentRunRanks: streak,
+  });
+  assert.equal(boosted, Number((0.2 + S_RANK_TRAFFIC_DENSITY_BOOST).toFixed(4)));
+  assert.ok(boosted > 0.2 && boosted < 0.5, 'Density boost should be slight');
+
+  // Verify generateTrafficBatch spawns slightly more cars across a highway stretch with the streak
+  const baselineBatch = generateTrafficBatch({
+    startS: 58,
+    endS: 1200,
+    nextIdStart: 1,
+    seed: 777,
+    existingCars: [],
+    difficultyProgress: 0,
+    mode: 'highway_traffic',
+    recentRunRanks: noStreak,
+  });
+  const boostedBatch = generateTrafficBatch({
+    startS: 58,
+    endS: 1200,
+    nextIdStart: 1,
+    seed: 777,
+    existingCars: [],
+    difficultyProgress: 0,
+    mode: 'highway_traffic',
+    recentRunRanks: streak,
+  });
+  assert.ok(
+    boostedBatch.cars.length > baselineBatch.cars.length,
+    `Expected boosted batch (${boostedBatch.cars.length}) > baseline (${baselineBatch.cars.length})`
+  );
+  assert.ok(
+    boostedBatch.cars.length <= baselineBatch.cars.length * 1.25,
+    'Density increase must stay modest while preserving safe passing gaps'
+  );
+});
+
+
+
 
 
 

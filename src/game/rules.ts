@@ -215,6 +215,7 @@ export interface CarCustomization {
   hornType?: 'dual' | 'laser' | 'fanfare' | 'melody' | 'train';
   sound?: SoundProfileId;
   lights?: HeadlightKitId;
+  stylePackageId?: string;
 }
 
 export const DEFAULT_CUSTOMIZATION: CarCustomization = {
@@ -236,66 +237,67 @@ export const DEFAULT_CUSTOMIZATION: CarCustomization = {
   hornType: 'dual',
   sound: 'stock',
   lights: 'stock',
+  stylePackageId: undefined,
 };
 
-export const PAINT_OPTIONS: { id: PaintFinishId; label: string; hex: string | null }[] = [
-  { id: 'stock', label: 'Factory Paint', hex: null },
-  { id: 'electric_blue', label: 'Apex Blue', hex: '#2563eb' },
-  { id: 'crimson_blaze', label: 'Crimson Blaze', hex: '#dc2626' },
-  { id: 'sakura_pink', label: 'Sakura Pink', hex: '#f472b6' },
-  { id: 'solar_gold', label: 'Solar Gold', hex: '#eab308' },
-  { id: 'emerald_mint', label: 'Emerald Mint', hex: '#10b981' },
-  { id: 'cyber_cyan', label: 'Neon Cyan', hex: '#06b6d4' },
-  { id: 'pearl_white', label: 'Pearl White', hex: '#f1f5f9' },
-  { id: 'stealth_black', label: 'Stealth Black', hex: '#1e293b' },
-  { id: 'hyper_purple', label: 'Hyper Violet', hex: '#7e22ce' },
-  { id: 'acid_green', label: 'Acid Lime', hex: '#84cc16' },
-  { id: 'sunset_copper', label: 'Sunset Copper', hex: '#c2410c' },
-  { id: 'midnight_navy', label: 'Midnight Navy', hex: '#172554' },
-  { id: 'chameleon_violet', label: 'Prism Violet', hex: '#a21caf' },
-  { id: 'liquid_chrome', label: 'Liquid Chrome', hex: '#e2e8f0' },
-  { id: 'carbon_matte', label: 'Forged Carbon', hex: '#14171f' },
-  { id: 'matte_khaki', label: 'Tactical Khaki', hex: '#4d5645' },
-  { id: 'nardo_grey', label: 'Nardo Grey', hex: '#64748b' },
+export const PAINT_OPTIONS: { id: PaintFinishId; label: string; hex: string | null; cost: number }[] = [
+  { id: 'stock', label: 'Factory Paint', hex: null, cost: 0 },
+  { id: 'electric_blue', label: 'Apex Blue', hex: '#2563eb', cost: 120 },
+  { id: 'crimson_blaze', label: 'Crimson Blaze', hex: '#dc2626', cost: 120 },
+  { id: 'sakura_pink', label: 'Sakura Pink', hex: '#f472b6', cost: 160 },
+  { id: 'solar_gold', label: 'Solar Gold', hex: '#eab308', cost: 200 },
+  { id: 'emerald_mint', label: 'Emerald Mint', hex: '#10b981', cost: 140 },
+  { id: 'cyber_cyan', label: 'Neon Cyan', hex: '#06b6d4', cost: 180 },
+  { id: 'pearl_white', label: 'Pearl White', hex: '#f1f5f9', cost: 220 },
+  { id: 'stealth_black', label: 'Stealth Black', hex: '#1e293b', cost: 220 },
+  { id: 'hyper_purple', label: 'Hyper Violet', hex: '#7e22ce', cost: 240 },
+  { id: 'acid_green', label: 'Acid Lime', hex: '#84cc16', cost: 240 },
+  { id: 'sunset_copper', label: 'Sunset Copper', hex: '#c2410c', cost: 260 },
+  { id: 'midnight_navy', label: 'Midnight Navy', hex: '#172554', cost: 220 },
+  { id: 'chameleon_violet', label: 'Prism Violet', hex: '#a21caf', cost: 360 },
+  { id: 'liquid_chrome', label: 'Liquid Chrome', hex: '#e2e8f0', cost: 420 },
+  { id: 'carbon_matte', label: 'Forged Carbon', hex: '#14171f', cost: 380 },
+  { id: 'matte_khaki', label: 'Tactical Khaki', hex: '#4d5645', cost: 260 },
+  { id: 'nardo_grey', label: 'Nardo Grey', hex: '#64748b', cost: 240 },
 ];
 
-export const LIVERY_OPTIONS: { id: LiveryPatternId; label: string }[] = [
-  { id: 'stock', label: 'Factory' },
-  { id: 'twin_stripes', label: 'Twin Stripes' },
-  { id: 'two_tone', label: 'Two-Tone Roof' },
-  { id: 'side_flash', label: 'Side Flash' },
-  { id: 'clean', label: 'Clean Debadged' },
-  { id: 'police_intercept', label: 'Police Intercept' },
-  { id: 'hazard_chevrons', label: 'Hazard Chevrons' },
-  { id: 'camo_digital', label: 'Digital Camo' },
-  { id: 'flame_decals', label: 'Hot Rod Flames' },
-  { id: 'sponsor_wrap', label: 'Pro Sponsor Wrap' },
+export const LIVERY_OPTIONS: { id: LiveryPatternId; label: string; cost: number }[] = [
+  { id: 'stock', label: 'Factory', cost: 0 },
+  { id: 'clean', label: 'Clean Debadged', cost: 90 },
+  { id: 'twin_stripes', label: 'Twin Stripes', cost: 160 },
+  { id: 'two_tone', label: 'Two-Tone Roof', cost: 190 },
+  { id: 'side_flash', label: 'Side Flash', cost: 220 },
+  { id: 'hazard_chevrons', label: 'Hazard Chevrons', cost: 280 },
+  { id: 'camo_digital', label: 'Digital Camo', cost: 320 },
+  { id: 'flame_decals', label: 'Hot Rod Flames', cost: 340 },
+  { id: 'police_intercept', label: 'Police Intercept', cost: 380 },
+  { id: 'sponsor_wrap', label: 'Pro Sponsor Wrap', cost: 450 },
 ];
 
-export const WING_OPTIONS: { id: WingKitId; label: string }[] = [
-  { id: 'stock', label: 'Factory' },
-  { id: 'lip', label: 'Ducktail Lip' },
-  { id: 'gt', label: 'GT Wing' },
-  { id: 'twin', label: 'Twin Deck' },
-  { id: 'active', label: 'Active Aero' },
-  { id: 'cyber', label: 'High Swan-Neck' },
-  { id: 'f1_giant', label: 'F1 High-Downforce' },
-  { id: 'roof_spoiler', label: 'Roof Top Wing' },
-  { id: 'duckbill_retro', label: 'Retro Duckbill' },
-  { id: 'drag_chute', label: 'Drag Wheelie Bar' },
+export const WING_OPTIONS: { id: WingKitId; label: string; cost: number }[] = [
+  { id: 'stock', label: 'Factory', cost: 0 },
+  { id: 'lip', label: 'Ducktail Lip', cost: 160 },
+  { id: 'duckbill_retro', label: 'Retro Duckbill', cost: 190 },
+  { id: 'roof_spoiler', label: 'Roof Top Wing', cost: 220 },
+  { id: 'gt', label: 'GT Wing', cost: 280 },
+  { id: 'twin', label: 'Twin Deck', cost: 340 },
+  { id: 'active', label: 'Active Aero', cost: 440 },
+  { id: 'cyber', label: 'High Swan-Neck', cost: 520 },
+  { id: 'f1_giant', label: 'F1 High-Downforce', cost: 640 },
+  { id: 'drag_chute', label: 'Drag Wheelie Bar', cost: 600 },
 ];
 
-export const RIM_OPTIONS: { id: RimFinishId; label: string; hex: string | null }[] = [
-  { id: 'stock', label: 'Factory', hex: null },
-  { id: 'alloy', label: 'Forged Silver', hex: '#cbd5e1' },
-  { id: 'gold', label: 'Bronze Gold', hex: '#fbbf24' },
-  { id: 'neon_cyan', label: 'Electric Teal', hex: '#2dd4bf' },
-  { id: 'crimson', label: 'Track Red', hex: '#ef4444' },
-  { id: 'matte_black', label: 'Stealth Dark', hex: '#334155' },
-  { id: 'deep_dish_chrome', label: 'Deep-Dish Chrome', hex: '#f8fafc' },
-  { id: 'white_rally', label: 'Championship White', hex: '#f1f5f9' },
-  { id: 'purple_anodized', label: 'Purple Anodized', hex: '#c084fc' },
-  { id: 'turbo_fan', label: 'Aerodynamic Turbofan', hex: '#94a3b8' },
+export const RIM_OPTIONS: { id: RimFinishId; label: string; hex: string | null; cost: number }[] = [
+  { id: 'stock', label: 'Factory', hex: null, cost: 0 },
+  { id: 'alloy', label: 'Forged Silver', hex: '#cbd5e1', cost: 140 },
+  { id: 'matte_black', label: 'Stealth Dark', hex: '#334155', cost: 180 },
+  { id: 'gold', label: 'Bronze Gold', hex: '#fbbf24', cost: 240 },
+  { id: 'crimson', label: 'Track Red', hex: '#ef4444', cost: 260 },
+  { id: 'white_rally', label: 'Championship White', hex: '#f1f5f9', cost: 260 },
+  { id: 'neon_cyan', label: 'Electric Teal', hex: '#2dd4bf', cost: 320 },
+  { id: 'purple_anodized', label: 'Purple Anodized', hex: '#c084fc', cost: 360 },
+  { id: 'deep_dish_chrome', label: 'Deep-Dish Chrome', hex: '#f8fafc', cost: 420 },
+  { id: 'turbo_fan', label: 'Aerodynamic Turbofan', hex: '#94a3b8', cost: 480 },
 ];
 
 export interface UnderglowOption {
@@ -386,13 +388,13 @@ export function resolveUnderglowColor(
   return null;
 }
 
-export const FLAME_OPTIONS: { id: FlameColorId; label: string; outer: string | null; core: string | null }[] = [
-  { id: 'stock', label: 'Factory', outer: null, core: null },
-  { id: 'amber', label: 'Turbo Orange', outer: '#f97316', core: '#fef08a' },
-  { id: 'nitro_blue', label: 'Nitro Blue', outer: '#06b6d4', core: '#cffafe' },
-  { id: 'plasma_pink', label: 'Plasma Pink', outer: '#ec4899', core: '#fbcfe8' },
-  { id: 'emerald', label: 'Toxic Flame', outer: '#10b981', core: '#a7f3d0' },
-  { id: 'hellfire', label: 'Boss Crimson', outer: '#ef4444', core: '#fde047' },
+export const FLAME_OPTIONS: { id: FlameColorId; label: string; outer: string | null; core: string | null; cost: number }[] = [
+  { id: 'stock', label: 'Factory', outer: null, core: null, cost: 0 },
+  { id: 'amber', label: 'Turbo Orange', outer: '#f97316', core: '#fef08a', cost: 180 },
+  { id: 'nitro_blue', label: 'Nitro Blue', outer: '#06b6d4', core: '#cffafe', cost: 260 },
+  { id: 'plasma_pink', label: 'Plasma Pink', outer: '#ec4899', core: '#fbcfe8', cost: 320 },
+  { id: 'emerald', label: 'Toxic Flame', outer: '#10b981', core: '#a7f3d0', cost: 360 },
+  { id: 'hellfire', label: 'Boss Crimson', outer: '#ef4444', core: '#fde047', cost: 480 },
 ];
 
 export const ENGINE_OPTIONS: {
@@ -402,29 +404,30 @@ export const ENGINE_OPTIONS: {
   handlingBonus: number;
   feverBonus: number;
   tag: string;
+  cost: number;
 }[] = [
-  { id: 'stock', label: 'Factory Block', speedBonus: 0, handlingBonus: 0, feverBonus: 0, tag: 'STD' },
-  { id: 'twin_turbo', label: 'Twin-Turbo I6', speedBonus: 1.6, handlingBonus: 0.05, feverBonus: 0.12, tag: '+TOP SPD' },
-  { id: 'supercharged', label: 'Supercharged V8', speedBonus: 1.3, handlingBonus: -0.02, feverBonus: 0.18, tag: '+TORQUE' },
-  { id: 'v12_hybrid', label: 'V12 KERS Hybrid', speedBonus: 2.2, handlingBonus: 0.08, feverBonus: 0.25, tag: '+FEVER' },
-  { id: 'rotary_brap', label: 'Ported 4-Rotor', speedBonus: 1.1, handlingBonus: 0.22, feverBonus: 0.20, tag: '+AGILITY' },
-  { id: 'turbo_diesel_heavy', label: 'Heavy Turbo Diesel', speedBonus: 1.8, handlingBonus: -0.06, feverBonus: 0.30, tag: '+HAUL' },
-  { id: 'supercharged_v8_hemi', label: '6.2L Blown Hemi', speedBonus: 2.4, handlingBonus: -0.04, feverBonus: 0.28, tag: '+HELLFIRE' },
-  { id: 'quad_turbo_w16', label: '8.0L Quad-Turbo W16', speedBonus: 3.2, handlingBonus: 0.06, feverBonus: 0.35, tag: '+WARP' },
-  { id: 'electric_tri_motor', label: 'Tri-Motor Electric', speedBonus: 2.0, handlingBonus: 0.16, feverBonus: 0.32, tag: '+INSTANT' },
-  { id: 'liter_bike_inline4', label: '1000cc 16,000RPM I4', speedBonus: 1.5, handlingBonus: 0.25, feverBonus: 0.22, tag: '+HIGH-REV' },
+  { id: 'stock', label: 'Factory Block', speedBonus: 0, handlingBonus: 0, feverBonus: 0, tag: 'STD', cost: 0 },
+  { id: 'twin_turbo', label: 'Twin-Turbo I6', speedBonus: 1.6, handlingBonus: 0.05, feverBonus: 0.12, tag: '+TOP SPD', cost: 420 },
+  { id: 'rotary_brap', label: 'Ported 4-Rotor', speedBonus: 1.1, handlingBonus: 0.22, feverBonus: 0.20, tag: '+AGILITY', cost: 480 },
+  { id: 'supercharged', label: 'Supercharged V8', speedBonus: 1.3, handlingBonus: -0.02, feverBonus: 0.18, tag: '+TORQUE', cost: 540 },
+  { id: 'liter_bike_inline4', label: '1000cc 16,000RPM I4', speedBonus: 1.5, handlingBonus: 0.25, feverBonus: 0.22, tag: '+HIGH-REV', cost: 620 },
+  { id: 'turbo_diesel_heavy', label: 'Heavy Turbo Diesel', speedBonus: 1.8, handlingBonus: -0.06, feverBonus: 0.30, tag: '+HAUL', cost: 680 },
+  { id: 'v12_hybrid', label: 'V12 KERS Hybrid', speedBonus: 2.2, handlingBonus: 0.08, feverBonus: 0.25, tag: '+FEVER', cost: 780 },
+  { id: 'electric_tri_motor', label: 'Tri-Motor Electric', speedBonus: 2.0, handlingBonus: 0.16, feverBonus: 0.32, tag: '+INSTANT', cost: 860 },
+  { id: 'supercharged_v8_hemi', label: '6.2L Blown Hemi', speedBonus: 2.4, handlingBonus: -0.04, feverBonus: 0.28, tag: '+HELLFIRE', cost: 960 },
+  { id: 'quad_turbo_w16', label: '8.0L Quad-Turbo W16', speedBonus: 3.2, handlingBonus: 0.06, feverBonus: 0.35, tag: '+WARP', cost: 1350 },
 ];
 
-export const ROOF_OPTIONS: { id: RoofModId; label: string }[] = [
-  { id: 'stock', label: 'Factory' },
-  { id: 'carbon_panel', label: 'Carbon Weave' },
-  { id: 'roof_scoop', label: 'Rally Scoop' },
-  { id: 'moonroof', label: 'Glass Sunroof' },
-  { id: 'light_bar', label: 'LED Lightbar' },
-  { id: 'vortex_fins', label: 'Vortex Fins' },
-  { id: 'siren_strobe', label: 'Police Strobe Bar' },
-  { id: 'heavy_bullbar', label: 'Heavy Overload Rack' },
-  { id: 'roof_cargo_box', label: 'Aerodynamic Travel Box' },
+export const ROOF_OPTIONS: { id: RoofModId; label: string; cost: number }[] = [
+  { id: 'stock', label: 'Factory', cost: 0 },
+  { id: 'carbon_panel', label: 'Carbon Weave', cost: 180 },
+  { id: 'moonroof', label: 'Glass Sunroof', cost: 220 },
+  { id: 'roof_scoop', label: 'Rally Scoop', cost: 260 },
+  { id: 'vortex_fins', label: 'Vortex Fins', cost: 300 },
+  { id: 'light_bar', label: 'LED Lightbar', cost: 360 },
+  { id: 'roof_cargo_box', label: 'Aerodynamic Travel Box', cost: 420 },
+  { id: 'siren_strobe', label: 'Police Strobe Bar', cost: 480 },
+  { id: 'heavy_bullbar', label: 'Heavy Overload Rack', cost: 520 },
 ];
 
 export const TIRE_OPTIONS: {
@@ -433,33 +436,34 @@ export const TIRE_OPTIONS: {
   gripDelta: number;
   speedDelta: number;
   stripeHex: string | null;
+  cost: number;
 }[] = [
-  { id: 'stock', label: 'Street Radial', gripDelta: 0, speedDelta: 0, stripeHex: null },
-  { id: 'semi_slick', label: 'Track Semi-Slick', gripDelta: 0.04, speedDelta: 0.4, stripeHex: '#f59e0b' },
-  { id: 'whitewall', label: 'Retro Whitewall', gripDelta: 0.01, speedDelta: 0.1, stripeHex: '#f8fafc' },
-  { id: 'drift_spec', label: 'Drift Compound', gripDelta: -0.04, speedDelta: 0.2, stripeHex: '#f472b6' },
-  { id: 'rain_groove', label: 'Aqua Neon Tread', gripDelta: 0.03, speedDelta: 0.2, stripeHex: '#22d3ee' },
-  { id: 'drag_slick', label: 'Fat Drag Slicks', gripDelta: 0.05, speedDelta: 0.8, stripeHex: '#ef4444' },
+  { id: 'stock', label: 'Street Radial', gripDelta: 0, speedDelta: 0, stripeHex: null, cost: 0 },
+  { id: 'whitewall', label: 'Retro Whitewall', gripDelta: 0.01, speedDelta: 0.1, stripeHex: '#f8fafc', cost: 150 },
+  { id: 'rain_groove', label: 'Aqua Neon Tread', gripDelta: 0.03, speedDelta: 0.2, stripeHex: '#22d3ee', cost: 220 },
+  { id: 'drift_spec', label: 'Drift Compound', gripDelta: -0.04, speedDelta: 0.2, stripeHex: '#f472b6', cost: 260 },
+  { id: 'semi_slick', label: 'Track Semi-Slick', gripDelta: 0.04, speedDelta: 0.4, stripeHex: '#f59e0b', cost: 340 },
+  { id: 'drag_slick', label: 'Fat Drag Slicks', gripDelta: 0.05, speedDelta: 0.8, stripeHex: '#ef4444', cost: 520 },
 ];
 
-export const EXHAUST_OPTIONS: { id: ExhaustStyleId; label: string }[] = [
-  { id: 'stock', label: 'Dual Street' },
-  { id: 'quad_ti', label: 'Quad Burnt-Ti' },
-  { id: 'side_exit', label: 'Side Flank Pipes' },
-  { id: 'shotgun', label: 'Shotgun Blast' },
-  { id: 'center_tri', label: 'Center Tri-Tip' },
-  { id: 'hood_exit', label: 'Hood Exit Flames' },
-  { id: 'dual_diesel_stacks', label: 'Dual Vertical Stacks' },
-  { id: 'under_tail_moto', label: 'Under-Tail Moto Pipe' },
+export const EXHAUST_OPTIONS: { id: ExhaustStyleId; label: string; cost: number }[] = [
+  { id: 'stock', label: 'Dual Street', cost: 0 },
+  { id: 'side_exit', label: 'Side Flank Pipes', cost: 180 },
+  { id: 'under_tail_moto', label: 'Under-Tail Moto Pipe', cost: 220 },
+  { id: 'quad_ti', label: 'Quad Burnt-Ti', cost: 280 },
+  { id: 'shotgun', label: 'Shotgun Blast', cost: 320 },
+  { id: 'center_tri', label: 'Center Tri-Tip', cost: 380 },
+  { id: 'dual_diesel_stacks', label: 'Dual Vertical Stacks', cost: 420 },
+  { id: 'hood_exit', label: 'Hood Exit Flames', cost: 480 },
 ];
 
-export const HOOD_OPTIONS: { id: HoodStyleId; label: string }[] = [
-  { id: 'stock', label: 'Factory' },
-  { id: 'carbon', label: 'Forged Carbon' },
-  { id: 'vented', label: 'GT Heat Louvers' },
-  { id: 'blower', label: 'Chrome Blower' },
-  { id: 'clear_bay', label: 'Clear Engine Bay' },
-  { id: 'twin_scoop', label: 'Twin NACA Scoops' },
+export const HOOD_OPTIONS: { id: HoodStyleId; label: string; cost: number }[] = [
+  { id: 'stock', label: 'Factory', cost: 0 },
+  { id: 'vented', label: 'GT Heat Louvers', cost: 190 },
+  { id: 'carbon', label: 'Forged Carbon', cost: 240 },
+  { id: 'twin_scoop', label: 'Twin NACA Scoops', cost: 300 },
+  { id: 'blower', label: 'Chrome Blower', cost: 420 },
+  { id: 'clear_bay', label: 'Clear Engine Bay', cost: 540 },
 ];
 
 export const WINDOW_OPTIONS: {
@@ -468,12 +472,13 @@ export const WINDOW_OPTIONS: {
   darkHex: string;
   midHex: string;
   specHex: string;
+  cost: number;
 }[] = [
-  { id: 'stock', label: 'Factory Tint', darkHex: '#172334', midHex: '#2d5466', specHex: '#bae6fd' },
-  { id: 'limo_black', label: 'Limo Obsidian', darkHex: '#070a10', midHex: '#111827', specHex: '#64748b' },
-  { id: 'chameleon_cyan', label: 'Cyan Chameleon', darkHex: '#0c4a6e', midHex: '#0891b2', specHex: '#67e8f9' },
-  { id: 'amber_gold', label: 'Solar Iridium', darkHex: '#451a03', midHex: '#92400e', specHex: '#fde047' },
-  { id: 'clear_cage', label: 'Clear + Roll Cage', darkHex: '#1e293b', midHex: '#3b82f6', specHex: '#e0f2fe' },
+  { id: 'stock', label: 'Factory Tint', darkHex: '#172334', midHex: '#2d5466', specHex: '#bae6fd', cost: 0 },
+  { id: 'limo_black', label: 'Limo Obsidian', darkHex: '#070a10', midHex: '#111827', specHex: '#64748b', cost: 140 },
+  { id: 'chameleon_cyan', label: 'Cyan Chameleon', darkHex: '#0c4a6e', midHex: '#0891b2', specHex: '#67e8f9', cost: 220 },
+  { id: 'amber_gold', label: 'Solar Iridium', darkHex: '#451a03', midHex: '#92400e', specHex: '#fde047', cost: 260 },
+  { id: 'clear_cage', label: 'Clear + Roll Cage', darkHex: '#1e293b', midHex: '#3b82f6', specHex: '#e0f2fe', cost: 320 },
 ];
 
 export interface HornOption {
@@ -501,15 +506,15 @@ export const LEGACY_HORN_MAP: Record<string, HornTypeId> = {
   bike_beep: 'laser',
 };
 
-export const SOUND_OPTIONS: { id: SoundProfileId; label: string }[] = [
-  { id: 'stock', label: 'Balanced Coupe' },
-  { id: 'jdm_turbo', label: 'Turbo Blow-Off' },
-  { id: 'v8_muscle', label: 'Thundering V8' },
-  { id: 'f1_scream', label: 'V12 High-Rev' },
-  { id: 'rotary_braap', label: 'Rotary Braap' },
-  { id: 'diesel_chug', label: 'Heavy Turbo Diesel' },
-  { id: 'superbike_16k', label: '16,000 RPM Superbike' },
-  { id: 'electric_whine', label: 'High-Torque EV Whine' },
+export const SOUND_OPTIONS: { id: SoundProfileId; label: string; cost: number }[] = [
+  { id: 'stock', label: 'Balanced Coupe', cost: 0 },
+  { id: 'jdm_turbo', label: 'Turbo Blow-Off', cost: 200 },
+  { id: 'rotary_braap', label: 'Rotary Braap', cost: 240 },
+  { id: 'v8_muscle', label: 'Thundering V8', cost: 300 },
+  { id: 'diesel_chug', label: 'Heavy Turbo Diesel', cost: 320 },
+  { id: 'superbike_16k', label: '16,000 RPM Superbike', cost: 340 },
+  { id: 'electric_whine', label: 'High-Torque EV Whine', cost: 420 },
+  { id: 'f1_scream', label: 'V12 High-Rev', cost: 480 },
 ];
 
 export const HEADLIGHT_OPTIONS: {
@@ -517,12 +522,13 @@ export const HEADLIGHT_OPTIONS: {
   label: string;
   lensHex: string;
   beamHex: string;
+  cost: number;
 }[] = [
-  { id: 'stock', label: 'Halogen Warm', lensHex: '#fef3c7', beamHex: '#fde68a' },
-  { id: 'xenon_ice', label: 'Xenon Ice', lensHex: '#e0f2fe', beamHex: '#bae6fd' },
-  { id: 'cyber_cyan', label: 'Cyber Matrix', lensHex: '#a5f3fc', beamHex: '#22d3ee' },
-  { id: 'gt_gold', label: 'Endurance Yellow', lensHex: '#fef08a', beamHex: '#facc15' },
-  { id: 'demon_red', label: 'Apex Crimson', lensHex: '#fecaca', beamHex: '#fb7185' },
+  { id: 'stock', label: 'Halogen Warm', lensHex: '#fef3c7', beamHex: '#fde68a', cost: 0 },
+  { id: 'xenon_ice', label: 'Xenon Ice', lensHex: '#e0f2fe', beamHex: '#bae6fd', cost: 160 },
+  { id: 'gt_gold', label: 'Endurance Yellow', lensHex: '#fef08a', beamHex: '#facc15', cost: 220 },
+  { id: 'cyber_cyan', label: 'Cyber Matrix', lensHex: '#a5f3fc', beamHex: '#22d3ee', cost: 280 },
+  { id: 'demon_red', label: 'Apex Crimson', lensHex: '#fecaca', beamHex: '#fb7185', cost: 360 },
 ];
 
 export const NUMBER_OPTIONS = ['73', '86', '01', '24', '77', '99', '13', '42', '90'] as const;
@@ -2731,6 +2737,1040 @@ export function flipDirection(dir: DiagonalDirection): DiagonalDirection {
   return dir === 'right' ? 'left' : 'right';
 }
 
+export type ModCostCategory =
+  | 'paint'
+  | 'livery'
+  | 'wing'
+  | 'rims'
+  | 'underglow'
+  | 'flame'
+  | 'engine'
+  | 'roof'
+  | 'tires'
+  | 'exhaust'
+  | 'hood'
+  | 'windows'
+  | 'horn'
+  | 'sound'
+  | 'lights';
+
+export interface CarStylePackage {
+  id: string;
+  carId: string;
+  name: string;
+  badge: string;
+  description: string;
+  cost: number;
+  speedBonus: number;
+  gripBonus: number;
+  feverBonus: number;
+  patch: Partial<CarCustomization>;
+}
+
+function hashCarId(id: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+const CAR_SIGNATURE_PACKAGES: Record<string, Omit<CarStylePackage, 'carId'>[]> = {
+  blue_jdm: [
+    {
+      id: 'blue_jdm_wangan',
+      name: 'Wangan Midnight Spec',
+      badge: 'STREET KIT',
+      description: 'Apex Blue finish, Forged Carbon hood, Ducktail Lip, and Bronze Gold rims.',
+      cost: 240,
+      speedBonus: 0.4,
+      gripBonus: 0.02,
+      feverBonus: 0.05,
+      patch: { paint: 'electric_blue', hood: 'carbon', wing: 'lip', rims: 'gold', livery: 'twin_stripes', tires: 'semi_slick', lights: 'xenon_ice' },
+    },
+    {
+      id: 'blue_jdm_kanjo',
+      name: 'Osaka Kanjo Loop',
+      badge: 'DRIFT SPEC',
+      description: 'Pearl White two-tone wrap, GT Wing, Quad Burnt-Ti pipes & Cyan underglow.',
+      cost: 520,
+      speedBonus: 0.7,
+      gripBonus: 0.03,
+      feverBonus: 0.10,
+      patch: { paint: 'pearl_white', livery: 'two_tone', hood: 'vented', wing: 'gt', rims: 'white_rally', exhaust: 'quad_ti', underglowColor: '#06b6d4', flame: 'nitro_blue', tires: 'drift_spec' },
+    },
+    {
+      id: 'blue_jdm_apex73',
+      name: '#73 Touge Legend Pack',
+      badge: 'SIGNATURE',
+      description: 'Wide-deck Swan-Neck aero, Turbofan wheels, Twin-Turbo I6 & Plasma flames.',
+      cost: 920,
+      speedBonus: 1.1,
+      gripBonus: 0.04,
+      feverBonus: 0.16,
+      patch: { paint: 'midnight_navy', livery: 'sponsor_wrap', hood: 'twin_scoop', roof: 'vortex_fins', wing: 'cyber', rims: 'turbo_fan', exhaust: 'shotgun', engine: 'twin_turbo', sound: 'jdm_turbo', lights: 'cyber_cyan', flame: 'plasma_pink', underglowColor: '#06b6d4' },
+    },
+  ],
+  crimson_tuner: [
+    {
+      id: 'crimson_touge_carbon',
+      name: 'Akagi Red Comet',
+      badge: 'STREET KIT',
+      description: 'Crimson Blaze paint, GT Heat Louvers, Track Red rims & Drift Compound tires.',
+      cost: 280,
+      speedBonus: 0.45,
+      gripBonus: 0.02,
+      feverBonus: 0.06,
+      patch: { paint: 'crimson_blaze', hood: 'vented', wing: 'gt', rims: 'crimson', tires: 'drift_spec', lights: 'gt_gold' },
+    },
+    {
+      id: 'crimson_rotary_wide',
+      name: 'FD Touge Widebody',
+      badge: 'DRIFT SPEC',
+      description: 'Carbon Weave roof, Side Flash wrap, Quad Burnt-Ti & Ported 4-Rotor agility.',
+      cost: 640,
+      speedBonus: 0.8,
+      gripBonus: 0.03,
+      feverBonus: 0.12,
+      patch: { paint: 'crimson_blaze', livery: 'side_flash', roof: 'carbon_panel', wing: 'twin', rims: 'gold', exhaust: 'quad_ti', engine: 'rotary_brap', sound: 'rotary_braap', flame: 'amber', underglowColor: '#f43f5e' },
+    },
+    {
+      id: 'crimson_boss_demon',
+      name: 'Hellfire D1 Works',
+      badge: 'SIGNATURE',
+      description: 'Clear Engine Bay, High Swan-Neck, Demon Crimson optics & Hellfire flames.',
+      cost: 1080,
+      speedBonus: 1.2,
+      gripBonus: 0.04,
+      feverBonus: 0.18,
+      patch: { paint: 'stealth_black', livery: 'flame_decals', hood: 'clear_bay', wing: 'cyber', rims: 'crimson', exhaust: 'hood_exit', lights: 'demon_red', flame: 'hellfire', underglowColor: '#f43f5e', windows: 'clear_cage' },
+    },
+  ],
+  emerald_truck: [
+    {
+      id: 'emerald_ute_slammed',
+      name: 'Slammed Drift Ute',
+      badge: 'HAULER KIT',
+      description: 'Emerald Mint paint, Ducktail tailgate lip, Side Flank pipes & Retro Whitewalls.',
+      cost: 300,
+      speedBonus: 0.45,
+      gripBonus: 0.02,
+      feverBonus: 0.07,
+      patch: { paint: 'emerald_mint', wing: 'lip', exhaust: 'side_exit', tires: 'whitewall', rims: 'alloy', livery: 'twin_stripes' },
+    },
+    {
+      id: 'emerald_baja_raid',
+      name: 'Outlaw Baja Hauler',
+      badge: 'OFFROAD SPEC',
+      description: 'Tactical Khaki wrap, Heavy Overload Rack, LED Lightbar & Fat Drag Slicks.',
+      cost: 680,
+      speedBonus: 0.85,
+      gripBonus: 0.04,
+      feverBonus: 0.12,
+      patch: { paint: 'matte_khaki', livery: 'hazard_chevrons', roof: 'heavy_bullbar', exhaust: 'dual_diesel_stacks', tires: 'drag_slick', rims: 'matte_black', lights: 'gt_gold', underglowColor: '#10b981' },
+    },
+    {
+      id: 'emerald_diesel_beast',
+      name: 'Twin-Stack Toxic Rig',
+      badge: 'SIGNATURE',
+      description: 'Heavy Turbo Diesel, Chrome Blower, Dual Stacks & Toxic Emerald backfire.',
+      cost: 1120,
+      speedBonus: 1.25,
+      gripBonus: 0.03,
+      feverBonus: 0.20,
+      patch: { paint: 'emerald_mint', livery: 'camo_digital', hood: 'blower', roof: 'light_bar', exhaust: 'dual_diesel_stacks', engine: 'turbo_diesel_heavy', sound: 'diesel_chug', flame: 'emerald', underglowColor: '#10b981', rims: 'deep_dish_chrome' },
+    },
+  ],
+  midnight_muscle: [
+    {
+      id: 'muscle_pro_street',
+      name: 'Midnight Pro-Touring',
+      badge: 'MUSCLE KIT',
+      description: 'Hyper Violet gloss, Retro Duckbill, Stealth Dark rims & Thundering V8 exhaust.',
+      cost: 360,
+      speedBonus: 0.5,
+      gripBonus: 0.02,
+      feverBonus: 0.08,
+      patch: { paint: 'hyper_purple', wing: 'duckbill_retro', rims: 'matte_black', sound: 'v8_muscle', tires: 'semi_slick', windows: 'limo_black' },
+    },
+    {
+      id: 'muscle_strip_blower',
+      name: '1/4 Mile Strip Dominator',
+      badge: 'DRAG SPEC',
+      description: 'Exposed Chrome Blower, Hot Rod Flames, Fat Drag Slicks & Drag Wheelie Bar.',
+      cost: 760,
+      speedBonus: 1.0,
+      gripBonus: 0.02,
+      feverBonus: 0.14,
+      patch: { paint: 'stealth_black', livery: 'flame_decals', hood: 'blower', wing: 'drag_chute', tires: 'drag_slick', exhaust: 'shotgun', rims: 'deep_dish_chrome', flame: 'amber', underglowColor: '#8b5cf6' },
+    },
+    {
+      id: 'muscle_hellfire_hemi',
+      name: '6.2L Obsidian Hellhound',
+      badge: 'SIGNATURE',
+      description: '6.2L Blown Hemi power, Hood Exit Flames, Prism Violet paint & Hellfire backfire.',
+      cost: 1280,
+      speedBonus: 1.4,
+      gripBonus: 0.03,
+      feverBonus: 0.22,
+      patch: { paint: 'chameleon_violet', livery: 'twin_stripes', hood: 'clear_bay', wing: 'twin', exhaust: 'hood_exit', engine: 'supercharged_v8_hemi', sound: 'v8_muscle', flame: 'hellfire', lights: 'demon_red', underglowColor: '#8b5cf6' },
+    },
+  ],
+  sakura_silvia: [
+    {
+      id: 'sakura_night_drift',
+      name: 'Sakura Night Drift',
+      badge: 'TOUGE KIT',
+      description: 'Sakura Pink pearl, Two-Tone roof, Championship White rims & Drift Compound.',
+      cost: 420,
+      speedBonus: 0.55,
+      gripBonus: 0.03,
+      feverBonus: 0.09,
+      patch: { paint: 'sakura_pink', livery: 'two_tone', rims: 'white_rally', tires: 'drift_spec', wing: 'gt', lights: 'xenon_ice' },
+    },
+    {
+      id: 'sakura_d1_queen',
+      name: 'D1 Ebisu Showstopper',
+      badge: 'PRO DRIFT',
+      description: 'Pro Sponsor Wrap, Swan-Neck wing, Tokyo Pink glow & Plasma Pink backfire.',
+      cost: 840,
+      speedBonus: 0.9,
+      gripBonus: 0.04,
+      feverBonus: 0.15,
+      patch: { paint: 'sakura_pink', livery: 'sponsor_wrap', hood: 'carbon', wing: 'cyber', rims: 'purple_anodized', exhaust: 'quad_ti', flame: 'plasma_pink', underglowColor: '#ec4899', windows: 'clear_cage' },
+    },
+    {
+      id: 'sakura_hanami_apex',
+      name: '#86 Hanami Masterpiece',
+      badge: 'SIGNATURE',
+      description: 'Liquid Chrome contrast, Tri-Motor torque hybrid, Rainbow glow & Cyber Matrix LEDs.',
+      cost: 1360,
+      speedBonus: 1.35,
+      gripBonus: 0.05,
+      feverBonus: 0.22,
+      patch: { paint: 'liquid_chrome', livery: 'side_flash', hood: 'clear_bay', roof: 'vortex_fins', wing: 'cyber', rims: 'turbo_fan', engine: 'twin_turbo', flame: 'plasma_pink', lights: 'cyber_cyan', underglowColor: '#ec4899' },
+    },
+  ],
+};
+
+function getTailoredLabelOverride(
+  car: CarSpec,
+  category: ModCostCategory,
+  optionId: string,
+  defaultLabel: string
+): string {
+  const shape = car.bodyShape || 'coupe';
+  const cat = getCarCategory(car);
+  if (cat === 'motorcycle') {
+    if (category === 'wing') {
+      if (optionId === 'lip') return 'GP Tail Tidy';
+      if (optionId === 'gt') return 'Track Winglets';
+      if (optionId === 'active') return 'Active Aero Fairing';
+      if (optionId === 'cyber') return 'Cyber Spine Aero';
+    }
+    if (category === 'livery') {
+      if (optionId === 'twin_stripes') return 'Tank Racing Stripe';
+      if (optionId === 'sponsor_wrap') return 'MotoGP Factory Fairing';
+      if (optionId === 'side_flash') return 'Fairing Slash Graphic';
+    }
+  } else if (cat === 'truck') {
+    if (category === 'wing') {
+      if (optionId === 'lip') return 'Tailgate Lip';
+      if (optionId === 'roof_spoiler') return 'Cab Visor Wing';
+      if (optionId === 'drag_chute') return 'Heavy Tow Bar';
+    }
+    if (category === 'roof') {
+      if (optionId === 'heavy_bullbar') return 'Expedition Steel Rack';
+      if (optionId === 'light_bar') return 'Roof Offroad Spotlights';
+    }
+  } else if (cat === 'formula' || shape === 'prototype') {
+    if (category === 'wing') {
+      if (optionId === 'f1_giant') return 'DRS Carbon Bi-Plane';
+      if (optionId === 'active') return 'Active Ground-Effect Wing';
+    }
+    if (category === 'hood') {
+      if (optionId === 'vented') return 'S-Duct Nose Cone';
+      if (optionId === 'clear_bay') return 'Open Suspension Cover';
+    }
+  } else if (cat === 'muscle') {
+    if (category === 'hood') {
+      if (optionId === 'blower') return 'Supercharger Bugcatcher';
+      if (optionId === 'twin_scoop') return 'Dual Shaker Scoops';
+    }
+  }
+  return defaultLabel;
+}
+
+/**
+ * Generates 3 unique, car-specific Style Upgrade Packages for any of the 90 vehicles.
+ * Handcrafted signatures cover core models, and deterministic car-tailored presets
+ * customize every remaining car by body shape, tier, name, and factory palette.
+ */
+export function getCarStylePackages(car: CarSpec): CarStylePackage[] {
+  const signature = CAR_SIGNATURE_PACKAGES[car.id];
+  if (signature) {
+    return signature.map((pkg) => ({ ...pkg, carId: car.id }));
+  }
+
+  const h = hashCarId(car.id);
+  const cat = getCarCategory(car);
+  const tierScale = 1 + Math.min(1.6, (car.tier - 1) * 0.045);
+  const shortName = car.name.split(' ').slice(0, 2).join(' ');
+
+  const streetPaintPool: PaintFinishId[] =
+    cat === 'motorcycle'
+      ? ['crimson_blaze', 'pearl_white', 'electric_blue', 'acid_green', 'solar_gold', 'stealth_black']
+      : cat === 'truck'
+      ? ['matte_khaki', 'emerald_mint', 'midnight_navy', 'nardo_grey', 'sunset_copper', 'stealth_black']
+      : cat === 'super' || cat === 'formula'
+      ? ['liquid_chrome', 'solar_gold', 'pearl_white', 'cyber_cyan', 'chameleon_violet', 'crimson_blaze']
+      : ['electric_blue', 'crimson_blaze', 'nardo_grey', 'sakura_pink', 'emerald_mint', 'sunset_copper'];
+
+  const proPaintPool: PaintFinishId[] = ['carbon_matte', 'hyper_purple', 'chameleon_violet', 'liquid_chrome', 'cyber_cyan', 'acid_green'];
+  const rimPool: RimFinishId[] = ['gold', 'neon_cyan', 'white_rally', 'crimson', 'deep_dish_chrome', 'turbo_fan', 'purple_anodized'];
+  const flamePool: FlameColorId[] = ['amber', 'nitro_blue', 'plasma_pink', 'emerald', 'hellfire'];
+  const glowPool = ['#06b6d4', '#f43f5e', '#10b981', '#8b5cf6', '#f59e0b', '#ec4899'];
+
+  const p1 = streetPaintPool[h % streetPaintPool.length];
+  const p2 = proPaintPool[(h >>> 3) % proPaintPool.length];
+  const r1 = rimPool[(h >>> 5) % rimPool.length];
+  const r2 = rimPool[(h >>> 7) % rimPool.length];
+  const fl1 = flamePool[(h >>> 9) % flamePool.length];
+  const fl2 = flamePool[(h >>> 11) % flamePool.length];
+  const glow1 = glowPool[(h >>> 13) % glowPool.length];
+
+  if (cat === 'motorcycle') {
+    const isCyber = car.bodyShape === 'cyber_bike';
+    return [
+      {
+        id: `${car.id}_street_aero`,
+        carId: car.id,
+        name: `${shortName} Track Fairing`,
+        badge: 'MOTO KIT',
+        description: `Sculpted tail tidy, ${r1.replace('_', ' ')} wheels, semi-slick rubber & xenon projector.`,
+        cost: Math.round(280 * tierScale),
+        speedBonus: 0.45,
+        gripBonus: 0.02,
+        feverBonus: 0.07,
+        patch: { paint: p1, wing: 'lip', rims: r1, tires: 'semi_slick', lights: 'xenon_ice', livery: 'side_flash' },
+      },
+      {
+        id: `${car.id}_pro_gp`,
+        carId: car.id,
+        name: `${shortName} ${isCyber ? 'Photon Runner' : 'Desmo GP'}`,
+        badge: 'PRO SPEC',
+        description: `Under-tail racing pipe, track winglets, 16k RPM tune & neon underframe glow.`,
+        cost: Math.round(620 * tierScale),
+        speedBonus: 0.85,
+        gripBonus: 0.03,
+        feverBonus: 0.14,
+        patch: { paint: p2, livery: 'sponsor_wrap', wing: 'gt', rims: r2, exhaust: 'under_tail_moto', sound: 'superbike_16k', flame: fl1, underglowColor: glow1 },
+      },
+      {
+        id: `${car.id}_apex_hyper`,
+        carId: car.id,
+        name: `${shortName} ${isCyber ? 'Neo-Grid Overdrive' : '16K Hyperblade'}`,
+        badge: 'SIGNATURE',
+        description: `Full carbon cyber aero, 16,000RPM I4 swap, Matrix optics & high-velocity flame tuning.`,
+        cost: Math.round(1040 * tierScale),
+        speedBonus: 1.3,
+        gripBonus: 0.04,
+        feverBonus: 0.21,
+        patch: { paint: 'carbon_matte', livery: 'camo_digital', wing: 'cyber', rims: 'turbo_fan', engine: isCyber ? 'electric_tri_motor' : 'liter_bike_inline4', sound: isCyber ? 'electric_whine' : 'superbike_16k', exhaust: 'under_tail_moto', lights: 'cyber_cyan', flame: fl2, underglowColor: glow1 },
+      },
+    ];
+  }
+
+  if (cat === 'truck') {
+    return [
+      {
+        id: `${car.id}_street_rig`,
+        carId: car.id,
+        name: `${shortName} Street Hauler`,
+        badge: 'HAUL KIT',
+        description: `Custom paint, side-exit pipes, tailgate lip & deep-dish truck rims.`,
+        cost: Math.round(280 * tierScale),
+        speedBonus: 0.45,
+        gripBonus: 0.02,
+        feverBonus: 0.07,
+        patch: { paint: p1, wing: 'lip', exhaust: 'side_exit', rims: r1, livery: 'hazard_chevrons', tires: 'rain_groove' },
+      },
+      {
+        id: `${car.id}_heavy_expedition`,
+        carId: car.id,
+        name: `${shortName} Raid & Rig`,
+        badge: 'HEAVY SPEC',
+        description: `Overload roof rack, dual vertical diesel stacks, LED bar & fat drag rear rubber.`,
+        cost: Math.round(640 * tierScale),
+        speedBonus: 0.85,
+        gripBonus: 0.04,
+        feverBonus: 0.14,
+        patch: { paint: p2, livery: 'camo_digital', roof: 'heavy_bullbar', exhaust: 'dual_diesel_stacks', tires: 'drag_slick', rims: 'matte_black', lights: 'gt_gold', underglowColor: glow1 },
+      },
+      {
+        id: `${car.id}_torque_overlord`,
+        carId: car.id,
+        name: `${shortName} Iron Titan`,
+        badge: 'SIGNATURE',
+        description: `Heavy Turbo Diesel, Chrome Blower, dual stacks & Hellfire exhaust backfire.`,
+        cost: Math.round(1080 * tierScale),
+        speedBonus: 1.3,
+        gripBonus: 0.03,
+        feverBonus: 0.21,
+        patch: { paint: 'carbon_matte', hood: 'blower', roof: 'light_bar', wing: 'roof_spoiler', exhaust: 'dual_diesel_stacks', engine: 'turbo_diesel_heavy', sound: 'diesel_chug', rims: 'deep_dish_chrome', flame: fl2, underglowColor: glow1 },
+      },
+    ];
+  }
+
+  if (cat === 'super' || cat === 'formula') {
+    return [
+      {
+        id: `${car.id}_track_club`,
+        carId: car.id,
+        name: `${shortName} Clubsport Aero`,
+        badge: 'AERO KIT',
+        description: `GT carbon louvers, active wing balance, semi-slick grip & forged rims.`,
+        cost: Math.round(320 * tierScale),
+        speedBonus: 0.5,
+        gripBonus: 0.025,
+        feverBonus: 0.08,
+        patch: { paint: p1, hood: 'vented', wing: 'active', rims: r1, tires: 'semi_slick', lights: 'xenon_ice', windows: 'limo_black' },
+      },
+      {
+        id: `${car.id}_le_mans`,
+        carId: car.id,
+        name: `${shortName} Endurance GT`,
+        badge: 'PRO TRACK',
+        description: `Center tri-tip titanium exhaust, endurance yellow headlights & V12 KERS hybrid boost.`,
+        cost: Math.round(700 * tierScale),
+        speedBonus: 0.95,
+        gripBonus: 0.035,
+        feverBonus: 0.15,
+        patch: { paint: p2, livery: 'sponsor_wrap', hood: 'carbon', roof: 'roof_scoop', wing: cat === 'formula' ? 'f1_giant' : 'cyber', exhaust: 'center_tri', engine: 'v12_hybrid', sound: 'f1_scream', lights: 'gt_gold', rims: r2, flame: fl1, underglowColor: glow1 },
+      },
+      {
+        id: `${car.id}_warp_proto`,
+        carId: car.id,
+        name: `${shortName} Hyper-Warp Spec`,
+        badge: 'SIGNATURE',
+        description: `Clear Engine Bay, Quad-Turbo W16, Turbofan aero discs & Cyber Matrix optics.`,
+        cost: Math.round(1180 * tierScale),
+        speedBonus: 1.4,
+        gripBonus: 0.045,
+        feverBonus: 0.22,
+        patch: { paint: 'liquid_chrome', livery: 'two_tone', hood: 'clear_bay', roof: 'vortex_fins', wing: cat === 'formula' ? 'f1_giant' : 'cyber', rims: 'turbo_fan', tires: 'drag_slick', engine: 'quad_turbo_w16', sound: 'f1_scream', lights: 'cyber_cyan', flame: fl2, underglowColor: glow1, windows: 'clear_cage' },
+      },
+    ];
+  }
+
+  if (cat === 'muscle') {
+    return [
+      {
+        id: `${car.id}_restomod`,
+        carId: car.id,
+        name: `${shortName} Pro-Touring`,
+        badge: 'STREET KIT',
+        description: `Retro Duckbill, twin racing stripes, whitewall muscle stance & V8 roar.`,
+        cost: Math.round(280 * tierScale),
+        speedBonus: 0.45,
+        gripBonus: 0.02,
+        feverBonus: 0.07,
+        patch: { paint: p1, livery: 'twin_stripes', wing: 'duckbill_retro', rims: r1, tires: 'whitewall', sound: 'v8_muscle' },
+      },
+      {
+        id: `${car.id}_drag_strip`,
+        carId: car.id,
+        name: `${shortName} Drag Stripper`,
+        badge: 'DRAG SPEC',
+        description: `Chrome Blower scoop, shotgun pipes, drag wheelie bar & fat drag slicks.`,
+        cost: Math.round(640 * tierScale),
+        speedBonus: 0.9,
+        gripBonus: 0.02,
+        feverBonus: 0.14,
+        patch: { paint: p2, livery: 'flame_decals', hood: 'blower', wing: 'drag_chute', exhaust: 'shotgun', tires: 'drag_slick', rims: 'deep_dish_chrome', flame: fl1, underglowColor: glow1 },
+      },
+      {
+        id: `${car.id}_blown_hemi`,
+        carId: car.id,
+        name: `${shortName} Hellhound 6.2`,
+        badge: 'SIGNATURE',
+        description: `6.2L Blown Hemi, hood-exit headers, roll cage tint & Boss Crimson backfire.`,
+        cost: Math.round(1060 * tierScale),
+        speedBonus: 1.3,
+        gripBonus: 0.035,
+        feverBonus: 0.21,
+        patch: { paint: 'stealth_black', livery: 'side_flash', hood: 'clear_bay', wing: 'twin', exhaust: 'hood_exit', engine: 'supercharged_v8_hemi', sound: 'v8_muscle', windows: 'clear_cage', lights: 'demon_red', flame: 'hellfire', underglowColor: glow1 },
+      },
+    ];
+  }
+
+  // Tuners, Rally, Kei, Vans, Wagons
+  return [
+    {
+      id: `${car.id}_touge_street`,
+      carId: car.id,
+      name: `${shortName} Touge Street`,
+      badge: 'STREET KIT',
+      description: `Vented hood louvers, ducktail aero, ${r1.replace('_', ' ')} wheels & drift rubber.`,
+      cost: Math.round(240 * tierScale),
+      speedBonus: 0.4,
+      gripBonus: 0.025,
+      feverBonus: 0.06,
+      patch: { paint: p1, hood: 'vented', wing: 'lip', rims: r1, tires: 'drift_spec', lights: 'xenon_ice', livery: 'two_tone' },
+    },
+    {
+      id: `${car.id}_stage_pro`,
+      carId: car.id,
+      name: `${shortName} ${cat === 'rally_kei' ? 'WRC Gravel' : 'D1 Midnight'}`,
+      badge: 'PRO SPEC',
+      description: `Roof air scoop, GT wing, burnt titanium quad pipes & neon underglow.`,
+      cost: Math.round(580 * tierScale),
+      speedBonus: 0.8,
+      gripBonus: 0.035,
+      feverBonus: 0.13,
+      patch: { paint: p2, livery: 'sponsor_wrap', hood: 'twin_scoop', roof: 'roof_scoop', wing: 'gt', rims: r2, exhaust: 'quad_ti', engine: cat === 'rally_kei' ? 'rotary_brap' : 'twin_turbo', sound: cat === 'rally_kei' ? 'rotary_braap' : 'jdm_turbo', flame: fl1, underglowColor: glow1 },
+    },
+    {
+      id: `${car.id}_boss_build`,
+      carId: car.id,
+      name: `${shortName} Apex Works`,
+      badge: 'SIGNATURE',
+      description: `High Swan-Neck carbon wing, Turbofan discs, roll-cage glass & hybrid surge.`,
+      cost: Math.round(980 * tierScale),
+      speedBonus: 1.2,
+      gripBonus: 0.045,
+      feverBonus: 0.20,
+      patch: { paint: 'carbon_matte', livery: 'side_flash', hood: 'clear_bay', roof: 'vortex_fins', wing: 'cyber', rims: 'turbo_fan', tires: 'semi_slick', engine: 'v12_hybrid', sound: 'jdm_turbo', lights: 'cyber_cyan', flame: fl2, underglowColor: glow1, windows: 'clear_cage' },
+    },
+  ];
+}
+
+export interface CarCompatibleModSet {
+  paints: (typeof PAINT_OPTIONS)[number] & { displayLabel: string } extends infer T ? T[] : never;
+  hoods: ((typeof HOOD_OPTIONS)[number] & { displayLabel: string })[];
+  roofs: ((typeof ROOF_OPTIONS)[number] & { displayLabel: string })[];
+  windows: ((typeof WINDOW_OPTIONS)[number] & { displayLabel: string })[];
+  liveries: ((typeof LIVERY_OPTIONS)[number] & { displayLabel: string })[];
+  wings: ((typeof WING_OPTIONS)[number] & { displayLabel: string })[];
+  rims: ((typeof RIM_OPTIONS)[number] & { displayLabel: string })[];
+  tires: ((typeof TIRE_OPTIONS)[number] & { displayLabel: string })[];
+  engines: ((typeof ENGINE_OPTIONS)[number] & { displayLabel: string })[];
+  exhausts: ((typeof EXHAUST_OPTIONS)[number] & { displayLabel: string })[];
+  flames: ((typeof FLAME_OPTIONS)[number] & { displayLabel: string })[];
+  sounds: ((typeof SOUND_OPTIONS)[number] & { displayLabel: string })[];
+  lights: ((typeof HEADLIGHT_OPTIONS)[number] & { displayLabel: string })[];
+  showHood: boolean;
+  showRoof: boolean;
+  showWindows: boolean;
+}
+
+export function getCarCompatibleModSet(car: CarSpec): CarCompatibleModSet {
+  const cat = getCarCategory(car);
+  const shape = car.bodyShape || 'coupe';
+  const isBike = cat === 'motorcycle';
+  const isTruck = cat === 'truck';
+  const isFormula = cat === 'formula';
+  const isMuscle = cat === 'muscle';
+  const isSuper = cat === 'super';
+
+  const mapLabels = <T extends { id: string; label: string }>(
+    list: T[],
+    category: ModCostCategory
+  ): (T & { displayLabel: string })[] =>
+    list.map((item) => ({
+      ...item,
+      displayLabel: getTailoredLabelOverride(car, category, item.id, item.label),
+    }));
+
+  const wingFilter = (id: WingKitId): boolean => {
+    if (id === 'stock') return true;
+    if (isBike) return id === 'lip' || id === 'gt' || id === 'active' || id === 'cyber';
+    if (isTruck) return id === 'lip' || id === 'roof_spoiler' || id === 'gt' || id === 'drag_chute';
+    if (isFormula) return id === 'active' || id === 'cyber' || id === 'f1_giant';
+    if (isMuscle) return id === 'lip' || id === 'duckbill_retro' || id === 'twin' || id === 'drag_chute';
+    if (isSuper) return id === 'lip' || id === 'gt' || id === 'active' || id === 'cyber' || id === 'f1_giant';
+    return id !== 'drag_chute' && id !== 'f1_giant';
+  };
+
+  const roofFilter = (id: RoofModId): boolean => {
+    if (id === 'stock') return true;
+    if (isBike || isFormula) return false;
+    if (isTruck) return id === 'carbon_panel' || id === 'light_bar' || id === 'heavy_bullbar' || id === 'siren_strobe' || id === 'roof_cargo_box';
+    if (shape === 'interceptor') return id !== 'heavy_bullbar' && id !== 'roof_cargo_box';
+    return id !== 'heavy_bullbar';
+  };
+
+  const hoodFilter = (id: HoodStyleId): boolean => {
+    if (id === 'stock') return true;
+    if (isBike) return false;
+    if (isFormula) return id === 'carbon' || id === 'vented' || id === 'clear_bay';
+    if (isMuscle || isTruck) return id !== 'clear_bay' || isMuscle;
+    if (isSuper) return id === 'carbon' || id === 'vented' || id === 'clear_bay' || id === 'twin_scoop';
+    return id !== 'blower';
+  };
+
+  const exhaustFilter = (id: ExhaustStyleId): boolean => {
+    if (id === 'stock') return true;
+    if (isBike) return id === 'under_tail_moto' || id === 'side_exit' || id === 'shotgun';
+    if (isTruck) return id === 'side_exit' || id === 'dual_diesel_stacks' || id === 'shotgun';
+    if (isFormula || isSuper) return id === 'quad_ti' || id === 'center_tri' || id === 'hood_exit';
+    if (isMuscle) return id === 'side_exit' || id === 'shotgun' || id === 'hood_exit' || id === 'quad_ti';
+    return id !== 'dual_diesel_stacks' && id !== 'under_tail_moto';
+  };
+
+  const engineFilter = (id: EngineModId): boolean => {
+    if (id === 'stock') return true;
+    if (isBike) return id === 'liter_bike_inline4' || id === 'electric_tri_motor' || id === 'twin_turbo';
+    if (isTruck) return id === 'turbo_diesel_heavy' || id === 'supercharged_v8_hemi' || id === 'supercharged' || id === 'electric_tri_motor';
+    if (isFormula || isSuper) return id === 'v12_hybrid' || id === 'quad_turbo_w16' || id === 'electric_tri_motor' || id === 'twin_turbo';
+    if (isMuscle) return id === 'supercharged' || id === 'supercharged_v8_hemi' || id === 'twin_turbo';
+    return id !== 'turbo_diesel_heavy' && id !== 'liter_bike_inline4' && id !== 'quad_turbo_w16';
+  };
+
+  const soundFilter = (id: SoundProfileId): boolean => {
+    if (id === 'stock') return true;
+    if (isBike) return id === 'superbike_16k' || id === 'electric_whine' || id === 'f1_scream';
+    if (isTruck) return id === 'diesel_chug' || id === 'v8_muscle' || id === 'electric_whine';
+    if (isFormula || isSuper) return id === 'f1_scream' || id === 'electric_whine' || id === 'jdm_turbo';
+    if (isMuscle) return id === 'v8_muscle' || id === 'jdm_turbo';
+    return id !== 'diesel_chug' && id !== 'superbike_16k';
+  };
+
+  const liveryFilter = (id: LiveryPatternId): boolean => {
+    if (id === 'stock') return true;
+    if (isBike) return id === 'clean' || id === 'twin_stripes' || id === 'side_flash' || id === 'sponsor_wrap' || id === 'flame_decals';
+    return true;
+  };
+
+  return {
+    paints: mapLabels(PAINT_OPTIONS, 'paint'),
+    hoods: mapLabels(HOOD_OPTIONS.filter((h) => hoodFilter(h.id)), 'hood'),
+    roofs: mapLabels(ROOF_OPTIONS.filter((r) => roofFilter(r.id)), 'roof'),
+    windows: mapLabels(isBike || isFormula ? WINDOW_OPTIONS.slice(0, 1) : WINDOW_OPTIONS, 'windows'),
+    liveries: mapLabels(LIVERY_OPTIONS.filter((l) => liveryFilter(l.id)), 'livery'),
+    wings: mapLabels(WING_OPTIONS.filter((w) => wingFilter(w.id)), 'wing'),
+    rims: mapLabels(RIM_OPTIONS, 'rims'),
+    tires: mapLabels(TIRE_OPTIONS, 'tires'),
+    engines: mapLabels(ENGINE_OPTIONS.filter((e) => engineFilter(e.id)), 'engine'),
+    exhausts: mapLabels(EXHAUST_OPTIONS.filter((ex) => exhaustFilter(ex.id)), 'exhaust'),
+    flames: mapLabels(FLAME_OPTIONS, 'flame'),
+    sounds: mapLabels(SOUND_OPTIONS.filter((s) => soundFilter(s.id)), 'sound'),
+    lights: mapLabels(HEADLIGHT_OPTIONS, 'lights'),
+    showHood: !isBike,
+    showRoof: !isBike && !isFormula,
+    showWindows: !isBike && !isFormula,
+  };
+}
+
+export function getModOwnershipKey(category: ModCostCategory | 'style', optionId: string): string {
+  return `${category}:${optionId}`;
+}
+
+export function getCustomizationOptionCost(category: ModCostCategory, optionId: string): number {
+  if (!optionId || optionId === 'stock' || optionId === 'none' || optionId === 'dual') return 0;
+  switch (category) {
+    case 'paint':
+      return PAINT_OPTIONS.find((o) => o.id === optionId)?.cost ?? 160;
+    case 'livery':
+      return LIVERY_OPTIONS.find((o) => o.id === optionId)?.cost ?? 160;
+    case 'wing':
+      return WING_OPTIONS.find((o) => o.id === optionId)?.cost ?? 200;
+    case 'rims':
+      return RIM_OPTIONS.find((o) => o.id === optionId)?.cost ?? 180;
+    case 'underglow':
+      return UNDERGLOW_OPTIONS.find((o) => o.id === optionId)?.cost ?? 500;
+    case 'flame':
+      return FLAME_OPTIONS.find((o) => o.id === optionId)?.cost ?? 200;
+    case 'engine':
+      return ENGINE_OPTIONS.find((o) => o.id === optionId)?.cost ?? 450;
+    case 'roof':
+      return ROOF_OPTIONS.find((o) => o.id === optionId)?.cost ?? 200;
+    case 'tires':
+      return TIRE_OPTIONS.find((o) => o.id === optionId)?.cost ?? 180;
+    case 'exhaust':
+      return EXHAUST_OPTIONS.find((o) => o.id === optionId)?.cost ?? 200;
+    case 'hood':
+      return HOOD_OPTIONS.find((o) => o.id === optionId)?.cost ?? 200;
+    case 'windows':
+      return WINDOW_OPTIONS.find((o) => o.id === optionId)?.cost ?? 160;
+    case 'horn':
+      return HORN_OPTIONS.find((o) => o.id === optionId)?.cost ?? 500;
+    case 'sound':
+      return SOUND_OPTIONS.find((o) => o.id === optionId)?.cost ?? 220;
+    case 'lights':
+      return HEADLIGHT_OPTIONS.find((o) => o.id === optionId)?.cost ?? 180;
+  }
+}
+
+export function isCarModOwned(
+  ownedMods: string[] | undefined,
+  category: ModCostCategory | 'style',
+  optionId: string,
+  explicitCost?: number
+): boolean {
+  if (!optionId || optionId === 'stock' || optionId === 'none' || optionId === 'dual') {
+    return true;
+  }
+  const cost =
+    explicitCost !== undefined
+      ? explicitCost
+      : category === 'style'
+      ? 1
+      : getCustomizationOptionCost(category, optionId);
+  if (cost <= 0) return true;
+  if (!ownedMods || ownedMods.length === 0) return false;
+  return ownedMods.includes(getModOwnershipKey(category, optionId));
+}
+
+export interface ModPurchaseResult {
+  ok: boolean;
+  reason?: 'insufficient_funds';
+  cost: number;
+  coins: number;
+  alreadyOwned: boolean;
+  nextCustom: CarCustomization;
+  nextOwnedMods: string[];
+}
+
+export function purchaseCarModUpgrade(params: {
+  car: CarSpec;
+  currentCustom: CarCustomization;
+  ownedMods: string[] | undefined;
+  coins: number;
+  category: ModCostCategory;
+  optionId: string;
+}): ModPurchaseResult {
+  const { currentCustom, ownedMods = [], coins, category, optionId } = params;
+  const cost = getCustomizationOptionCost(category, optionId);
+  const owned = isCarModOwned(ownedMods, category, optionId, cost);
+
+  if (!owned && coins < cost) {
+    return {
+      ok: false,
+      reason: 'insufficient_funds',
+      cost,
+      coins,
+      alreadyOwned: false,
+      nextCustom: currentCustom,
+      nextOwnedMods: ownedMods,
+    };
+  }
+
+  const nextCustom: CarCustomization = { ...currentCustom };
+  if (category === 'underglow') {
+    nextCustom.underglowColor = optionId;
+    nextCustom.underglow = (optionId in LEGACY_UNDERGLOW_MAP ? optionId : 'none') as UnderglowId;
+  } else if (category === 'horn') {
+    nextCustom.hornType = optionId as HornTypeId;
+    nextCustom.horn = optionId as HornStyleId;
+  } else {
+    (nextCustom as unknown as Record<string, unknown>)[category] = optionId;
+  }
+
+  const key = getModOwnershipKey(category, optionId);
+  const nextOwnedMods =
+    owned || cost <= 0 || ownedMods.includes(key) ? ownedMods : [...ownedMods, key];
+
+  return {
+    ok: true,
+    cost: owned ? 0 : cost,
+    coins: owned ? coins : coins - cost,
+    alreadyOwned: owned,
+    nextCustom,
+    nextOwnedMods,
+  };
+}
+
+export function purchaseCarStylePackage(params: {
+  car: CarSpec;
+  currentCustom: CarCustomization;
+  ownedMods: string[] | undefined;
+  coins: number;
+  packageId: string;
+}): ModPurchaseResult & { package?: CarStylePackage } {
+  const { car, currentCustom, ownedMods = [], coins, packageId } = params;
+  const packages = getCarStylePackages(car);
+  const pkg = packages.find((p) => p.id === packageId);
+  if (!pkg) {
+    return {
+      ok: false,
+      reason: 'insufficient_funds',
+      cost: 0,
+      coins,
+      alreadyOwned: false,
+      nextCustom: currentCustom,
+      nextOwnedMods: ownedMods,
+    };
+  }
+
+  const owned = isCarModOwned(ownedMods, 'style', pkg.id, pkg.cost);
+  if (!owned && coins < pkg.cost) {
+    return {
+      ok: false,
+      reason: 'insufficient_funds',
+      cost: pkg.cost,
+      coins,
+      alreadyOwned: false,
+      nextCustom: currentCustom,
+      nextOwnedMods: ownedMods,
+      package: pkg,
+    };
+  }
+
+  const nextCustom: CarCustomization = {
+    ...currentCustom,
+    ...pkg.patch,
+    stylePackageId: pkg.id,
+  };
+  if (pkg.patch.underglowColor) {
+    nextCustom.underglow = (
+      pkg.patch.underglowColor in LEGACY_UNDERGLOW_MAP ? pkg.patch.underglowColor : 'none'
+    ) as UnderglowId;
+  }
+
+  const ownedSet = new Set(ownedMods);
+  ownedSet.add(getModOwnershipKey('style', pkg.id));
+  const patchEntries = Object.entries(pkg.patch) as [keyof CarCustomization, unknown][];
+  for (const [k, v] of patchEntries) {
+    if (typeof v !== 'string' || !v || v === 'stock' || v === 'none' || v === 'dual') continue;
+    if (k === 'underglowColor') {
+      ownedSet.add(getModOwnershipKey('underglow', v));
+    } else if (k === 'hornType') {
+      ownedSet.add(getModOwnershipKey('horn', v));
+    } else if (k !== 'number' && k !== 'stylePackageId' && k !== 'underglow') {
+      ownedSet.add(getModOwnershipKey(k as ModCostCategory, v));
+    }
+  }
+
+  return {
+    ok: true,
+    cost: owned ? 0 : pkg.cost,
+    coins: owned ? coins : coins - pkg.cost,
+    alreadyOwned: owned,
+    nextCustom,
+    nextOwnedMods: Array.from(ownedSet),
+    package: pkg,
+  };
+}
+
+export function applyCarModPreview(
+  currentCustom: CarCustomization,
+  category: ModCostCategory,
+  optionId: string
+): CarCustomization {
+  const nextCustom: CarCustomization = { ...currentCustom };
+  if (category === 'underglow') {
+    nextCustom.underglowColor = optionId;
+    nextCustom.underglow = (optionId in LEGACY_UNDERGLOW_MAP ? optionId : 'none') as UnderglowId;
+  } else if (category === 'horn') {
+    nextCustom.hornType = optionId as HornTypeId;
+    nextCustom.horn = optionId as HornStyleId;
+  } else {
+    (nextCustom as unknown as Record<string, unknown>)[category] = optionId;
+  }
+  return nextCustom;
+}
+
+export function applyCarStylePackagePreview(
+  car: CarSpec,
+  currentCustom: CarCustomization,
+  packageId: string
+): { nextCustom: CarCustomization; package?: CarStylePackage } {
+  const pkg = getCarStylePackages(car).find((p) => p.id === packageId);
+  if (!pkg) return { nextCustom: currentCustom };
+  const nextCustom: CarCustomization = {
+    ...currentCustom,
+    ...pkg.patch,
+    stylePackageId: pkg.id,
+  };
+  if (pkg.patch.underglowColor) {
+    nextCustom.underglow = (
+      pkg.patch.underglowColor in LEGACY_UNDERGLOW_MAP ? pkg.patch.underglowColor : 'none'
+    ) as UnderglowId;
+  }
+  return { nextCustom, package: pkg };
+}
+
+export interface PreviewPendingItem {
+  kind: 'style' | ModCostCategory;
+  optionId: string;
+  label: string;
+  cost: number;
+}
+
+export interface GaragePreviewSummary {
+  hasChanges: boolean;
+  pendingStylePackage?: CarStylePackage;
+  pendingItems: PreviewPendingItem[];
+  totalCost: number;
+  summaryLabel: string;
+}
+
+const CUSTOM_PREVIEW_KEYS: {
+  category: ModCostCategory;
+  getVal: (c: CarCustomization) => string;
+  getLabel: (id: string) => string;
+}[] = [
+  { category: 'paint', getVal: (c) => c.paint || 'stock', getLabel: (id) => PAINT_OPTIONS.find((o) => o.id === id)?.label || id },
+  { category: 'hood', getVal: (c) => c.hood || 'stock', getLabel: (id) => HOOD_OPTIONS.find((o) => o.id === id)?.label || id },
+  { category: 'roof', getVal: (c) => c.roof || 'stock', getLabel: (id) => ROOF_OPTIONS.find((o) => o.id === id)?.label || id },
+  { category: 'windows', getVal: (c) => c.windows || 'stock', getLabel: (id) => WINDOW_OPTIONS.find((o) => o.id === id)?.label || id },
+  { category: 'livery', getVal: (c) => c.livery || 'stock', getLabel: (id) => LIVERY_OPTIONS.find((o) => o.id === id)?.label || id },
+  { category: 'tires', getVal: (c) => c.tires || 'stock', getLabel: (id) => TIRE_OPTIONS.find((o) => o.id === id)?.label || id },
+  { category: 'rims', getVal: (c) => c.rims || 'stock', getLabel: (id) => RIM_OPTIONS.find((o) => o.id === id)?.label || id },
+  { category: 'wing', getVal: (c) => c.wing || 'stock', getLabel: (id) => WING_OPTIONS.find((o) => o.id === id)?.label || id },
+  {
+    category: 'underglow',
+    getVal: (c) => c.underglowColor || (c.underglow as string) || 'none',
+    getLabel: (id) => UNDERGLOW_OPTIONS.find((o) => o.id === id)?.label || id,
+  },
+  {
+    category: 'horn',
+    getVal: (c) => c.hornType || (c.horn as unknown as string) || 'dual',
+    getLabel: (id) => HORN_OPTIONS.find((o) => o.id === id)?.label || id,
+  },
+  { category: 'engine', getVal: (c) => c.engine || 'stock', getLabel: (id) => ENGINE_OPTIONS.find((o) => o.id === id)?.label || id },
+  { category: 'exhaust', getVal: (c) => c.exhaust || 'stock', getLabel: (id) => EXHAUST_OPTIONS.find((o) => o.id === id)?.label || id },
+  { category: 'flame', getVal: (c) => c.flame || 'stock', getLabel: (id) => FLAME_OPTIONS.find((o) => o.id === id)?.label || id },
+  { category: 'sound', getVal: (c) => c.sound || 'stock', getLabel: (id) => SOUND_OPTIONS.find((o) => o.id === id)?.label || id },
+  { category: 'lights', getVal: (c) => c.lights || 'stock', getLabel: (id) => HEADLIGHT_OPTIONS.find((o) => o.id === id)?.label || id },
+];
+
+export function computeGaragePreviewSummary(params: {
+  car: CarSpec;
+  savedCustom: CarCustomization;
+  draftCustom: CarCustomization;
+  ownedMods: string[] | undefined;
+}): GaragePreviewSummary {
+  const { car, savedCustom, draftCustom, ownedMods = [] } = params;
+  const pendingItems: PreviewPendingItem[] = [];
+  const coveredByPendingKit = new Set<string>();
+  let pendingStylePackage: CarStylePackage | undefined;
+  let hasAnyDiff = false;
+
+  if (draftCustom.stylePackageId !== savedCustom.stylePackageId) {
+    hasAnyDiff = true;
+    if (draftCustom.stylePackageId) {
+      const pkg = getCarStylePackages(car).find((p) => p.id === draftCustom.stylePackageId);
+      if (pkg) {
+        const owned = isCarModOwned(ownedMods, 'style', pkg.id, pkg.cost);
+        if (!owned) {
+          pendingStylePackage = pkg;
+          pendingItems.push({
+            kind: 'style',
+            optionId: pkg.id,
+            label: pkg.name,
+            cost: pkg.cost,
+          });
+          for (const [k, v] of Object.entries(pkg.patch) as [keyof CarCustomization, unknown][]) {
+            if (typeof v !== 'string') continue;
+            const cat = k === 'underglowColor' ? 'underglow' : k === 'hornType' ? 'horn' : k;
+            coveredByPendingKit.add(`${cat}:${v}`);
+          }
+        }
+      }
+    }
+  }
+
+  const changedLabels: string[] = pendingStylePackage ? [pendingStylePackage.name] : [];
+
+  for (const field of CUSTOM_PREVIEW_KEYS) {
+    const prevVal = field.getVal(savedCustom);
+    const nextVal = field.getVal(draftCustom);
+    if (prevVal === nextVal) continue;
+    hasAnyDiff = true;
+    if (coveredByPendingKit.has(`${field.category}:${nextVal}`)) continue;
+    const cost = getCustomizationOptionCost(field.category, nextVal);
+    const owned = isCarModOwned(ownedMods, field.category, nextVal, cost);
+    const label = field.getLabel(nextVal);
+    if (!pendingStylePackage || cost > 0) {
+      changedLabels.push(label);
+    }
+    if (!owned && cost > 0) {
+      pendingItems.push({
+        kind: field.category,
+        optionId: nextVal,
+        label,
+        cost,
+      });
+    }
+  }
+
+  if (draftCustom.number !== savedCustom.number) {
+    hasAnyDiff = true;
+    changedLabels.push(`#${draftCustom.number}`);
+  }
+
+  const totalCost = pendingItems.reduce((sum, it) => sum + it.cost, 0);
+  const summaryLabel =
+    changedLabels.length === 0
+      ? ''
+      : changedLabels.length === 1
+      ? changedLabels[0]
+      : `${changedLabels[0]} + ${changedLabels.length - 1} more`;
+
+  return {
+    hasChanges: hasAnyDiff,
+    pendingStylePackage,
+    pendingItems,
+    totalCost,
+    summaryLabel,
+  };
+}
+
+export function purchaseGaragePreviewBundle(params: {
+  car: CarSpec;
+  savedCustom: CarCustomization;
+  draftCustom: CarCustomization;
+  ownedMods: string[] | undefined;
+  coins: number;
+}): ModPurchaseResult & { summary: GaragePreviewSummary } {
+  const { car, savedCustom, draftCustom, ownedMods = [], coins } = params;
+  const summary = computeGaragePreviewSummary({ car, savedCustom, draftCustom, ownedMods });
+  if (coins < summary.totalCost) {
+    return {
+      ok: false,
+      reason: 'insufficient_funds',
+      cost: summary.totalCost,
+      coins,
+      alreadyOwned: false,
+      nextCustom: savedCustom,
+      nextOwnedMods: ownedMods,
+      summary,
+    };
+  }
+
+  const ownedSet = new Set(ownedMods);
+  if (summary.pendingStylePackage) {
+    ownedSet.add(getModOwnershipKey('style', summary.pendingStylePackage.id));
+    for (const [k, v] of Object.entries(summary.pendingStylePackage.patch) as [keyof CarCustomization, unknown][]) {
+      if (typeof v !== 'string' || !v || v === 'stock' || v === 'none' || v === 'dual') continue;
+      if (k === 'underglowColor') ownedSet.add(getModOwnershipKey('underglow', v));
+      else if (k === 'hornType') ownedSet.add(getModOwnershipKey('horn', v));
+      else if (k !== 'number' && k !== 'stylePackageId' && k !== 'underglow') {
+        ownedSet.add(getModOwnershipKey(k as ModCostCategory, v));
+      }
+    }
+  }
+  for (const item of summary.pendingItems) {
+    if (item.kind !== 'style') {
+      ownedSet.add(getModOwnershipKey(item.kind, item.optionId));
+    }
+  }
+
+  return {
+    ok: true,
+    cost: summary.totalCost,
+    coins: coins - summary.totalCost,
+    alreadyOwned: summary.totalCost === 0,
+    nextCustom: draftCustom,
+    nextOwnedMods: Array.from(ownedSet),
+    summary,
+  };
+}
+
+
 export function computeEffectiveCarStats(
   car: CarSpec,
   upgrades: CarUpgradeLevels = { speed: 1, handling: 1, magnet: 1 },
@@ -2742,15 +3782,31 @@ export function computeEffectiveCarStats(
 
   const engineOpt = ENGINE_OPTIONS.find((e) => e.id === (custom?.engine || 'stock')) || ENGINE_OPTIONS[0];
   const tireOpt = TIRE_OPTIONS.find((t) => t.id === (custom?.tires || 'stock')) || TIRE_OPTIONS[0];
+  const stylePkg = custom?.stylePackageId
+    ? getCarStylePackages(car).find((p) => p.id === custom.stylePackageId)
+    : undefined;
 
   return {
-    topSpeed: Number((car.baseSpeed + (speedLv - 1) * 1.25 + engineOpt.speedBonus + tireOpt.speedDelta).toFixed(2)),
-    driftGrip: Number(Math.max(0.55, Math.min(1.05, car.driftGrip + (handlingLv - 1) * 0.02 + tireOpt.gripDelta)).toFixed(3)),
+    topSpeed: Number(
+      (
+        car.baseSpeed +
+        (speedLv - 1) * 1.25 +
+        engineOpt.speedBonus +
+        tireOpt.speedDelta +
+        (stylePkg?.speedBonus ?? 0)
+      ).toFixed(2)
+    ),
+    driftGrip: Number(
+      Math.max(
+        0.55,
+        Math.min(1.05, car.driftGrip + (handlingLv - 1) * 0.02 + tireOpt.gripDelta + (stylePkg?.gripBonus ?? 0))
+      ).toFixed(3)
+    ),
     handlingRate: Number(((car.handling + engineOpt.handlingBonus) * 2.8 + (handlingLv - 1) * 0.32).toFixed(2)),
     roadAllowanceBonus: Number(((handlingLv - 1) * 0.25 + (car.driftGrip - 0.70) * 1.4).toFixed(2)),
     magnetRadius: Number((2.8 + (magnetLv - 1) * 0.8).toFixed(2)),
     coinMultiplier: car.coinMultiplier,
-    feverGainRate: Number((car.feverGainRate + engineOpt.feverBonus).toFixed(2)),
+    feverGainRate: Number((car.feverGainRate + engineOpt.feverBonus + (stylePkg?.feverBonus ?? 0)).toFixed(2)),
   };
 }
 
@@ -3057,6 +4113,11 @@ export interface SCurvePoint {
   canisterCollected?: boolean;
   canisterX?: number;
   canisterZ?: number;
+  isMountainRamp?: boolean;
+  isChasmGap?: boolean;
+  rampSlope?: number;
+  mountainPeakNum?: number;
+  hasJumpChevron?: boolean;
 }
 
 export interface TrackGenerationOptions {
@@ -3461,7 +4522,7 @@ export function calculateDriftScoreStep(params: {
  * GAME MODE IDS & 2-LANE HIGHWAY TRAFFIC MODE
  * ============================================================================
  */
-export type GameModeId = 'drift' | 'highway_traffic' | 'parking';
+export type GameModeId = 'drift' | 'highway_traffic' | 'parking' | 'mountain_drive';
 
 export type TrafficVehicleKind = 'sedan' | 'hatch' | 'van' | 'box_truck' | 'sports';
 
@@ -3752,6 +4813,48 @@ function pseudoRand(seedVal: number): number {
   return x - Math.floor(x);
 }
 
+export const S_RANK_STREAK_LENGTH = 3;
+export const S_RANK_TRAFFIC_DENSITY_BOOST = 0.15;
+
+/**
+ * Returns true when the player's last 3 completed runs all achieved an 'S' rank.
+ */
+export function hasThreeConsecutiveSRanks(recentRunRanks: readonly string[]): boolean {
+  if (recentRunRanks.length < S_RANK_STREAK_LENGTH) return false;
+  const lastThree = recentRunRanks.slice(-S_RANK_STREAK_LENGTH);
+  return lastThree.every((rank) => rank === 'S');
+}
+
+/**
+ * Appends the rank achieved for a completed run to the player's recent run history.
+ */
+export function appendRecentRunRank(
+  recentRunRanks: readonly string[],
+  score: number,
+  maxHistory = 10
+): string[] {
+  const { rank } = getDriftRank(score);
+  const next = [...recentRunRanks, rank];
+  return next.length > maxHistory ? next.slice(-maxHistory) : next;
+}
+
+/**
+ * Slightly increases traffic density in 'highway_traffic' mode if the player's
+ * last 3 runs resulted in an 'S' rank.
+ */
+export function getAdaptiveHighwayTrafficDensity(params: {
+  mode: GameModeId;
+  baseDensity: number;
+  recentRunRanks: readonly string[];
+  boostAmount?: number;
+}): number {
+  const base = Math.max(0, params.baseDensity);
+  if (params.mode !== 'highway_traffic') return base;
+  if (!hasThreeConsecutiveSRanks(params.recentRunRanks)) return base;
+  const boost = Math.max(0, params.boostAmount ?? S_RANK_TRAFFIC_DENSITY_BOOST);
+  return Math.min(1.15, Number((base + boost).toFixed(4)));
+}
+
 /**
  * Generates staggered 2-lane traffic cars with guaranteed open overtaking gaps
  * so oncoming (-1) and same-lane (+1) cars never form an impassable wall.
@@ -3763,6 +4866,8 @@ export function generateTrafficBatch(params: {
   seed: number;
   existingCars: TrafficCarState[];
   difficultyProgress?: number; // 0..1
+  mode?: GameModeId;
+  recentRunRanks?: readonly string[];
 }): { cars: TrafficCarState[]; nextId: number } {
   const {
     startS,
@@ -3771,12 +4876,22 @@ export function generateTrafficBatch(params: {
     seed,
     existingCars,
     difficultyProgress = 0,
+    mode = 'highway_traffic',
+    recentRunRanks,
   } = params;
+
+  const effectiveDifficulty = recentRunRanks
+    ? getAdaptiveHighwayTrafficDensity({
+        mode,
+        baseDensity: difficultyProgress,
+        recentRunRanks,
+      })
+    : difficultyProgress;
 
   const cars: TrafficCarState[] = [];
   let nextId = nextIdStart;
   const safeStartS = Math.max(58, startS); // Ensures >2.5s safe launch before first vehicle
-  const minSpacingSameLane = Math.max(19, 28 - difficultyProgress * 7);
+  const minSpacingSameLane = Math.max(19, 28 - effectiveDifficulty * 7);
   const minGapOppositeLane = 15.5;
 
   let cursorS = safeStartS;
@@ -3805,7 +4920,7 @@ export function generateTrafficBatch(params: {
       const spec = TRAFFIC_CATALOG[Math.floor(rKind * TRAFFIC_CATALOG.length) % TRAFFIC_CATALOG.length];
       const color = spec.colors[Math.floor(rCol * spec.colors.length) % spec.colors.length];
       const [minSpd, maxSpd] = isOncoming ? spec.oncomingSpeedRange : spec.sameLaneSpeedRange;
-      const speed = Number((minSpd + rSpd * (maxSpd - minSpd) + difficultyProgress * (isOncoming ? 2.5 : 1.0)).toFixed(2));
+      const speed = Number((minSpd + rSpd * (maxSpd - minSpd) + effectiveDifficulty * (isOncoming ? 2.5 : 1.0)).toFixed(2));
       const jitterLat = (pseudoRand(seed + stepIdx * 19.7) - 0.5) * 0.36;
 
       cars.push({
@@ -3825,7 +4940,7 @@ export function generateTrafficBatch(params: {
       });
     }
 
-    cursorS += Math.max(15, 22 - difficultyProgress * 5) + rGap * 14;
+    cursorS += Math.max(15, 22 - effectiveDifficulty * 5) + rGap * 14;
     stepIdx++;
   }
 

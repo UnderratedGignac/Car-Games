@@ -8,6 +8,15 @@ import {
   findPeakAudioWindow,
 } from './musicConfig';
 import { generateBuiltinArcadeTrack } from './synthTrack';
+import {
+  clampHapticIntensity,
+  getIntensityForCategory,
+  scaleHapticPattern,
+  type DeviceHapticCalibration,
+  type HapticEventCategory,
+} from './haptics';
+
+export type { DeviceHapticCalibration, HapticEventCategory } from './haptics';
 
 export interface JukeboxTrack {
   id: string;
@@ -57,17 +66,31 @@ export interface AudioDeckSnapshot {
 export type HapticType = 'light' | 'medium' | 'heavy' | 'double' | 'fever';
 
 let globalHapticsEnabled = true;
+let globalHapticCalibration: DeviceHapticCalibration = {
+  collisionIntensity: 1.0,
+  driftIntensity: 1.0,
+};
 
 export function isHapticsEnabled(): boolean {
   return globalHapticsEnabled;
 }
 
+export function getHapticCalibration(): DeviceHapticCalibration {
+  return { ...globalHapticCalibration };
+}
+
 /**
  * Mobile haptic vibration helper using the Web Vibration API.
- * Respects global haptics toggle unless force = true (e.g., Settings test pulse).
+ * Respects global haptics toggle unless force = true (e.g., Settings test pulse),
+ * and scales pulse durations by the calibrated intensity for collision/drift events.
  * Safely guards against SSR and environments without vibration support.
  */
-export function triggerHaptic(type: HapticType, force = false): boolean {
+export function triggerHaptic(
+  type: HapticType,
+  force = false,
+  category: HapticEventCategory = 'general',
+  calibrationOverride?: DeviceHapticCalibration
+): boolean {
   if (!force && !globalHapticsEnabled) {
     return false;
   }
@@ -75,27 +98,34 @@ export function triggerHaptic(type: HapticType, force = false): boolean {
     return false;
   }
   try {
-    let pattern: number | number[];
+    let basePattern: number | number[];
     switch (type) {
       case 'light':
-        pattern = 18; // 18ms (coin pickup)
+        basePattern = 18; // 18ms (coin pickup / drift entry)
         break;
       case 'medium':
-        pattern = 38; // 38ms (near miss, style switch)
+        basePattern = 38; // 38ms (near miss, style switch, cone clip)
         break;
       case 'heavy':
-        pattern = 65; // 65ms (guardrail scrape, crash impact)
+        basePattern = 65; // 65ms (guardrail scrape, crash impact)
         break;
       case 'double':
-        pattern = [25, 45, 35]; // [25, 45, 35] (combo level up, overtake streak)
+        basePattern = [25, 45, 35]; // [25, 45, 35] (combo level up, overtake streak)
         break;
       case 'fever':
-        pattern = [45, 35, 45, 35, 75]; // [45, 35, 45, 35, 75] (fever activation)
+        basePattern = [45, 35, 45, 35, 75]; // [45, 35, 45, 35, 75] (fever activation)
         break;
       default:
-        pattern = 18;
+        basePattern = 18;
     }
-    return navigator.vibrate(pattern);
+
+    const activeCal = calibrationOverride ?? globalHapticCalibration;
+    const intensity = getIntensityForCategory(activeCal, category);
+    const scaled = scaleHapticPattern(basePattern, intensity);
+    if (scaled === null) {
+      return false;
+    }
+    return navigator.vibrate(scaled);
   } catch {
     return false;
   }
@@ -119,20 +149,32 @@ export class SoundFXSystem {
 
   // Master compressor to prevent clipping when AI music + AI SFX + engine stack
   private masterComp: DynamicsCompressorNode | null = null;
+  // Shared studio SFX FX Bus (subtle tape warmth + short spatial room slap delay)
+  private sfxBusInput: GainNode | null = null;
+  private sfxDelay: DelayNode | null = null;
+  private sfxDelayFilter: BiquadFilterNode | null = null;
+  private sfxDelayWet: GainNode | null = null;
 
   // Live continuous engine synth nodes
   private engOscA: OscillatorNode | null = null;
   private engOscB: OscillatorNode | null = null;
+  private engOscSub: OscillatorNode | null = null;
   private engFilter: BiquadFilterNode | null = null;
+  private engShaper: WaveShaperNode | null = null;
   private engGain: GainNode | null = null;
   private engRunning = false;
   private lastTurboFlutterTime = 0;
+  private lastOverrunPopTime = 0;
   private lastEngineUpdateTime = 0;
   private lastEngBaseHz = -1;
   private lastEngCutoff = -1;
   private lastEngBaseVol = 0.03;
   private lastEngVol = -1;
   public hapticsEnabled = true;
+  public hapticCalibration: DeviceHapticCalibration = {
+    collisionIntensity: 1.0,
+    driftIntensity: 1.0,
+  };
 
   // AI Music Deck + Real-Time Web Audio DSP Chain
   private musicEnabled = true;
@@ -267,6 +309,66 @@ export class SoundFXSystem {
 
   private getOutputNode(ctx: AudioContext): AudioNode {
     return this.masterComp || ctx.destination;
+  }
+
+  /**
+   * Studio SFX FX bus: clean dry signal + soft filtered 48ms spatial slap echo
+   * into masterComp so procedural SFX sit naturally in space rather than sounding flat.
+   */
+  private getSfxBus(ctx: AudioContext): AudioNode {
+    const master = this.getOutputNode(ctx);
+    if (this.sfxBusInput) return this.sfxBusInput;
+    try {
+      const now = ctx.currentTime;
+      const input = ctx.createGain();
+      input.gain.setValueAtTime(1.0, now);
+
+      const delay = ctx.createDelay(0.25);
+      delay.delayTime.setValueAtTime(0.048, now);
+
+      const fb = ctx.createGain();
+      fb.gain.setValueAtTime(0.18, now);
+
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.setValueAtTime(3400, now);
+
+      const wet = ctx.createGain();
+      wet.gain.setValueAtTime(0.16, now);
+
+      input.connect(master);
+      input.connect(delay);
+      delay.connect(lp);
+      lp.connect(fb);
+      fb.connect(delay);
+      lp.connect(wet);
+      wet.connect(master);
+
+      this.sfxBusInput = input;
+      this.sfxDelay = delay;
+      this.sfxDelayFilter = lp;
+      this.sfxDelayWet = wet;
+      return input;
+    } catch {
+      return master;
+    }
+  }
+
+  private createNoiseSource(
+    ctx: AudioContext,
+    durationSec: number,
+    shaper?: (tNorm: number, idx: number, len: number) => number
+  ): AudioBufferSourceNode {
+    const len = Math.max(64, Math.floor(ctx.sampleRate * durationSec));
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) {
+      const env = shaper ? shaper(i / len, i, len) : 1 - i / len;
+      ch[i] = (Math.random() * 2 - 1) * env;
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    return src;
   }
 
   private ensureMusicChain(ctx: AudioContext) {
@@ -616,6 +718,22 @@ export class SoundFXSystem {
     this.notifyListeners();
   }
 
+  public setHapticCalibration(calibration: Partial<DeviceHapticCalibration>) {
+    const next: DeviceHapticCalibration = {
+      collisionIntensity: clampHapticIntensity(
+        calibration.collisionIntensity,
+        this.hapticCalibration.collisionIntensity
+      ),
+      driftIntensity: clampHapticIntensity(
+        calibration.driftIntensity,
+        this.hapticCalibration.driftIntensity
+      ),
+    };
+    this.hapticCalibration = next;
+    globalHapticCalibration = { ...next };
+    this.notifyListeners();
+  }
+
   public getMixerVolumes(): { master: number; music: number; sfx: number; engine: number } {
     return {
       master: this.masterVolume,
@@ -826,461 +944,697 @@ export class SoundFXSystem {
     return Math.max(0, Math.min(1.25, this.engineVolume * this.masterVolume));
   }
 
-  public triggerHaptic(type: HapticType, force = false): boolean {
-    return triggerHaptic(type, force);
+  public triggerHaptic(
+    type: HapticType,
+    force = false,
+    category: HapticEventCategory = 'general',
+    calibrationOverride?: DeviceHapticCalibration
+  ): boolean {
+    return triggerHaptic(type, force, category, calibrationOverride);
   }
 
-  // Subtle mechanical gear shift / soft thump sound (Parking shifter & traffic bump)
+  // Tactile mechanical gear shift / gate detent click + linkage thump
   public playGearShift() {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
+    const scale = this.sfxScale;
+
+    // 1. Deep transmission linkage thump
+    const bodyOsc = ctx.createOscillator();
+    const bodyGain = ctx.createGain();
+    bodyOsc.type = 'triangle';
+    bodyOsc.frequency.setValueAtTime(165, now);
+    bodyOsc.frequency.exponentialRampToValueAtTime(52, now + 0.085);
+    bodyGain.gain.setValueAtTime(0.16 * scale, now);
+    bodyGain.gain.exponentialRampToValueAtTime(0.001, now + 0.095);
+    bodyOsc.connect(bodyGain);
+    bodyGain.connect(out);
+    bodyOsc.start(now);
+    bodyOsc.stop(now + 0.11);
+
+    // 2. Crisp dual-stage metallic gate detent click
+    [0, 0.026].forEach((off, idx) => {
+      const clickOsc = ctx.createOscillator();
+      const clickGain = ctx.createGain();
+      clickOsc.type = idx === 0 ? 'square' : 'triangle';
+      clickOsc.frequency.setValueAtTime(idx === 0 ? 1180 : 1620, now + off);
+      clickOsc.frequency.exponentialRampToValueAtTime(360, now + off + 0.024);
+      clickGain.gain.setValueAtTime((idx === 0 ? 0.065 : 0.09) * scale, now + off);
+      clickGain.gain.exponentialRampToValueAtTime(0.001, now + off + 0.028);
+      clickOsc.connect(clickGain);
+      clickGain.connect(out);
+      clickOsc.start(now + off);
+      clickOsc.stop(now + off + 0.032);
+    });
+  }
+
+  // Hollow PVC traffic cone knock + double tumble bounce
+  public playConeKnock(speed = 4.0) {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
+    const intensity = Math.max(0.6, Math.min(1.4, speed / 5.5));
+    const scale = this.sfxScale * intensity;
+
+    // Initial hollow rubber-cone bonk
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'triangle';
-    osc.frequency.setValueAtTime(140, now);
-    osc.frequency.exponentialRampToValueAtTime(60, now + 0.08);
-
-    gain.gain.setValueAtTime(0.12 * this.sfxScale, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
-
+    osc.frequency.setValueAtTime(245, now);
+    osc.frequency.exponentialRampToValueAtTime(92, now + 0.09);
+    gain.gain.setValueAtTime(0.22 * scale, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.105);
     osc.connect(gain);
-    gain.connect(this.getOutputNode(ctx));
+    gain.connect(out);
     osc.start(now);
-    osc.stop(now + 0.1);
+    osc.stop(now + 0.11);
 
-    // Soft mechanical click transient
-    const clickOsc = ctx.createOscillator();
-    const clickGain = ctx.createGain();
-    clickOsc.type = 'sine';
-    clickOsc.frequency.setValueAtTime(480, now);
-    clickOsc.frequency.exponentialRampToValueAtTime(180, now + 0.03);
+    // Crisp plastic scrape transient + secondary ground bounces
+    const scrape = this.createNoiseSource(ctx, 0.075, (t) => Math.pow(1 - t, 1.8));
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(1050, now);
+    bp.Q.setValueAtTime(2.6, now);
+    const nGain = ctx.createGain();
+    nGain.gain.setValueAtTime(0.14 * scale, now);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.075);
+    scrape.connect(bp);
+    bp.connect(nGain);
+    nGain.connect(out);
+    scrape.start(now);
 
-    clickGain.gain.setValueAtTime(0.08 * this.sfxScale, now);
-    clickGain.gain.exponentialRampToValueAtTime(0.001, now + 0.035);
-
-    clickOsc.connect(clickGain);
-    clickGain.connect(this.getOutputNode(ctx));
-    clickOsc.start(now);
-    clickOsc.stop(now + 0.04);
+    [0.095, 0.165].forEach((offset, idx) => {
+      const bOsc = ctx.createOscillator();
+      const bGain = ctx.createGain();
+      bOsc.type = 'sine';
+      bOsc.frequency.setValueAtTime(190 - idx * 35, now + offset);
+      bOsc.frequency.exponentialRampToValueAtTime(84, now + offset + 0.05);
+      bGain.gain.setValueAtTime((0.10 - idx * 0.035) * scale, now + offset);
+      bGain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.055);
+      bOsc.connect(bGain);
+      bGain.connect(out);
+      bOsc.start(now + offset);
+      bOsc.stop(now + offset + 0.06);
+    });
   }
 
-  // Light pitch-varied tire screech + turbo flutter + hype combo stings on diagonal direction flip (/ <-> \)
+  // Automotive ultrasonic PDC parking sonar pulse tuned to nearest bumper clearance
+  public playParkingBeep(clearanceM: number, gear: 'P' | 'R' | 'D' = 'D') {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const out = this.getOutputNode(ctx);
+    const scale = this.sfxScale;
+
+    const clamped = Math.max(0.15, Math.min(2.0, clearanceM));
+    const urgency = Math.max(0, Math.min(1, 1 - (clamped - 0.35) / 1.45));
+    const baseHz = (gear === 'R' ? 980 : 840) + urgency * 460;
+    const dur = clamped < 0.45 ? 0.058 : 0.072;
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = clamped < 0.45 ? 'triangle' : 'sine';
+    osc.frequency.setValueAtTime(baseHz, now);
+
+    const amp = (0.045 + urgency * 0.055) * scale;
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(amp, now + 0.006);
+    gain.gain.setValueAtTime(amp, now + dur * 0.65);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    osc.connect(gain);
+    gain.connect(out);
+    osc.start(now);
+    osc.stop(now + dur + 0.01);
+  }
+
+  // Crisp electronic valet confirmation + handbrake ratchet lock when bay clears
+  public playParkingLock() {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
+    const scale = this.sfxScale;
+
+    // 1. Handbrake ratchet teeth burst (krr-click)
+    [0, 0.025, 0.05, 0.078].forEach((off, idx) => {
+      const rOsc = ctx.createOscillator();
+      const rGain = ctx.createGain();
+      rOsc.type = 'square';
+      rOsc.frequency.setValueAtTime(920 + idx * 140, now + off);
+      rOsc.frequency.exponentialRampToValueAtTime(320, now + off + 0.018);
+      rGain.gain.setValueAtTime((0.05 + idx * 0.01) * scale, now + off);
+      rGain.gain.exponentialRampToValueAtTime(0.001, now + off + 0.02);
+      rOsc.connect(rGain);
+      rGain.connect(out);
+      rOsc.start(now + off);
+      rOsc.stop(now + off + 0.025);
+    });
+
+    // 2. Valet electronic lock-in arpeggio (E5 -> G#5 -> B5 -> E6)
+    [659.25, 830.61, 987.77, 1318.51].forEach((freq, idx) => {
+      const t = now + 0.06 + idx * 0.048;
+      const osc = ctx.createOscillator();
+      const oscShimmer = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, t);
+      oscShimmer.type = 'sine';
+      oscShimmer.frequency.setValueAtTime(freq * 2, t);
+
+      const sGain = ctx.createGain();
+      sGain.gain.setValueAtTime(0.28, t);
+
+      gain.gain.setValueAtTime(0.001, t);
+      gain.gain.linearRampToValueAtTime(0.14 * scale, t + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.24);
+
+      osc.connect(gain);
+      oscShimmer.connect(sGain);
+      sGain.connect(gain);
+      gain.connect(out);
+
+      osc.start(t);
+      oscShimmer.start(t);
+      osc.stop(t + 0.25);
+      oscShimmer.stop(t + 0.25);
+    });
+  }
+
+  // Layered tire scrub, resonant turbo flutter & hype combo fanfares on drift flip
   public playDriftFlip(combo: number, isFever = false) {
     const ctx = this.ensureContext();
     if (!ctx) return;
 
     const pitchVariance = 0.94 + Math.random() * 0.12;
-    const comboSemitone = Math.pow(1.035, Math.min(12, combo));
+    const comboSemitone = Math.pow(1.032, Math.min(12, combo));
     const hasAi = this.playAiSfxClip('drift_flip', pitchVariance * comboSemitone, isFever ? 0.95 : 0.78);
-    const layer = (hasAi ? 0.48 : 1.0) * this.sfxScale;
-
+    const layer = (hasAi ? 0.52 : 1.0) * this.sfxScale;
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
 
-    // Turbo blow-off / synth chord stab
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = isFever ? 'sawtooth' : 'triangle';
-    const baseFreq = (isFever ? 330 : 240) * pitchVariance * comboSemitone;
-    osc.frequency.setValueAtTime(baseFreq, now);
-    osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.35, now + 0.09);
+    // 1. Dual-detuned turbo intake stab through resonant filter envelope
+    const baseFreq = (isFever ? 310 : 230) * pitchVariance * comboSemitone;
+    const filt = ctx.createBiquadFilter();
+    filt.type = 'lowpass';
+    filt.Q.setValueAtTime(3.6, now);
+    filt.frequency.setValueAtTime(baseFreq * 2.2, now);
+    filt.frequency.exponentialRampToValueAtTime(baseFreq * 5.8, now + 0.08);
+    filt.frequency.exponentialRampToValueAtTime(baseFreq * 1.4, now + 0.18);
 
-    gain.gain.setValueAtTime(0.14 * layer, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+    const oscGain = ctx.createGain();
+    oscGain.gain.setValueAtTime(0.001, now);
+    oscGain.gain.linearRampToValueAtTime(0.14 * layer, now + 0.012);
+    oscGain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
 
-    osc.connect(gain);
-    gain.connect(this.getOutputNode(ctx));
-    osc.start(now);
-    osc.stop(now + 0.15);
+    filt.connect(oscGain);
+    oscGain.connect(out);
 
-    // Subtle tire hiss burst
-    const bufferSize = Math.floor(ctx.sampleRate * 0.09);
-    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
-    }
-    const noise = ctx.createBufferSource();
-    noise.buffer = buffer;
+    [1.0, 1.007].forEach((det) => {
+      const osc = ctx.createOscillator();
+      osc.type = isFever ? 'sawtooth' : 'triangle';
+      osc.frequency.setValueAtTime(baseFreq * det, now);
+      osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.38 * det, now + 0.10);
+      osc.connect(filt);
+      osc.start(now);
+      osc.stop(now + 0.19);
+    });
 
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'bandpass';
-    filter.frequency.setValueAtTime(1450 * pitchVariance, now);
-    filter.Q.setValueAtTime(3.2, now);
+    // 2. Dual-band asphalt tire scrub burst (low rubber groan + high chirp)
+    const noise = this.createNoiseSource(ctx, 0.13, (t) => Math.pow(1 - t, 1.35));
+    const groanBp = ctx.createBiquadFilter();
+    groanBp.type = 'bandpass';
+    groanBp.frequency.setValueAtTime(880 * pitchVariance, now);
+    groanBp.Q.setValueAtTime(2.8, now);
+
+    const screechBp = ctx.createBiquadFilter();
+    screechBp.type = 'bandpass';
+    screechBp.frequency.setValueAtTime(2150 * pitchVariance, now);
+    screechBp.frequency.exponentialRampToValueAtTime(2750 * pitchVariance, now + 0.11);
+    screechBp.Q.setValueAtTime(5.2, now);
 
     const nGain = ctx.createGain();
-    nGain.gain.setValueAtTime(0.08 * layer, now);
-    nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+    nGain.gain.setValueAtTime(0.11 * layer, now);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
 
-    noise.connect(filter);
-    filter.connect(nGain);
-    nGain.connect(this.getOutputNode(ctx));
+    noise.connect(groanBp);
+    noise.connect(screechBp);
+    groanBp.connect(nGain);
+    screechBp.connect(nGain);
+    nGain.connect(out);
     noise.start(now);
 
-    // Hype combo stings layered on top as combo climbs (SLICK WEAVE -> DRIFT DEMON -> APEX PREDATOR -> DRIFT GOD)
+    // 3. Hype combo stings layered cleanly into FX bus as combo climbs
     if (combo >= 5) {
-      const stingScale = this.sfxScale * (hasAi ? 0.45 : 0.82);
+      const stingScale = this.sfxScale * (hasAi ? 0.45 : 0.8);
       if (combo >= 20) {
-        // Combo >= 20: "UNSTOPPABLE DRIFT GOD!" 4-note ascending euphoric synth fanfare
         [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => {
           const sOsc = ctx.createOscillator();
+          const sLp = ctx.createBiquadFilter();
           const sGain = ctx.createGain();
           sOsc.type = 'sawtooth';
-          sOsc.frequency.setValueAtTime(f, now + i * 0.024);
-          sGain.gain.setValueAtTime(0.12 * stingScale, now + i * 0.024);
-          sGain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.024 + 0.18);
-          sOsc.connect(sGain);
-          sGain.connect(this.getOutputNode(ctx));
-          sOsc.start(now + i * 0.024);
-          sOsc.stop(now + i * 0.024 + 0.19);
+          sOsc.frequency.setValueAtTime(f, now + i * 0.026);
+          sLp.type = 'lowpass';
+          sLp.frequency.setValueAtTime(3400, now + i * 0.026);
+          sGain.gain.setValueAtTime(0.10 * stingScale, now + i * 0.026);
+          sGain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.026 + 0.22);
+          sOsc.connect(sLp);
+          sLp.connect(sGain);
+          sGain.connect(out);
+          sOsc.start(now + i * 0.026);
+          sOsc.stop(now + i * 0.026 + 0.23);
         });
       } else if (combo >= 15) {
-        // Combo >= 15: "APEX PREDATOR!" Triple chord ascending arpeggio
         [440, 554.37, 659.25].forEach((f, i) => {
           const sOsc = ctx.createOscillator();
+          const sLp = ctx.createBiquadFilter();
           const sGain = ctx.createGain();
           sOsc.type = 'sawtooth';
           sOsc.frequency.setValueAtTime(f, now + i * 0.028);
-          sGain.gain.setValueAtTime(0.10 * stingScale, now + i * 0.028);
-          sGain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.028 + 0.15);
-          sOsc.connect(sGain);
-          sGain.connect(this.getOutputNode(ctx));
+          sLp.type = 'lowpass';
+          sLp.frequency.setValueAtTime(2900, now + i * 0.028);
+          sGain.gain.setValueAtTime(0.095 * stingScale, now + i * 0.028);
+          sGain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.028 + 0.18);
+          sOsc.connect(sLp);
+          sLp.connect(sGain);
+          sGain.connect(out);
           sOsc.start(now + i * 0.028);
-          sOsc.stop(now + i * 0.028 + 0.16);
+          sOsc.stop(now + i * 0.028 + 0.19);
         });
       } else if (combo >= 10) {
-        // Combo >= 10: "DRIFT DEMON!" Punchy dual harmonic fifth
         [349.23, 523.25].forEach((f, i) => {
           const sOsc = ctx.createOscillator();
           const sGain = ctx.createGain();
           sOsc.type = 'triangle';
           sOsc.frequency.setValueAtTime(f, now + i * 0.03);
           sGain.gain.setValueAtTime(0.11 * stingScale, now + i * 0.03);
-          sGain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.03 + 0.13);
+          sGain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.03 + 0.15);
           sOsc.connect(sGain);
-          sGain.connect(this.getOutputNode(ctx));
+          sGain.connect(out);
           sOsc.start(now + i * 0.03);
-          sOsc.stop(now + i * 0.03 + 0.14);
+          sOsc.stop(now + i * 0.03 + 0.16);
         });
       } else {
-        // Combo >= 5: "SLICK WEAVE!" Crisp single harmonic overtone
         const sOsc = ctx.createOscillator();
         const sGain = ctx.createGain();
         sOsc.type = 'sine';
         sOsc.frequency.setValueAtTime(baseFreq * 1.5, now + 0.02);
         sGain.gain.setValueAtTime(0.09 * stingScale, now + 0.02);
-        sGain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+        sGain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
         sOsc.connect(sGain);
-        sGain.connect(this.getOutputNode(ctx));
+        sGain.connect(out);
         sOsc.start(now + 0.02);
-        sOsc.stop(now + 0.13);
+        sOsc.stop(now + 0.15);
       }
     }
   }
 
-  // Rising dopamine coin pickup chime with escalating pitch streak
+  // Crisp metallic coin clink transient + bright bell-harmonic chime with escalating streak
   public playCoinPickup(streak = 0) {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
     const safeStreak = Math.max(0, Math.min(24, streak));
-    // Escalating pitch: each consecutive coin pitches up slightly for maximum satisfaction!
-    const pitchMult = Math.pow(1.059463, safeStreak % 12) * (1 + Math.floor(safeStreak / 12) * 0.28);
+    const pitchMult = Math.pow(1.059463, safeStreak % 12) * (1 + Math.floor(safeStreak / 12) * 0.24);
     const scale = this.sfxScale;
 
-    // Base dual-tone ping + high shimmer overtone on higher streaks
-    const baseFreqs = safeStreak >= 3 ? [587.33, 880.0, 1174.66] : [587.33, 880.0];
+    // 1. Metallic token strike transient (inharmonic bell ratio 2.756x)
+    const clinkOsc = ctx.createOscillator();
+    const clinkGain = ctx.createGain();
+    clinkOsc.type = 'sine';
+    clinkOsc.frequency.setValueAtTime(2480 * pitchMult, now);
+    clinkGain.gain.setValueAtTime(0.08 * scale, now);
+    clinkGain.gain.exponentialRampToValueAtTime(0.001, now + 0.045);
+    clinkOsc.connect(clinkGain);
+    clinkGain.connect(out);
+    clinkOsc.start(now);
+    clinkOsc.stop(now + 0.05);
 
+    // 2. Dual-partial harmonic chime (fundamental + octave/fifth shimmer)
+    const baseFreqs = safeStreak >= 3 ? [659.25, 987.77, 1318.51] : [659.25, 987.77];
     baseFreqs.forEach((freq, idx) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
+      const t = now + idx * 0.036;
       const startFreq = freq * pitchMult;
-      osc.frequency.setValueAtTime(startFreq, now + idx * 0.038);
-      osc.frequency.exponentialRampToValueAtTime(startFreq * 1.04, now + idx * 0.038 + 0.12);
 
-      const noteVol = (idx === 2 ? 0.09 : 0.16) * scale;
-      gain.gain.setValueAtTime(noteVol, now + idx * 0.038);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.038 + 0.16);
+      const osc = ctx.createOscillator();
+      const over = ctx.createOscillator();
+      const overGain = ctx.createGain();
+      const gain = ctx.createGain();
+
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(startFreq, t);
+      osc.frequency.exponentialRampToValueAtTime(startFreq * 1.025, t + 0.14);
+
+      over.type = 'triangle';
+      over.frequency.setValueAtTime(startFreq * 2.0, t);
+      overGain.gain.setValueAtTime(0.24, t);
+
+      const noteVol = (idx === 2 ? 0.085 : 0.145) * scale;
+      gain.gain.setValueAtTime(0.001, t);
+      gain.gain.linearRampToValueAtTime(noteVol, t + 0.007);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.19);
 
       osc.connect(gain);
-      gain.connect(this.getOutputNode(ctx));
-      osc.start(now + idx * 0.038);
-      osc.stop(now + idx * 0.038 + 0.17);
+      over.connect(overGain);
+      overGain.connect(gain);
+      gain.connect(out);
+
+      osc.start(t);
+      over.start(t);
+      osc.stop(t + 0.2);
+      over.stop(t + 0.2);
     });
   }
 
-  // Turbo blow-off valve chirp & flutter on throttle lift / speed deceleration
+  // Multi-pulse JDM wastegate blow-off flutter & pressurized air release
   public playTurboChirp() {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
     const scale = this.sfxScale;
 
-    // Stage 1: Compressed air whoosh / hiss burst
-    const hissLen = Math.floor(ctx.sampleRate * 0.16);
-    const hissBuf = ctx.createBuffer(1, hissLen, ctx.sampleRate);
-    const hissData = hissBuf.getChannelData(0);
-    for (let i = 0; i < hissLen; i++) {
-      hissData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / hissLen, 1.8);
-    }
-    const hissNode = ctx.createBufferSource();
-    hissNode.buffer = hissBuf;
-
+    // 1. Compressed intake air release burst
+    const hissNode = this.createNoiseSource(ctx, 0.21, (t) => Math.pow(1 - t, 1.55));
     const hissFilter = ctx.createBiquadFilter();
-    hissFilter.type = 'highpass';
-    hissFilter.frequency.setValueAtTime(2600, now);
-    hissFilter.frequency.exponentialRampToValueAtTime(1100, now + 0.15);
-
+    hissFilter.type = 'bandpass';
+    hissFilter.Q.setValueAtTime(1.8, now);
+    hissFilter.frequency.setValueAtTime(3400, now);
+    hissFilter.frequency.exponentialRampToValueAtTime(1150, now + 0.20);
     const hissGain = ctx.createGain();
-    hissGain.gain.setValueAtTime(0.16 * scale, now);
-    hissGain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
-
+    hissGain.gain.setValueAtTime(0.18 * scale, now);
+    hissGain.gain.exponentialRampToValueAtTime(0.001, now + 0.21);
     hissNode.connect(hissFilter);
     hissFilter.connect(hissGain);
-    hissGain.connect(this.getOutputNode(ctx));
+    hissGain.connect(out);
     hissNode.start(now);
 
-    // Stage 2: Iconic 3-pulse flutter chirps (su-tu-tu-tu)
-    const flutterOffsets = [0, 0.042, 0.084];
-    const flutterPitches = [2450, 2180, 1860];
+    // 2. Iconic 4-pulse decaying BOV flutter (su-tu-tu-tu-tu)
+    const flutterOffsets = [0, 0.038, 0.078, 0.118];
+    const flutterPitches = [2600, 2240, 1920, 1620];
     flutterOffsets.forEach((offset, idx) => {
+      const t = now + offset;
       const osc = ctx.createOscillator();
+      const bp = ctx.createBiquadFilter();
       const gain = ctx.createGain();
-      osc.type = 'triangle';
-      const f = flutterPitches[idx] * (0.96 + Math.random() * 0.08);
-      osc.frequency.setValueAtTime(f, now + offset);
-      osc.frequency.exponentialRampToValueAtTime(f * 0.72, now + offset + 0.055);
 
-      const amp = (0.13 - idx * 0.025) * scale;
-      gain.gain.setValueAtTime(amp, now + offset);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.06);
+      osc.type = 'sawtooth';
+      const f = flutterPitches[idx] * (0.97 + Math.random() * 0.06);
+      osc.frequency.setValueAtTime(f, t);
+      osc.frequency.exponentialRampToValueAtTime(f * 0.68, t + 0.048);
 
-      osc.connect(gain);
-      gain.connect(this.getOutputNode(ctx));
-      osc.start(now + offset);
-      osc.stop(now + offset + 0.065);
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(f * 0.95, t);
+      bp.Q.setValueAtTime(3.2, t);
+
+      const amp = (0.125 - idx * 0.022) * scale;
+      gain.gain.setValueAtTime(amp, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.052);
+
+      osc.connect(bp);
+      bp.connect(gain);
+      gain.connect(out);
+      osc.start(t);
+      osc.stop(t + 0.058);
     });
   }
 
-  // Nitro boost pad / Fever activation fanfare (AI Fever Drop + Synth Harmonic)
+  // Nitro purge hiss + sub-drop + lush hypersaw chord burst on Fever activation
   public playFeverBurst() {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const hasAi = this.playAiSfxClip('fever', 1.0, 1.0);
-    const layer = (hasAi ? 0.5 : 1.0) * this.sfxScale;
-
+    const layer = (hasAi ? 0.54 : 1.0) * this.sfxScale;
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
+
+    // 1. Sub-bass ignition drop
+    const subOsc = ctx.createOscillator();
+    const subGain = ctx.createGain();
+    subOsc.type = 'sine';
+    subOsc.frequency.setValueAtTime(125, now);
+    subOsc.frequency.exponentialRampToValueAtTime(42, now + 0.28);
+    subGain.gain.setValueAtTime(0.28 * layer, now);
+    subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.30);
+    subOsc.connect(subGain);
+    subGain.connect(out);
+    subOsc.start(now);
+    subOsc.stop(now + 0.31);
+
+    // 2. Pressurized nitrous purge swoosh
+    const purge = this.createNoiseSource(ctx, 0.26, (t) => Math.sin(t * Math.PI) * (1 - t * 0.4));
+    const pFilter = ctx.createBiquadFilter();
+    pFilter.type = 'highpass';
+    pFilter.frequency.setValueAtTime(1800, now);
+    pFilter.frequency.exponentialRampToValueAtTime(4800, now + 0.24);
+    const pGain = ctx.createGain();
+    pGain.gain.setValueAtTime(0.14 * layer, now);
+    pGain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+    purge.connect(pFilter);
+    pFilter.connect(pGain);
+    pGain.connect(out);
+    purge.start(now);
+
+    // 3. Swept filter hypersaw fanfare chord
     const notes = [261.63, 329.63, 392.0, 523.25, 659.25];
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.Q.setValueAtTime(2.0, now);
+    lp.frequency.setValueAtTime(750, now);
+    lp.frequency.exponentialRampToValueAtTime(5200, now + 0.22);
+    lp.connect(out);
+
     notes.forEach((f, i) => {
+      const t = now + i * 0.036;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(f, now + i * 0.04);
-      gain.gain.setValueAtTime(0.11 * layer, now + i * 0.04);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.04 + 0.28);
+      osc.frequency.setValueAtTime(f, t);
+      gain.gain.setValueAtTime(0.095 * layer, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.32);
       osc.connect(gain);
-      gain.connect(this.getOutputNode(ctx));
-      osc.start(now + i * 0.04);
-      osc.stop(now + i * 0.04 + 0.29);
+      gain.connect(lp);
+      osc.start(t);
+      osc.stop(t + 0.34);
     });
   }
 
-  // Crisp dual-tone style switch chime (/ <-> \ mid-drift)
+  // Crisp dual-tone style switch chime with tactile transient (/ <-> \ mid-drift)
   public playStyleSwitch(combo: number) {
     const ctx = this.ensureContext();
     if (!ctx) return;
-    const mult = Math.pow(1.04, Math.min(16, combo));
+    const mult = Math.pow(1.038, Math.min(16, combo));
     const hasAi = this.playAiSfxClip('drift_flip', mult, 0.72);
     const layer = (hasAi ? 0.55 : 1.0) * this.sfxScale;
-
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
+
     [440, 659.25].forEach((freq, i) => {
+      const t = now + i * 0.034;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'triangle';
-      osc.frequency.setValueAtTime(freq * mult, now + i * 0.035);
-      gain.gain.setValueAtTime(0.14 * layer, now + i * 0.035);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.035 + 0.14);
+      osc.frequency.setValueAtTime(freq * mult, t);
+      gain.gain.setValueAtTime(0.135 * layer, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
       osc.connect(gain);
-      gain.connect(this.getOutputNode(ctx));
-      osc.start(now + i * 0.035);
-      osc.stop(now + i * 0.035 + 0.15);
+      gain.connect(out);
+      osc.start(t);
+      osc.stop(t + 0.17);
     });
   }
 
-  // High-frequency tactile sector tick / boundary flipper sound for prize wheel & style flips
+  // Tactile sector flipper click + bright ping for wheel & UI flips
   public playStyleFlip() {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'triangle';
-    osc.frequency.setValueAtTime(950, now);
-    osc.frequency.exponentialRampToValueAtTime(1400, now + 0.02);
-    gain.gain.setValueAtTime(0.09 * this.sfxScale, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.032);
+    osc.frequency.setValueAtTime(980, now);
+    osc.frequency.exponentialRampToValueAtTime(1480, now + 0.022);
+    gain.gain.setValueAtTime(0.095 * this.sfxScale, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.038);
     osc.connect(gain);
-    gain.connect(this.getOutputNode(ctx));
+    gain.connect(out);
     osc.start(now);
-    osc.stop(now + 0.035);
+    osc.stop(now + 0.042);
   }
 
-  // Metallic guardrail scrape spark sound
+  // Metallic guardrail scrape sparks + steel rail resonance
   public playGuardrailSpark() {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const now = ctx.currentTime;
-    const len = Math.floor(ctx.sampleRate * 0.06);
-    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
-    const ch = buf.getChannelData(0);
-    for (let i = 0; i < len; i++) {
-      ch[i] = (Math.random() * 2 - 1) * (1 - i / len);
-    }
-    const noise = ctx.createBufferSource();
-    noise.buffer = buf;
+    const out = this.getSfxBus(ctx);
+    const scale = this.sfxScale;
 
+    // 1. High-energy spark sizzle noise
+    const noise = this.createNoiseSource(ctx, 0.10, (t) => Math.pow(1 - t, 1.1));
     const filter = ctx.createBiquadFilter();
     filter.type = 'highpass';
-    filter.frequency.setValueAtTime(2800 + Math.random() * 900, now);
-
+    filter.frequency.setValueAtTime(2700 + Math.random() * 800, now);
     const gain = ctx.createGain();
-    gain.gain.setValueAtTime(0.09 * this.sfxScale, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
-
+    gain.gain.setValueAtTime(0.12 * scale, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.10);
     noise.connect(filter);
     filter.connect(gain);
-    gain.connect(this.getOutputNode(ctx));
+    gain.connect(out);
     noise.start(now);
+
+    // 2. Metallic steel rail scrape ring
+    [1820, 3140].forEach((hz, idx) => {
+      const mOsc = ctx.createOscillator();
+      const mGain = ctx.createGain();
+      mOsc.type = 'sawtooth';
+      mOsc.frequency.setValueAtTime(hz + Math.random() * 240, now);
+      mOsc.frequency.exponentialRampToValueAtTime(hz * 0.65, now + 0.08);
+      mGain.gain.setValueAtTime((idx === 0 ? 0.045 : 0.03) * scale, now);
+      mGain.gain.exponentialRampToValueAtTime(0.001, now + 0.085);
+      mOsc.connect(mGain);
+      mGain.connect(out);
+      mOsc.start(now);
+      mOsc.stop(now + 0.09);
+    });
   }
 
-  // Sparkly ascending arpeggio when picking up a Nitro Star Gem
+  // Shimmering crystal arpeggio + octave sparkle on Nitro Star pickup
   public playStarPickup() {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
+    const scale = this.sfxScale;
     const notes = [523.25, 659.25, 783.99, 1046.5];
+
     notes.forEach((f, i) => {
+      const t = now + i * 0.032;
       const osc = ctx.createOscillator();
+      const hi = ctx.createOscillator();
+      const hiGain = ctx.createGain();
       const gain = ctx.createGain();
+
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(f, now + i * 0.032);
-      gain.gain.setValueAtTime(0.14 * this.sfxScale, now + i * 0.032);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.032 + 0.18);
+      osc.frequency.setValueAtTime(f, t);
+      hi.type = 'triangle';
+      hi.frequency.setValueAtTime(f * 2.0, t);
+      hiGain.gain.setValueAtTime(0.28, t);
+
+      gain.gain.setValueAtTime(0.001, t);
+      gain.gain.linearRampToValueAtTime(0.13 * scale, t + 0.008);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+
       osc.connect(gain);
-      gain.connect(this.getOutputNode(ctx));
-      osc.start(now + i * 0.032);
-      osc.stop(now + i * 0.032 + 0.19);
+      hi.connect(hiGain);
+      hiGain.connect(gain);
+      gain.connect(out);
+
+      osc.start(t);
+      hi.start(t);
+      osc.stop(t + 0.23);
+      hi.stop(t + 0.23);
     });
   }
 
-  // Guardrail breach metallic crunch + wind rush before hitting ground (NO explosion boom)
+  // Guardrail breach metallic shear + wind rush drop
   public playFallAndDestroy() {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
     const layer = this.sfxScale;
 
-    // Stage 1: Metallic guardrail crunch burst
-    const crunchLen = Math.floor(ctx.sampleRate * 0.16);
-    const crunchBuf = ctx.createBuffer(1, crunchLen, ctx.sampleRate);
-    const crunchCh = crunchBuf.getChannelData(0);
-    for (let i = 0; i < crunchLen; i++) {
-      crunchCh[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / crunchLen, 1.15);
-    }
-    const crunchNoise = ctx.createBufferSource();
-    crunchNoise.buffer = crunchBuf;
+    // 1. Metallic rail shear impact
+    const crunchNoise = this.createNoiseSource(ctx, 0.18, (t) => Math.pow(1 - t, 1.1));
     const crunchFilter = ctx.createBiquadFilter();
     crunchFilter.type = 'bandpass';
     crunchFilter.frequency.setValueAtTime(1450, now);
-    crunchFilter.Q.setValueAtTime(1.6, now);
+    crunchFilter.Q.setValueAtTime(1.5, now);
     const crunchGain = ctx.createGain();
     crunchGain.gain.setValueAtTime(0.28 * layer, now);
-    crunchGain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+    crunchGain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
     crunchNoise.connect(crunchFilter);
     crunchFilter.connect(crunchGain);
-    crunchGain.connect(this.getOutputNode(ctx));
+    crunchGain.connect(out);
     crunchNoise.start(now);
 
-    // Stage 2: Realistic downward wind rush & suspension creak (no whistle/boom)
-    const windLen = Math.floor(ctx.sampleRate * 0.44);
-    const windBuf = ctx.createBuffer(1, windLen, ctx.sampleRate);
-    const windCh = windBuf.getChannelData(0);
-    for (let i = 0; i < windLen; i++) {
-      windCh[i] = (Math.random() * 2 - 1) * Math.sin((i / windLen) * Math.PI);
-    }
-    const windNoise = ctx.createBufferSource();
-    windNoise.buffer = windBuf;
+    // 2. Downward air rush sweep
+    const windNoise = this.createNoiseSource(ctx, 0.46, (t) => Math.sin(t * Math.PI));
     const windFilter = ctx.createBiquadFilter();
     windFilter.type = 'lowpass';
-    windFilter.frequency.setValueAtTime(950, now);
-    windFilter.frequency.exponentialRampToValueAtTime(280, now + 0.44);
+    windFilter.frequency.setValueAtTime(1050, now);
+    windFilter.frequency.exponentialRampToValueAtTime(240, now + 0.46);
     const windGain = ctx.createGain();
-    windGain.gain.setValueAtTime(0.14 * layer, now);
-    windGain.gain.exponentialRampToValueAtTime(0.001, now + 0.44);
+    windGain.gain.setValueAtTime(0.15 * layer, now);
+    windGain.gain.exponentialRampToValueAtTime(0.001, now + 0.46);
     windNoise.connect(windFilter);
     windFilter.connect(windGain);
-    windGain.connect(this.getOutputNode(ctx));
+    windGain.connect(out);
     windNoise.start(now);
   }
 
-  // Heavy chassis slam into the ground: suspension thud + sheet-metal crumple + glass/dirt scatter
+  // Heavy chassis slam: sub-bass punch + modulated sheet-metal crumple + glass/debris shatter
   public playGroundSlam(intensity = 1.0) {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const hasAi = this.playAiSfxClip('crash', 0.94, Math.min(1.0, 0.72 * intensity));
-    const layer = (hasAi ? 0.6 : 1.0) * this.sfxScale * Math.max(0.45, Math.min(1.25, intensity));
+    const layer = (hasAi ? 0.62 : 1.0) * this.sfxScale * Math.max(0.45, Math.min(1.25, intensity));
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
 
-    // 1. Heavy chassis thud (fast punchy 85Hz -> 32Hz drop, no boom tail)
+    // 1. Sub-chassis punch (118Hz -> 30Hz)
     const thudOsc = ctx.createOscillator();
     const thudGain = ctx.createGain();
     thudOsc.type = 'triangle';
-    thudOsc.frequency.setValueAtTime(92, now);
-    thudOsc.frequency.exponentialRampToValueAtTime(28, now + 0.24);
-    thudGain.gain.setValueAtTime(0.42 * layer, now);
-    thudGain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+    thudOsc.frequency.setValueAtTime(118, now);
+    thudOsc.frequency.exponentialRampToValueAtTime(30, now + 0.25);
+    thudGain.gain.setValueAtTime(0.44 * layer, now);
+    thudGain.gain.exponentialRampToValueAtTime(0.001, now + 0.27);
     thudOsc.connect(thudGain);
-    thudGain.connect(this.getOutputNode(ctx));
+    thudGain.connect(out);
     thudOsc.start(now);
-    thudOsc.stop(now + 0.27);
+    thudOsc.stop(now + 0.28);
 
-    // 2. Crunchy deformed sheet-metal & gravel skid scatter
-    const crumpleLen = Math.floor(ctx.sampleRate * 0.42);
-    const crumpleBuf = ctx.createBuffer(1, crumpleLen, ctx.sampleRate);
-    const crumpleCh = crumpleBuf.getChannelData(0);
-    for (let i = 0; i < crumpleLen; i++) {
-      const env = Math.pow(1 - i / crumpleLen, 1.35);
-      const pulse = Math.sin(i * 0.045) > 0.2 ? 1.0 : 0.45;
-      crumpleCh[i] = (Math.random() * 2 - 1) * env * pulse;
-    }
-    const crumpleSrc = ctx.createBufferSource();
-    crumpleSrc.buffer = crumpleBuf;
+    // 2. Textured sheet-metal crumple + gravel scatter
+    const crumpleSrc = this.createNoiseSource(ctx, 0.44, (t, idx) => {
+      const env = Math.pow(1 - t, 1.3);
+      const pulse = Math.sin(idx * 0.045) > 0.15 ? 1.0 : 0.42;
+      return env * pulse;
+    });
     const crumpleBp = ctx.createBiquadFilter();
     crumpleBp.type = 'bandpass';
-    crumpleBp.frequency.setValueAtTime(920, now);
+    crumpleBp.frequency.setValueAtTime(980, now);
+    crumpleBp.frequency.exponentialRampToValueAtTime(380, now + 0.38);
     crumpleBp.Q.setValueAtTime(1.1, now);
     const crumpleGain = ctx.createGain();
     crumpleGain.gain.setValueAtTime(0.32 * layer, now);
-    crumpleGain.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
+    crumpleGain.gain.exponentialRampToValueAtTime(0.001, now + 0.44);
     crumpleSrc.connect(crumpleBp);
     crumpleBp.connect(crumpleGain);
-    crumpleGain.connect(this.getOutputNode(ctx));
+    crumpleGain.connect(out);
     crumpleSrc.start(now);
 
-    // 3. High metallic glass/panel clatter sparkles
-    const glassOsc = ctx.createOscillator();
-    const glassGain = ctx.createGain();
-    glassOsc.type = 'square';
-    glassOsc.frequency.setValueAtTime(2600, now + 0.02);
-    glassOsc.frequency.exponentialRampToValueAtTime(720, now + 0.14);
-    glassGain.gain.setValueAtTime(0.08 * layer, now + 0.02);
-    glassGain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
-    glassOsc.connect(glassGain);
-    glassGain.connect(this.getOutputNode(ctx));
-    glassOsc.start(now + 0.02);
-    glassOsc.stop(now + 0.16);
+    // 3. Glass & trim debris scatter sparkle
+    const debrisSrc = this.createNoiseSource(ctx, 0.28, (t, idx) =>
+      Math.pow(1 - t, 1.9) * (idx % 17 < 4 ? 1.0 : 0.25)
+    );
+    const debrisHp = ctx.createBiquadFilter();
+    debrisHp.type = 'highpass';
+    debrisHp.frequency.setValueAtTime(3600, now);
+    const debrisGain = ctx.createGain();
+    debrisGain.gain.setValueAtTime(0.14 * layer, now + 0.02);
+    debrisGain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+    debrisSrc.connect(debrisHp);
+    debrisHp.connect(debrisGain);
+    debrisGain.connect(out);
+    debrisSrc.start(now + 0.02);
   }
 
   // Heavy vehicle-to-vehicle or barrier impact crunch
@@ -1288,119 +1642,173 @@ export class SoundFXSystem {
     this.playGroundSlam(Math.max(0.65, intensity));
   }
 
-  // Sharp metallic bolt snap + rattling body panel clatter when a part detaches
+  // Sharp metallic bolt shear + rattling body panel clatter when a part detaches
   public playPartDetach(partCount = 1) {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
     const hits = Math.min(3, Math.max(1, partCount));
+
+    // Snap shear noise
+    const snap = this.createNoiseSource(ctx, 0.07, (t) => Math.pow(1 - t, 2.2));
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.setValueAtTime(2200, now);
+    const sGain = ctx.createGain();
+    sGain.gain.setValueAtTime(0.15 * this.sfxScale, now);
+    sGain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
+    snap.connect(hp);
+    hp.connect(sGain);
+    sGain.connect(out);
+    snap.start(now);
+
     for (let i = 0; i < hits; i++) {
       const t = now + i * 0.055;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(420 + i * 95, t);
-      osc.frequency.exponentialRampToValueAtTime(135, t + 0.12);
-      gain.gain.setValueAtTime(0.14 * this.sfxScale, t);
-      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.13);
+      osc.frequency.setValueAtTime(440 + i * 110, t);
+      osc.frequency.exponentialRampToValueAtTime(125, t + 0.13);
+      gain.gain.setValueAtTime(0.13 * this.sfxScale, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
       osc.connect(gain);
-      gain.connect(this.getOutputNode(ctx));
+      gain.connect(out);
       osc.start(t);
-      osc.stop(t + 0.14);
+      osc.stop(t + 0.15);
     }
   }
 
-  // Pneumatic impact wrench + metallic torque lock sound when repairing a car part
+  // Pneumatic impact air-wrench pulses + metallic torque-lock chime on repair
   public playRepairWrench() {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
+    const scale = this.sfxScale;
+
     [0, 0.055, 0.11].forEach((offset, idx) => {
       const t = now + offset;
+      // Compressed air burst
+      const air = this.createNoiseSource(ctx, 0.045, (u) => 1 - u);
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(idx === 2 ? 2600 : 1850, t);
+      bp.Q.setValueAtTime(2.2, t);
+      const nGain = ctx.createGain();
+      nGain.gain.setValueAtTime(0.10 * scale, t);
+      nGain.gain.exponentialRampToValueAtTime(0.001, t + 0.045);
+      air.connect(bp);
+      bp.connect(nGain);
+      nGain.connect(out);
+      air.start(t);
+
+      // Impact hammer anvil tone
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = idx === 2 ? 'triangle' : 'square';
-      osc.frequency.setValueAtTime(idx === 2 ? 780 : 320 + idx * 65, t);
-      osc.frequency.exponentialRampToValueAtTime(idx === 2 ? 1180 : 190, t + 0.048);
-      gain.gain.setValueAtTime((idx === 2 ? 0.16 : 0.11) * this.sfxScale, t);
-      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.052);
+      osc.frequency.setValueAtTime(idx === 2 ? 820 : 340 + idx * 70, t);
+      osc.frequency.exponentialRampToValueAtTime(idx === 2 ? 1240 : 195, t + 0.048);
+      gain.gain.setValueAtTime((idx === 2 ? 0.14 : 0.095) * scale, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.055);
       osc.connect(gain);
-      gain.connect(this.getOutputNode(ctx));
+      gain.connect(out);
       osc.start(t);
       osc.stop(t + 0.06);
     });
   }
 
-  // Crisp rising turbo-pass cue when overtaking traffic
+  // Crisp rising turbo-pass cue + aerodynamic air slip when overtaking traffic
   public playOvertake(combo: number) {
     const ctx = this.ensureContext();
     if (!ctx) return;
-    const mult = Math.pow(1.035, Math.min(12, combo));
+    const mult = Math.pow(1.032, Math.min(12, combo));
     const hasAi = this.playAiSfxClip('overtake', mult, 0.85);
-    const layer = (hasAi ? 0.5 : 1.0) * this.sfxScale;
-
+    const layer = (hasAi ? 0.52 : 1.0) * this.sfxScale;
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
+
+    // Light wind pass
+    const air = this.createNoiseSource(ctx, 0.11, (t) => Math.sin(t * Math.PI));
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(950 * mult, now);
+    bp.frequency.exponentialRampToValueAtTime(420, now + 0.11);
+    const aGain = ctx.createGain();
+    aGain.gain.setValueAtTime(0.11 * layer, now);
+    aGain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
+    air.connect(bp);
+    bp.connect(aGain);
+    aGain.connect(out);
+    air.start(now);
+
     [392.0, 587.33].forEach((f, idx) => {
+      const t = now + idx * 0.038;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'triangle';
-      osc.frequency.setValueAtTime(f * mult, now + idx * 0.04);
-      gain.gain.setValueAtTime(0.13 * layer, now + idx * 0.04);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.04 + 0.14);
+      osc.frequency.setValueAtTime(f * mult, t);
+      gain.gain.setValueAtTime(0.125 * layer, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
       osc.connect(gain);
-      gain.connect(this.getOutputNode(ctx));
-      osc.start(now + idx * 0.04);
-      osc.stop(now + idx * 0.04 + 0.15);
+      gain.connect(out);
+      osc.start(t);
+      osc.stop(t + 0.17);
     });
   }
 
-  // High-adrenaline Doppler whoosh + chime on close near-miss / oncoming dodge
+  // High-adrenaline Doppler air compression thump + swept whoosh + bright chime on near-miss
   public playNearMiss(isOncoming: boolean) {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const hasAi = this.playAiSfxClip('overtake', isOncoming ? 1.15 : 1.05, 0.9);
     const layer = (hasAi ? 0.65 : 1.0) * this.sfxScale;
-
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
 
-    // Doppler air-whoosh noise sweep
-    const len = Math.floor(ctx.sampleRate * 0.18);
-    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
-    const ch = buf.getChannelData(0);
-    for (let i = 0; i < len; i++) {
-      const env = Math.sin((i / len) * Math.PI);
-      ch[i] = (Math.random() * 2 - 1) * env;
-    }
-    const noise = ctx.createBufferSource();
-    noise.buffer = buf;
+    // 1. Air pressure wave sub-thump (150Hz -> 55Hz)
+    const sub = ctx.createOscillator();
+    const sGain = ctx.createGain();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(isOncoming ? 180 : 140, now);
+    sub.frequency.exponentialRampToValueAtTime(52, now + 0.13);
+    sGain.gain.setValueAtTime(0.22 * layer, now);
+    sGain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+    sub.connect(sGain);
+    sGain.connect(out);
+    sub.start(now);
+    sub.stop(now + 0.15);
 
+    // 2. Doppler air-whoosh resonant sweep
+    const noise = this.createNoiseSource(ctx, 0.21, (t) => Math.sin(t * Math.PI));
     const filter = ctx.createBiquadFilter();
     filter.type = 'bandpass';
-    filter.frequency.setValueAtTime(isOncoming ? 1800 : 1200, now);
-    filter.frequency.exponentialRampToValueAtTime(340, now + 0.18);
-    filter.Q.setValueAtTime(2.4, now);
+    filter.frequency.setValueAtTime(isOncoming ? 2200 : 1450, now);
+    filter.frequency.exponentialRampToValueAtTime(280, now + 0.20);
+    filter.Q.setValueAtTime(2.6, now);
 
     const nGain = ctx.createGain();
-    nGain.gain.setValueAtTime(0.22 * layer, now);
-    nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+    nGain.gain.setValueAtTime(0.24 * layer, now);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.21);
     noise.connect(filter);
     filter.connect(nGain);
-    nGain.connect(this.getOutputNode(ctx));
+    nGain.connect(out);
     noise.start(now);
 
-    // Bright reward chime
-    const notes = isOncoming ? [659.25, 987.77, 1318.5] : [587.33, 880.0];
+    // 3. Crisp reward chime
+    const notes = isOncoming ? [659.25, 987.77, 1318.51] : [587.33, 880.0];
     notes.forEach((f, idx) => {
+      const t = now + idx * 0.032;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(f, now + idx * 0.032);
-      gain.gain.setValueAtTime(0.14 * layer, now + idx * 0.032);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.032 + 0.16);
+      osc.frequency.setValueAtTime(f, t);
+      gain.gain.setValueAtTime(0.135 * layer, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.19);
       osc.connect(gain);
-      gain.connect(this.getOutputNode(ctx));
-      osc.start(now + idx * 0.032);
-      osc.stop(now + idx * 0.032 + 0.17);
+      gain.connect(out);
+      osc.start(t);
+      osc.stop(t + 0.20);
     });
   }
 
@@ -1408,137 +1816,170 @@ export class SoundFXSystem {
   public playSlipstreamPass(combo: number) {
     const ctx = this.ensureContext();
     if (!ctx) return;
-    const mult = Math.pow(1.035, Math.min(12, combo));
+    const mult = Math.pow(1.032, Math.min(12, combo));
     const hasAi = this.playAiSfxClip('fever', 1.08, 0.65);
     const layer = (hasAi ? 0.58 : 1.0) * this.sfxScale;
-
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
+
+    const whoosh = this.createNoiseSource(ctx, 0.16, (t) => Math.sin(t * Math.PI));
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'bandpass';
+    hp.frequency.setValueAtTime(1600 * mult, now);
+    hp.frequency.exponentialRampToValueAtTime(3400 * mult, now + 0.15);
+    const wGain = ctx.createGain();
+    wGain.gain.setValueAtTime(0.14 * layer, now);
+    wGain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+    whoosh.connect(hp);
+    hp.connect(wGain);
+    wGain.connect(out);
+    whoosh.start(now);
+
     [440, 659.25, 880, 1174.66].forEach((f, idx) => {
+      const t = now + idx * 0.028;
       const osc = ctx.createOscillator();
+      const lp = ctx.createBiquadFilter();
       const gain = ctx.createGain();
       osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(f * mult, now + idx * 0.028);
-      gain.gain.setValueAtTime(0.09 * layer, now + idx * 0.028);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.028 + 0.18);
-      osc.connect(gain);
-      gain.connect(this.getOutputNode(ctx));
-      osc.start(now + idx * 0.028);
-      osc.stop(now + idx * 0.028 + 0.19);
+      osc.frequency.setValueAtTime(f * mult, t);
+      lp.type = 'lowpass';
+      lp.frequency.setValueAtTime(3200, t);
+      gain.gain.setValueAtTime(0.095 * layer, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.20);
+      osc.connect(lp);
+      lp.connect(gain);
+      gain.connect(out);
+      osc.start(t);
+      osc.stop(t + 0.21);
     });
   }
 
-  // Euphoric gold chord chime on 250m distance milestones & rank-ups
+  // Euphoric gold chord chime on milestones & mission clears
   public playMilestone() {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const hasAi = this.playAiSfxClip('milestone', 1.0, 1.0);
-    const layer = (hasAi ? 0.5 : 1.0) * this.sfxScale;
-
+    const layer = (hasAi ? 0.52 : 1.0) * this.sfxScale;
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
+
     [523.25, 659.25, 783.99, 1046.5, 1318.51].forEach((f, idx) => {
+      const t = now + idx * 0.04;
       const osc = ctx.createOscillator();
+      const shimmer = ctx.createOscillator();
+      const sGain = ctx.createGain();
       const gain = ctx.createGain();
       osc.type = 'triangle';
-      osc.frequency.setValueAtTime(f, now + idx * 0.04);
-      gain.gain.setValueAtTime(0.12 * layer, now + idx * 0.04);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.04 + 0.25);
+      osc.frequency.setValueAtTime(f, t);
+      shimmer.type = 'sine';
+      shimmer.frequency.setValueAtTime(f * 2, t);
+      sGain.gain.setValueAtTime(0.22, t);
+      gain.gain.setValueAtTime(0.115 * layer, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
       osc.connect(gain);
-      gain.connect(this.getOutputNode(ctx));
-      osc.start(now + idx * 0.04);
-      osc.stop(now + idx * 0.04 + 0.26);
+      shimmer.connect(sGain);
+      sGain.connect(gain);
+      gain.connect(out);
+      osc.start(t);
+      shimmer.start(t);
+      osc.stop(t + 0.29);
+      shimmer.stop(t + 0.29);
     });
   }
 
-  // Customizable Car Horn Synthesizer (supports 5 distinct arcade horn profiles)
+  // Customizable Car Horn Synthesizer routed through warm studio saturation + spatial FX bus
   public playHorn(hornStyle?: HornStyleId | HornTypeId | string) {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const now = ctx.currentTime;
     const scale = this.sfxScale;
-    const out = this.getOutputNode(ctx);
+    const out = this.getSfxBus(ctx);
+
+    let hornBus: AudioNode = out;
+    try {
+      if (typeof ctx.createWaveShaper === 'function') {
+        const shaper = ctx.createWaveShaper();
+        shaper.curve = makeSaturationCurve(0.14);
+        shaper.connect(out);
+        hornBus = shaper;
+      }
+    } catch {}
 
     const style = String(hornStyle || 'dual').toLowerCase();
 
     if (style === 'laser' || style === 'cyber_chirp') {
-      // Synthesized pitch-drop laser chirp (880Hz down to 220Hz with fast resonant sweep)
       const osc = ctx.createOscillator();
       const filter = ctx.createBiquadFilter();
       const gain = ctx.createGain();
 
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(880, now);
-      osc.frequency.exponentialRampToValueAtTime(220, now + 0.16);
+      osc.frequency.exponentialRampToValueAtTime(220, now + 0.17);
 
       filter.type = 'lowpass';
-      filter.Q.setValueAtTime(7.0, now); // Fast resonant sweep
-      filter.frequency.setValueAtTime(2600, now);
-      filter.frequency.exponentialRampToValueAtTime(280, now + 0.16);
+      filter.Q.setValueAtTime(7.5, now);
+      filter.frequency.setValueAtTime(2800, now);
+      filter.frequency.exponentialRampToValueAtTime(280, now + 0.17);
 
       gain.gain.setValueAtTime(0.001, now);
       gain.gain.linearRampToValueAtTime(0.24 * scale, now + 0.012);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.19);
 
       osc.connect(filter);
       filter.connect(gain);
-      gain.connect(out);
+      gain.connect(hornBus);
 
       osc.start(now);
-      osc.stop(now + 0.19);
+      osc.stop(now + 0.20);
     } else if (style === 'fanfare') {
-      // Rapid 4-note ascending fanfare (C5, E5, G5, C6)
       const notes = [
-        { f: 523.25, start: 0, dur: 0.08 },     // C5
-        { f: 659.25, start: 0.08, dur: 0.08 },  // E5
-        { f: 783.99, start: 0.16, dur: 0.08 },  // G5
-        { f: 1046.50, start: 0.24, dur: 0.24 }, // C6
+        { f: 523.25, start: 0, dur: 0.08 },
+        { f: 659.25, start: 0.08, dur: 0.08 },
+        { f: 783.99, start: 0.16, dur: 0.08 },
+        { f: 1046.50, start: 0.24, dur: 0.26 },
       ];
       notes.forEach(({ f, start, dur }) => {
         const osc = ctx.createOscillator();
         const filter = ctx.createBiquadFilter();
         const gain = ctx.createGain();
-
         osc.type = 'sawtooth';
         osc.frequency.setValueAtTime(f, now + start);
-
         filter.type = 'lowpass';
-        filter.frequency.setValueAtTime(2200, now + start);
-
+        filter.Q.setValueAtTime(2.4, now + start);
+        filter.frequency.setValueAtTime(2400, now + start);
         gain.gain.setValueAtTime(0.001, now + start);
-        gain.gain.linearRampToValueAtTime(0.18 * scale, now + start + 0.012);
-        gain.gain.setValueAtTime(0.18 * scale, now + start + dur - 0.02);
+        gain.gain.linearRampToValueAtTime(0.19 * scale, now + start + 0.012);
+        gain.gain.setValueAtTime(0.19 * scale, now + start + dur - 0.02);
         gain.gain.exponentialRampToValueAtTime(0.001, now + start + dur);
-
         osc.connect(filter);
         filter.connect(gain);
-        gain.connect(out);
-
+        gain.connect(hornBus);
         osc.start(now + start);
         osc.stop(now + start + dur + 0.01);
       });
     } else if (style === 'melody' || style === 'jdm_sport') {
-      // Catchy 5-note retro chiptune riff
       const riff = [
-        { f: 523.25, start: 0, dur: 0.07 },      // C5
-        { f: 659.25, start: 0.07, dur: 0.07 },     // E5
-        { f: 783.99, start: 0.14, dur: 0.07 },     // G5
-        { f: 880.00, start: 0.21, dur: 0.07 },     // A5
-        { f: 1046.50, start: 0.28, dur: 0.20 },    // C6
+        { f: 523.25, start: 0, dur: 0.07 },
+        { f: 659.25, start: 0.07, dur: 0.07 },
+        { f: 783.99, start: 0.14, dur: 0.07 },
+        { f: 880.00, start: 0.21, dur: 0.07 },
+        { f: 1046.50, start: 0.28, dur: 0.22 },
       ];
       riff.forEach(({ f, start, dur }) => {
         const osc = ctx.createOscillator();
+        const lp = ctx.createBiquadFilter();
         const gain = ctx.createGain();
-
         osc.type = 'square';
         osc.frequency.setValueAtTime(f, now + start);
-
+        lp.type = 'lowpass';
+        lp.frequency.setValueAtTime(3200, now + start);
         gain.gain.setValueAtTime(0.001, now + start);
         gain.gain.linearRampToValueAtTime(0.16 * scale, now + start + 0.008);
         gain.gain.setValueAtTime(0.16 * scale, now + start + dur - 0.02);
         gain.gain.exponentialRampToValueAtTime(0.001, now + start + dur);
-
-        osc.connect(gain);
-        gain.connect(out);
-
+        osc.connect(lp);
+        lp.connect(gain);
+        gain.connect(hornBus);
         osc.start(now + start);
         osc.stop(now + start + dur + 0.01);
       });
@@ -1548,52 +1989,42 @@ export class SoundFXSystem {
       style === 'air_horn' ||
       style === 'truck_air_blast'
     ) {
-      // Low dual-frequency chord (150Hz + 225Hz with sawtooth warmth)
       [150, 225].forEach((freq) => {
         const osc = ctx.createOscillator();
         const filter = ctx.createBiquadFilter();
         const gain = ctx.createGain();
-
         osc.type = 'sawtooth';
         osc.frequency.setValueAtTime(freq, now);
-
         filter.type = 'lowpass';
-        filter.frequency.setValueAtTime(850, now);
-
+        filter.Q.setValueAtTime(2.6, now);
+        filter.frequency.setValueAtTime(980, now);
         gain.gain.setValueAtTime(0.001, now);
-        gain.gain.linearRampToValueAtTime(0.22 * scale, now + 0.025);
-        gain.gain.setValueAtTime(0.22 * scale, now + 0.32);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.38);
-
+        gain.gain.linearRampToValueAtTime(0.24 * scale, now + 0.025);
+        gain.gain.setValueAtTime(0.24 * scale, now + 0.34);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.41);
         osc.connect(filter);
         filter.connect(gain);
-        gain.connect(out);
-
+        gain.connect(hornBus);
         osc.start(now);
-        osc.stop(now + 0.40);
+        osc.stop(now + 0.42);
       });
     } else {
-      // Classic automotive dual horn (440Hz + 370Hz)
       [440, 370].forEach((freq) => {
         const osc = ctx.createOscillator();
         const filter = ctx.createBiquadFilter();
         const gain = ctx.createGain();
-
         osc.type = 'sawtooth';
         osc.frequency.setValueAtTime(freq, now);
-
         filter.type = 'lowpass';
+        filter.Q.setValueAtTime(2.1, now);
         filter.frequency.setValueAtTime(2400, now);
-
         gain.gain.setValueAtTime(0.001, now);
-        gain.gain.linearRampToValueAtTime(0.17 * scale, now + 0.018);
-        gain.gain.setValueAtTime(0.17 * scale, now + 0.20);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
-
+        gain.gain.linearRampToValueAtTime(0.18 * scale, now + 0.016);
+        gain.gain.setValueAtTime(0.18 * scale, now + 0.21);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
         osc.connect(filter);
         filter.connect(gain);
-        gain.connect(out);
-
+        gain.connect(hornBus);
         osc.start(now);
         osc.stop(now + 0.26);
       });
@@ -1605,18 +2036,19 @@ export class SoundFXSystem {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
     [0, 0.11].forEach((offset, i) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'triangle';
-      osc.frequency.setValueAtTime(i === 0 ? 1120 : 1380, now + offset);
+      osc.frequency.setValueAtTime(i === 0 ? 1160 : 1440, now + offset);
       osc.frequency.exponentialRampToValueAtTime(520, now + offset + 0.055);
-      gain.gain.setValueAtTime(0.11 * this.sfxScale, now + offset);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.06);
+      gain.gain.setValueAtTime(0.115 * this.sfxScale, now + offset);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.065);
       osc.connect(gain);
-      gain.connect(this.getOutputNode(ctx));
+      gain.connect(out);
       osc.start(now + offset);
-      osc.stop(now + offset + 0.07);
+      osc.stop(now + offset + 0.075);
     });
   }
 
@@ -1625,21 +2057,22 @@ export class SoundFXSystem {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const now = ctx.currentTime;
+    const out = this.getSfxBus(ctx);
     [659.25, 987.77].forEach((f, idx) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
       osc.frequency.setValueAtTime(f, now + idx * 0.048);
-      gain.gain.setValueAtTime(0.10 * this.sfxScale, now + idx * 0.048);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.048 + 0.14);
+      gain.gain.setValueAtTime(0.11 * this.sfxScale, now + idx * 0.048);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.048 + 0.16);
       osc.connect(gain);
-      gain.connect(this.getOutputNode(ctx));
+      gain.connect(out);
       osc.start(now + idx * 0.048);
-      osc.stop(now + idx * 0.048 + 0.15);
+      osc.stop(now + idx * 0.048 + 0.17);
     });
   }
 
-  // Continuous throttled engine note tuned to equipped Exhaust/Sound Profile
+  // Continuous throttled engine note with sub-octave rumble + subtle intake warmth
   public updateEngineSound(params: {
     active: boolean;
     speedRatio: number; // 0.3 .. 1.6
@@ -1658,24 +2091,31 @@ export class SoundFXSystem {
     const now = ctx.currentTime;
     const profile = params.soundProfile || 'stock';
 
-    if (!this.engRunning || !this.engOscA || !this.engOscB || !this.engFilter || !this.engGain) {
+    if (!this.engRunning || !this.engOscA || !this.engOscB || !this.engOscSub || !this.engFilter || !this.engGain) {
       try {
         this.engOscA = ctx.createOscillator();
         this.engOscB = ctx.createOscillator();
+        this.engOscSub = ctx.createOscillator();
+        this.engOscSub.type = 'triangle';
         this.engFilter = ctx.createBiquadFilter();
+        this.engShaper = ctx.createWaveShaper();
+        this.engShaper.curve = makeSaturationCurve(0.09);
         this.engGain = ctx.createGain();
 
         this.engFilter.type = 'lowpass';
-        this.engFilter.Q.setValueAtTime(1.6, now);
+        this.engFilter.Q.setValueAtTime(1.8, now);
         this.engGain.gain.setValueAtTime(0.001, now);
 
         this.engOscA.connect(this.engFilter);
         this.engOscB.connect(this.engFilter);
-        this.engFilter.connect(this.engGain);
+        this.engOscSub.connect(this.engFilter);
+        this.engFilter.connect(this.engShaper);
+        this.engShaper.connect(this.engGain);
         this.engGain.connect(this.getOutputNode(ctx));
 
         this.engOscA.start(now);
         this.engOscB.start(now);
+        this.engOscSub.start(now);
         this.engRunning = true;
         this.lastEngineUpdateTime = 0;
         this.lastEngBaseHz = -1;
@@ -1696,27 +2136,27 @@ export class SoundFXSystem {
     const r = Math.max(0.25, Math.min(1.65, params.speedRatio));
     let baseHz = 54 + r * 78;
     let harmMult = 1.5;
-    let cutoff = 220 + r * 360;
+    let cutoff = 230 + r * 380;
     let oscTypeA: OscillatorType = 'sawtooth';
     let oscTypeB: OscillatorType = 'triangle';
 
     if (profile === 'jdm_turbo') {
       baseHz = 62 + r * 92;
       harmMult = 2.0;
-      cutoff = 300 + r * 490;
+      cutoff = 310 + r * 510;
     } else if (profile === 'v8_muscle') {
-      baseHz = 42 + r * 54;
+      baseHz = 40 + r * 52;
       harmMult = 1.5;
-      cutoff = 200 + r * 310;
+      cutoff = 210 + r * 320;
       oscTypeB = 'sawtooth';
     } else if (profile === 'f1_scream') {
       baseHz = 86 + r * 142;
       harmMult = 2.0;
-      cutoff = 460 + r * 780;
+      cutoff = 480 + r * 800;
     } else if (profile === 'rotary_braap') {
       baseHz = 68 + r * 102;
       harmMult = 1.333;
-      cutoff = 360 + r * 560;
+      cutoff = 370 + r * 580;
       oscTypeA = 'square';
     }
 
@@ -1725,8 +2165,8 @@ export class SoundFXSystem {
       cutoff *= 1.35;
     }
 
-    const effectiveCutoff = cutoff + (params.isGassing ? 220 : 0);
-    const baseVol = params.isGassing ? 0.044 : params.isBraking ? 0.018 : 0.028;
+    const effectiveCutoff = cutoff + (params.isGassing ? 250 : 0);
+    const baseVol = params.isGassing ? 0.042 : params.isBraking ? 0.017 : 0.026;
     this.lastEngBaseVol = baseVol;
     const targetVol = baseVol * this.engineScale;
 
@@ -1737,6 +2177,7 @@ export class SoundFXSystem {
       this.lastEngBaseHz = baseHz;
       this.engOscA.frequency.setTargetAtTime(baseHz, now, 0.045);
       this.engOscB.frequency.setTargetAtTime(baseHz * harmMult, now, 0.045);
+      this.engOscSub.frequency.setTargetAtTime(Math.max(24, baseHz * 0.5), now, 0.045);
     }
     if (Math.abs(effectiveCutoff - this.lastEngCutoff) > 8) {
       this.lastEngCutoff = effectiveCutoff;
@@ -1758,9 +2199,30 @@ export class SoundFXSystem {
       tGain.gain.setValueAtTime(0.02 * this.engineScale, now);
       tGain.gain.exponentialRampToValueAtTime(0.0005, now + 0.16);
       tOsc.connect(tGain);
-      tGain.connect(this.getOutputNode(ctx));
+      tGain.connect(this.getSfxBus(ctx));
       tOsc.start(now);
       tOsc.stop(now + 0.17);
+    }
+
+    // Subtle sporty exhaust overrun crackle when lifting off throttle at speed
+    if (
+      !params.isGassing &&
+      r > 0.92 &&
+      (profile === 'jdm_turbo' || profile === 'rotary_braap' || profile === 'v8_muscle') &&
+      now - this.lastOverrunPopTime > 1.85
+    ) {
+      this.lastOverrunPopTime = now;
+      const popNoise = this.createNoiseSource(ctx, 0.05, (t) => Math.pow(1 - t, 2.5));
+      const popLp = ctx.createBiquadFilter();
+      popLp.type = 'lowpass';
+      popLp.frequency.setValueAtTime(620, now);
+      const popGain = ctx.createGain();
+      popGain.gain.setValueAtTime(0.032 * this.engineScale, now);
+      popGain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+      popNoise.connect(popLp);
+      popLp.connect(popGain);
+      popGain.connect(this.getSfxBus(ctx));
+      popNoise.start(now);
     }
   }
 
@@ -1774,14 +2236,19 @@ export class SoundFXSystem {
     try {
       this.engOscA?.stop();
       this.engOscB?.stop();
+      this.engOscSub?.stop();
       this.engOscA?.disconnect();
       this.engOscB?.disconnect();
+      this.engOscSub?.disconnect();
       this.engFilter?.disconnect();
+      this.engShaper?.disconnect();
       this.engGain?.disconnect();
     } catch {}
     this.engOscA = null;
     this.engOscB = null;
+    this.engOscSub = null;
     this.engFilter = null;
+    this.engShaper = null;
     this.engGain = null;
   }
 }

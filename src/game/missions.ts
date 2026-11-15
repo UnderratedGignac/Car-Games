@@ -32,6 +32,8 @@ export interface Mission {
   claimed: boolean;
   type: MissionType;
   icon: string;
+  tier?: 'Standard' | 'Pro' | 'Ace';
+  categoryTag?: 'Drift' | 'Highway' | 'Parking' | 'All-Mode';
 }
 
 export interface MissionTemplate {
@@ -44,8 +46,23 @@ export interface MissionTemplate {
   icon: string;
 }
 
+export interface RandomMissionBlueprint {
+  type: MissionType;
+  icon: string;
+  categoryTag: 'Drift' | 'Highway' | 'Parking' | 'All-Mode';
+  titles: string[];
+  makeDesc: (target: number) => string;
+  minTarget: number;
+  maxTarget: number;
+  step: number;
+  baseReward: number;
+  rewardPerStep: number;
+}
+
 export const DAILY_MISSIONS_STORAGE_KEY = 'neon_daily_missions_v1';
 export const TECHNICAL_MISSIONS_STORAGE_KEY = 'neon_tech_missions_v1';
+export const RANDOM_MISSIONS_STORAGE_KEY = 'neon_random_missions_v1';
+export const RANDOM_MISSIONS_COUNT = 4;
 
 export const MISSION_POOL: MissionTemplate[] = [
   {
@@ -251,6 +268,201 @@ export const TECHNICAL_MISSIONS_POOL: MissionTemplate[] = [
   },
 ];
 
+export const RANDOM_MISSION_BLUEPRINTS: RandomMissionBlueprint[] = [
+  {
+    type: 'drift_score',
+    icon: 'flame',
+    categoryTag: 'Drift',
+    titles: ['Midnight Sideways', 'Touge Heatwave', 'Tire Smoke Contract', 'Redline Slide'],
+    makeDesc: (t) => `Score ${t.toLocaleString()} pts in a single Touge or Drift run`,
+    minTarget: 12000,
+    maxTarget: 45000,
+    step: 3000,
+    baseReward: 950,
+    rewardPerStep: 140,
+  },
+  {
+    type: 'combo',
+    icon: 'zap',
+    categoryTag: 'Drift',
+    titles: ['Switchback Chain', 'Combo Rhythm', 'Apex Linker', 'Weave Flow'],
+    makeDesc: (t) => `Chain a ${t}x drift or overtake combo in any run`,
+    minTarget: 5,
+    maxTarget: 15,
+    step: 2,
+    baseReward: 900,
+    rewardPerStep: 220,
+  },
+  {
+    type: 'distance',
+    icon: 'gauge',
+    categoryTag: 'All-Mode',
+    titles: ['Wangan Endurance', 'Horizon Courier', 'Night Mile Hunter', 'Expressway Run'],
+    makeDesc: (t) => `Cover ${t.toLocaleString()}m total distance across runs`,
+    minTarget: 800,
+    maxTarget: 3200,
+    step: 400,
+    baseReward: 850,
+    rewardPerStep: 240,
+  },
+  {
+    type: 'coins',
+    icon: 'coins',
+    categoryTag: 'All-Mode',
+    titles: ['Neon Bounty Collect', 'Street Token Sweep', 'Gold Line Pickup', 'Paddock Cash Grab'],
+    makeDesc: (t) => `Collect ${t} coins across driving or parking runs`,
+    minTarget: 15,
+    maxTarget: 65,
+    step: 5,
+    baseReward: 750,
+    rewardPerStep: 110,
+  },
+  {
+    type: 'overtakes',
+    icon: 'car',
+    categoryTag: 'Highway',
+    titles: ['Lane Splitter', 'Wangan Express', 'Rush Hour Cutter', 'Slipstream Pass'],
+    makeDesc: (t) => `Overtake ${t} traffic vehicles on the highway`,
+    minTarget: 8,
+    maxTarget: 32,
+    step: 4,
+    baseReward: 950,
+    rewardPerStep: 230,
+  },
+  {
+    type: 'near_misses',
+    icon: 'ghost',
+    categoryTag: 'Highway',
+    titles: ['Razor Edge', 'Paint Shaver', 'Close Call Rush', 'Mirror Grazing'],
+    makeDesc: (t) => `Pull off ${t} close near-misses in Highway Traffic`,
+    minTarget: 3,
+    maxTarget: 12,
+    step: 1,
+    baseReward: 950,
+    rewardPerStep: 190,
+  },
+  {
+    type: 'top_speed',
+    icon: 'rocket',
+    categoryTag: 'Highway',
+    titles: ['Terminal Velocity', 'Speed Trap Trigger', 'Turbo Overspeed', 'Midnight Blitz'],
+    makeDesc: (t) => `Hit ${t} km/h peak speed in any run`,
+    minTarget: 195,
+    maxTarget: 285,
+    step: 15,
+    baseReward: 900,
+    rewardPerStep: 210,
+  },
+  {
+    type: 'touge_runs',
+    icon: 'trophy',
+    categoryTag: 'Drift',
+    titles: ['Mountain Patrol', 'Peak Runner', 'Touge Regular', 'Canyon Attack'],
+    makeDesc: (t) => `Finish ${t} Touge or Drift runs`,
+    minTarget: 2,
+    maxTarget: 5,
+    step: 1,
+    baseReward: 950,
+    rewardPerStep: 420,
+  },
+  {
+    type: 'flash_yields',
+    icon: 'zap',
+    categoryTag: 'Highway',
+    titles: ['Passing Beam Blitz', 'Horn Clearance', 'Fast-Lane Protocol', 'Overtake Flash'],
+    makeDesc: (t) => `Flash high-beams or honk to yield ${t} traffic cars`,
+    minTarget: 3,
+    maxTarget: 11,
+    step: 2,
+    baseReward: 850,
+    rewardPerStep: 280,
+  },
+  {
+    type: 'parking_clears',
+    icon: 'parking',
+    categoryTag: 'Parking',
+    titles: ['Valet Shift', 'Lot Specialist', 'Bay Clear Streak', 'Tight Spot Contract'],
+    makeDesc: (t) => `Clear ${t} bays in Precision Parking mode`,
+    minTarget: 2,
+    maxTarget: 7,
+    step: 1,
+    baseReward: 950,
+    rewardPerStep: 360,
+  },
+  {
+    type: 'zero_hit_parks',
+    icon: 'trophy',
+    categoryTag: 'Parking',
+    titles: ['Spotless Paintwork', 'Untouched Chassis', 'Clean Valet Run', 'No-Scrape Contract'],
+    makeDesc: (t) => `Lock ${t} Parking stages with zero cone or bumper hits`,
+    minTarget: 1,
+    maxTarget: 5,
+    step: 1,
+    baseReward: 1100,
+    rewardPerStep: 520,
+  },
+  {
+    type: 'reverse_parks',
+    icon: 'rotate',
+    categoryTag: 'Parking',
+    titles: ['Backup Camera Pro', 'Dock Reverse Order', 'Rear-In Precision', 'Blindspot Backer'],
+    makeDesc: (t) => `Complete ${t} Reverse-gear parking bays`,
+    minTarget: 1,
+    maxTarget: 4,
+    step: 1,
+    baseReward: 1050,
+    rewardPerStep: 540,
+  },
+  {
+    type: 'parallel_parks',
+    icon: 'sliders',
+    categoryTag: 'Parking',
+    titles: ['Tight Curb Fit', 'Shibuya Slotter', 'Curbside Craft', 'Bumper Clearance'],
+    makeDesc: (t) => `Lock ${t} Parallel Curb parking stages`,
+    minTarget: 1,
+    maxTarget: 3,
+    step: 1,
+    baseReward: 1150,
+    rewardPerStep: 680,
+  },
+  {
+    type: 'slalom_clears',
+    icon: 'cone',
+    categoryTag: 'Parking',
+    titles: ['Cone Chaser', 'Gate Threader', 'Pyon Weaver', 'Slalom Sprint'],
+    makeDesc: (t) => `Pass cleanly through ${t} Parking slalom gates`,
+    minTarget: 3,
+    maxTarget: 10,
+    step: 1,
+    baseReward: 850,
+    rewardPerStep: 210,
+  },
+  {
+    type: 'precision_aligns',
+    icon: 'crosshair',
+    categoryTag: 'Parking',
+    titles: ['Bullseye Stance', 'Laser Centering', 'Dead-Center Park', 'Millimeter Lock'],
+    makeDesc: (t) => `Park ${t} time${t > 1 ? 's' : ''} within 0.35m center and 4° yaw`,
+    minTarget: 1,
+    maxTarget: 3,
+    step: 1,
+    baseReward: 1200,
+    rewardPerStep: 650,
+  },
+  {
+    type: 'gymkhana_parks',
+    icon: 'flame',
+    categoryTag: 'Parking',
+    titles: ['Handbrake Whip Box', 'J-Turn Finale', '180° Pivot Lock', 'Gymkhana Showdown'],
+    makeDesc: (t) => `Complete ${t} Gymkhana 180° or Gauntlet parking finale${t > 1 ? 's' : ''}`,
+    minTarget: 1,
+    maxTarget: 2,
+    step: 1,
+    baseReward: 1900,
+    rewardPerStep: 1200,
+  },
+];
+
 interface StoredMissionsState {
   date: string;
   missions: Mission[];
@@ -413,6 +625,128 @@ export function getTechnicalMissions(): Mission[] {
   return synced;
 }
 
+let randomMissionNonce = 1;
+
+export function generateRandomMission(
+  excludeTypes: Set<MissionType> = new Set(),
+  rng: () => number = Math.random
+): Mission {
+  const candidates = RANDOM_MISSION_BLUEPRINTS.filter((bp) => !excludeTypes.has(bp.type));
+  const pool = candidates.length > 0 ? candidates : RANDOM_MISSION_BLUEPRINTS;
+  const bp = pool[Math.floor(rng() * pool.length) % pool.length];
+
+  const stepsTotal = Math.max(0, Math.round((bp.maxTarget - bp.minTarget) / bp.step));
+  const stepIdx = Math.floor(rng() * (stepsTotal + 1));
+  const target = bp.minTarget + stepIdx * bp.step;
+  const ratio = stepsTotal > 0 ? stepIdx / stepsTotal : 0.5;
+  const tier: 'Standard' | 'Pro' | 'Ace' =
+    ratio >= 0.72 ? 'Ace' : ratio >= 0.35 ? 'Pro' : 'Standard';
+
+  const title = bp.titles[Math.floor(rng() * bp.titles.length) % bp.titles.length];
+  const rawReward = bp.baseReward + stepIdx * bp.rewardPerStep;
+  const reward = Math.round(rawReward / 50) * 50;
+  const uid = `rand_${bp.type}_${Date.now().toString(36)}_${randomMissionNonce++}`;
+
+  return {
+    id: uid,
+    title,
+    description: bp.makeDesc(target),
+    target,
+    current: 0,
+    reward,
+    completed: false,
+    claimed: false,
+    type: bp.type,
+    icon: bp.icon,
+    tier,
+    categoryTag: bp.categoryTag,
+  };
+}
+
+export function generateRandomMissions(
+  count = RANDOM_MISSIONS_COUNT,
+  rng: () => number = Math.random
+): Mission[] {
+  const used = new Set<MissionType>();
+  const out: Mission[] = [];
+  for (let i = 0; i < count; i++) {
+    const m = generateRandomMission(used, rng);
+    used.add(m.type);
+    out.push(m);
+  }
+  return out;
+}
+
+/**
+ * Retrieves the active Random Missions / Bounties deck (auto-generated if empty).
+ */
+export function getRandomMissions(): Mission[] {
+  const raw = getStorageItem(RANDOM_MISSIONS_STORAGE_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.filter(
+          (m) => m && typeof m.id === 'string' && typeof m.target === 'number' && !m.claimed
+        );
+      }
+    } catch {
+      // Regenerate below
+    }
+  }
+  const fresh = generateRandomMissions(RANDOM_MISSIONS_COUNT);
+  setStorageItem(RANDOM_MISSIONS_STORAGE_KEY, JSON.stringify(fresh));
+  return fresh;
+}
+
+/**
+ * Rolls fresh Random Missions while keeping already-completed unclaimed bounties safe.
+ */
+export function rerollRandomMissions(preserveCompleted = true, rng: () => number = Math.random): Mission[] {
+  const existing = getRandomMissions();
+  const kept = preserveCompleted ? existing.filter((m) => m.completed && !m.claimed) : [];
+  const used = new Set<MissionType>(kept.map((m) => m.type));
+  const next: Mission[] = [...kept];
+
+  while (next.length < RANDOM_MISSIONS_COUNT) {
+    const fresh = generateRandomMission(used, rng);
+    used.add(fresh.type);
+    next.push(fresh);
+  }
+
+  setStorageItem(RANDOM_MISSIONS_STORAGE_KEY, JSON.stringify(next));
+  return next;
+}
+
+/**
+ * Claims a completed Random Mission and immediately deals a brand-new replacement contract!
+ */
+export function claimRandomMission(
+  missionId: string,
+  rng: () => number = Math.random
+): { success: boolean; reward: number; missions: Mission[] } {
+  const list = getRandomMissions();
+  const idx = list.findIndex((m) => m.id === missionId);
+  if (idx === -1) {
+    return { success: false, reward: 0, missions: list };
+  }
+  const target = list[idx];
+  if (!target.completed || target.claimed) {
+    return { success: false, reward: 0, missions: list };
+  }
+
+  const reward = target.reward;
+  const remaining = list.filter((m) => m.id !== missionId);
+  const used = new Set<MissionType>(remaining.map((m) => m.type));
+  // Avoid dealing the exact same type just claimed when possible
+  used.add(target.type);
+  const replacement = generateRandomMission(used, rng);
+  remaining.splice(idx, 0, replacement);
+
+  setStorageItem(RANDOM_MISSIONS_STORAGE_KEY, JSON.stringify(remaining));
+  return { success: true, reward, missions: remaining };
+}
+
 function applyEventToMissionList(
   missions: Mission[],
   event: Partial<Record<Mission['type'], number>>
@@ -453,7 +787,7 @@ function applyEventToMissionList(
 }
 
 /**
- * Feeds progress deltas or run maximums into both Daily Missions and Technical Car Craft Missions.
+ * Feeds progress deltas or run maximums into Daily, Random Bounties, and Technical Car Craft Missions.
  */
 export function recordMissionProgress(
   event: Partial<Record<Mission['type'], number>>,
@@ -477,8 +811,18 @@ export function recordMissionProgress(
     setStorageItem(TECHNICAL_MISSIONS_STORAGE_KEY, JSON.stringify(techMissions));
   }
 
+  const randomMissions = getRandomMissions();
+  const randomRes = applyEventToMissionList(randomMissions, event);
+  if (randomRes.changed) {
+    setStorageItem(RANDOM_MISSIONS_STORAGE_KEY, JSON.stringify(randomMissions));
+  }
+
   return {
-    newlyCompleted: [...dailyRes.newlyCompleted, ...techRes.newlyCompleted],
+    newlyCompleted: [
+      ...dailyRes.newlyCompleted,
+      ...randomRes.newlyCompleted,
+      ...techRes.newlyCompleted,
+    ],
   };
 }
 
@@ -551,8 +895,20 @@ export function getClaimableTechnicalMissionsCount(): number {
   return getTechnicalMissions().filter((m) => m.completed && !m.claimed).length;
 }
 
+export function hasClaimableRandomMissions(): boolean {
+  return getRandomMissions().some((m) => m.completed && !m.claimed);
+}
+
+export function getClaimableRandomMissionsCount(): number {
+  return getRandomMissions().filter((m) => m.completed && !m.claimed).length;
+}
+
 export function getTotalClaimableMissionsCount(dateOverride?: string): number {
-  return getClaimableMissionsCount(dateOverride) + getClaimableTechnicalMissionsCount();
+  return (
+    getClaimableMissionsCount(dateOverride) +
+    getClaimableRandomMissionsCount() +
+    getClaimableTechnicalMissionsCount()
+  );
 }
 
 /**
@@ -599,6 +955,7 @@ export function resetDailyMissionsStorage(): void {
     try {
       window.localStorage.removeItem(DAILY_MISSIONS_STORAGE_KEY);
       window.localStorage.removeItem(TECHNICAL_MISSIONS_STORAGE_KEY);
+      window.localStorage.removeItem(RANDOM_MISSIONS_STORAGE_KEY);
     } catch {}
   }
 }
@@ -608,6 +965,15 @@ export function resetTechnicalMissionsStorage(): void {
   if (typeof window !== 'undefined' && window.localStorage) {
     try {
       window.localStorage.removeItem(TECHNICAL_MISSIONS_STORAGE_KEY);
+    } catch {}
+  }
+}
+
+export function resetRandomMissionsStorage(): void {
+  delete memoryStorage[RANDOM_MISSIONS_STORAGE_KEY];
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      window.localStorage.removeItem(RANDOM_MISSIONS_STORAGE_KEY);
     } catch {}
   }
 }

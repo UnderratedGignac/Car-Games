@@ -50,6 +50,8 @@ import {
   applyImpactToCarDamage,
   computeDamagedStats,
   createMintDamageState,
+  evaluateSpeedGatedImpact,
+  getCarOverallIntegrity,
   getDamageVisualCacheKey,
   isCarTotaled,
   normalizeCarDamageState,
@@ -57,6 +59,7 @@ import {
 import {
   CrashBody3D,
   createCrashBody3D,
+  evaluateGuardrailImpact,
   resolveTrafficCollisionImpulse,
   stepCrashBody3D,
   stepTrafficCrashBody,
@@ -90,6 +93,9 @@ import {
   renderBridgeTrussArch3D,
   renderCaveTunnelSegment3D,
   renderFinishGate3D,
+  renderMountainProp3D,
+  renderMountainRoadSlice3D,
+  renderMountainTerrainMesh3D,
   renderRealisticRoadsideLandmarks3D,
   renderReflectorBollard3D,
   renderTerrainMesh3D,
@@ -100,6 +106,15 @@ import {
   resolveAdventureZone,
   sampleAdventureTerrainElevation,
 } from './adventure';
+import {
+  MountainPhysicsState,
+  createInitialMountainState,
+  extendMountainTrack,
+  generateMountainTrack,
+  sampleMountainSurface,
+  sampleMountainTerrainElevation,
+  stepMountainPhysics,
+} from './mountain';
 import {
   computeHeadlightSliceIllumination,
   getHeadlightRgba,
@@ -140,6 +155,7 @@ import {
   resolveCombinedSteering,
   resolveDrivingPedals,
 } from './controls';
+import { createRealisticWorldWebGL } from './realisticWorldWebGL';
 
 export type GamePhase = 'title' | 'playing' | 'paused' | 'gameover';
 
@@ -175,6 +191,15 @@ export interface ParkingTelemetry {
   nearbyBarriers: { x: number; z: number; hw: number; hl: number; heading: number }[];
 }
 
+export interface MountainTelemetry {
+  jumpsCleared: number;
+  bestAirTimeSec: number;
+  currentPeakNum: number;
+  currentSlopePct: number;
+  isAirborne: boolean;
+  airTimeSec: number;
+}
+
 export interface LiveTelemetry {
   score: number;
   distance: number;
@@ -191,6 +216,7 @@ export interface LiveTelemetry {
   overtakes?: number;
   nearMisses?: number;
   parking?: ParkingTelemetry;
+  mountain?: MountainTelemetry;
 }
 
 interface SceneCanvasProps {
@@ -222,6 +248,7 @@ interface SceneCanvasProps {
   highFpsMode?: boolean;
   controlScheme?: 'classic' | 'wheel' | 'swipe'; // default 'classic'
   carDamage?: CarDamageState;
+  recentRunRanks?: readonly string[];
   onCarDamageChange?: (nextDamage: CarDamageState) => void;
   onTelemetryUpdate: (telemetry: LiveTelemetry) => void;
   onGameOver: (finalStats: {
@@ -231,6 +258,8 @@ interface SceneCanvasProps {
     coinsCollected: number;
     overtakes?: number;
     nearMisses?: number;
+    jumpsCleared?: number;
+    bestAirTimeSec?: number;
     crashReason?: string;
     isVictory?: boolean;
   }) => void;
@@ -260,7 +289,7 @@ interface SmokePuff {
   maxRadius: number;
   life: number;
   maxLife: number;
-  tint: 'white' | 'cyan' | 'dust' | 'steam' | 'dark' | 'pink' | 'aqua' | 'warm';
+  tint: 'white' | 'cyan' | 'dust' | 'dirt' | 'steam' | 'dark' | 'pink' | 'aqua' | 'warm';
   overCar?: boolean;
 }
 
@@ -369,11 +398,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
   highFpsMode = true,
   controlScheme = 'classic',
   carDamage,
+  recentRunRanks = [],
   onCarDamageChange,
   onTelemetryUpdate,
   onGameOver,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const webglMountRef = useRef<HTMLDivElement | null>(null);
 
   const phaseRef = useRef<GamePhase>(gamePhase);
   phaseRef.current = gamePhase;
@@ -445,6 +476,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
   const carDamageRef = useRef<CarDamageState>(carDamage || createMintDamageState());
   carDamageRef.current = carDamage || createMintDamageState();
 
+  const recentRunRanksRef = useRef<readonly string[]>(recentRunRanks);
+  recentRunRanksRef.current = recentRunRanks;
+
   const onCarDamageChangeRef = useRef(onCarDamageChange);
   onCarDamageChangeRef.current = onCarDamageChange;
 
@@ -501,11 +535,16 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
   useEffect(() => {
     const displayCanvas = canvasRef.current;
     if (!displayCanvas) return;
-    const rawCtx = displayCanvas.getContext('2d', { alpha: false });
+    const rawCtx = displayCanvas.getContext('2d', { alpha: true });
     if (!rawCtx) return;
     const ctx: CanvasRenderingContext2D = rawCtx;
 
-    // Offscreen cached biome layers (4-layer cel-shaded anime clouds, sun/moon disc & skyline backdrop)
+    const webglWorld = webglMountRef.current
+      ? createRealisticWorldWebGL(webglMountRef.current)
+      : null;
+    const isSoftwareGl = Boolean(webglWorld?.isSoftwareGl);
+
+    // Offscreen cached biome layers (fallback when WebGL is inactive or inside subterranean caves)
     const horizonCanvas = document.createElement('canvas');
     const horizonCtx = horizonCanvas.getContext('2d');
     const celestialCanvas = document.createElement('canvas');
@@ -513,19 +552,146 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       document.createElement('canvas')
     );
 
-    const HD_UI_SCALE = 450 / 340;
+    // Pre-baked offscreen sprite caches to eliminate per-frame CanvasGradient allocations in hot loops
+    const goldCoinSprite = document.createElement('canvas');
+    goldCoinSprite.width = 64;
+    goldCoinSprite.height = 64;
+    {
+      const gctx = goldCoinSprite.getContext('2d');
+      if (gctx) {
+        const g = gctx.createRadialGradient(24, 23, 3, 32, 32, 28);
+        g.addColorStop(0, '#fef9c3');
+        g.addColorStop(0.55, '#facc15');
+        g.addColorStop(1, '#b45309');
+        gctx.fillStyle = g;
+        gctx.beginPath();
+        gctx.arc(32, 32, 28, 0, Math.PI * 2);
+        gctx.fill();
+        gctx.strokeStyle = 'rgba(254, 240, 138, 0.85)';
+        gctx.lineWidth = 3.2;
+        gctx.stroke();
+        gctx.strokeStyle = 'rgba(146, 64, 14, 0.65)';
+        gctx.lineWidth = 2.4;
+        gctx.beginPath();
+        gctx.arc(32, 32, 16, 0, Math.PI * 2);
+        gctx.stroke();
+      }
+    }
+
+    const nitroGemSprite = document.createElement('canvas');
+    nitroGemSprite.width = 72;
+    nitroGemSprite.height = 72;
+    {
+      const nctx = nitroGemSprite.getContext('2d');
+      if (nctx) {
+        nctx.fillStyle = 'rgba(34, 211, 238, 0.24)';
+        nctx.beginPath();
+        nctx.arc(36, 36, 33, 0, Math.PI * 2);
+        nctx.fill();
+        const g = nctx.createLinearGradient(13, 13, 59, 59);
+        g.addColorStop(0, '#e0f2fe');
+        g.addColorStop(0.45, '#22d3ee');
+        g.addColorStop(1, '#0284c7');
+        nctx.fillStyle = g;
+        nctx.beginPath();
+        nctx.moveTo(36, 13);
+        nctx.lineTo(55, 36);
+        nctx.lineTo(36, 59);
+        nctx.lineTo(17, 36);
+        nctx.closePath();
+        nctx.fill();
+        nctx.strokeStyle = 'rgba(224, 242, 254, 0.92)';
+        nctx.lineWidth = 2.2;
+        nctx.stroke();
+        nctx.fillStyle = '#ffffff';
+        nctx.beginPath();
+        nctx.arc(32.5, 30, 3.8, 0, Math.PI * 2);
+        nctx.fill();
+      }
+    }
+
+    const canisterBodySprite = document.createElement('canvas');
+    canisterBodySprite.width = 32;
+    canisterBodySprite.height = 32;
+    {
+      const cctx = canisterBodySprite.getContext('2d');
+      if (cctx) {
+        const g = cctx.createLinearGradient(0, 0, 32, 0);
+        g.addColorStop(0, '#0284c7');
+        g.addColorStop(0.35, '#38bdf8');
+        g.addColorStop(0.5, '#e0f2fe');
+        g.addColorStop(0.8, '#00f0ff');
+        g.addColorStop(1, '#0369a1');
+        cctx.fillStyle = g;
+        cctx.fillRect(0, 0, 32, 32);
+      }
+    }
+
+    const wispSpriteCache = new Map<string, HTMLCanvasElement>();
+    const getWispSprite = (rgb: string): HTMLCanvasElement => {
+      let c = wispSpriteCache.get(rgb);
+      if (c) return c;
+      c = document.createElement('canvas');
+      c.width = 128;
+      c.height = 32;
+      const wctx = c.getContext('2d');
+      if (wctx) {
+        wctx.save();
+        wctx.translate(64, 16);
+        wctx.scale(1, 0.25);
+        const g = wctx.createRadialGradient(0, 0, 2, 0, 0, 62);
+        g.addColorStop(0, `rgba(${rgb}, 0.55)`);
+        g.addColorStop(0.55, `rgba(${rgb}, 0.18)`);
+        g.addColorStop(1, `rgba(${rgb}, 0)`);
+        wctx.fillStyle = g;
+        wctx.beginPath();
+        wctx.arc(0, 0, 62, 0, Math.PI * 2);
+        wctx.fill();
+        wctx.restore();
+      }
+      wispSpriteCache.set(rgb, c);
+      return c;
+    };
+
+    const bloomSpriteCache = new Map<string, HTMLCanvasElement>();
+    const getBloomSprite = (beamHex: string, isHigh: boolean): HTMLCanvasElement => {
+      const k = `${beamHex}:${isHigh ? 1 : 0}`;
+      let c = bloomSpriteCache.get(k);
+      if (c) return c;
+      c = document.createElement('canvas');
+      c.width = 96;
+      c.height = 96;
+      const bctx = c.getContext('2d');
+      if (bctx) {
+        const g = bctx.createRadialGradient(48, 48, 0, 48, 48, 46);
+        g.addColorStop(0, getHeadlightRgba('#ffffff', isHigh ? 0.72 : 0.46));
+        g.addColorStop(0.45, getHeadlightRgba(beamHex, 0.24));
+        g.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        bctx.fillStyle = g;
+        bctx.fillRect(0, 0, 96, 96);
+      }
+      bloomSpriteCache.set(k, c);
+      return c;
+    };
+
     let viewW = window.innerWidth;
     let viewH = window.innerHeight;
-    let pxW = 320;
-    let pxH = 450;
+    let pxH = isSoftwareGl
+      ? Math.min(580, Math.max(480, viewH))
+      : Math.min(920, Math.max(580, Math.round(viewH * Math.min(window.devicePixelRatio || 1, 1.5))));
+    let HD_UI_SCALE = pxH / 340;
+    let pxW = Math.max(320, Math.round(pxH * (viewW / Math.max(1, viewH))));
     let cachedSkyGrad: CanvasGradient | null = null;
     let cachedMeadowGrad: CanvasGradient | null = null;
     let cachedHorizonMistGrad: CanvasGradient | null = null;
+    let cachedFeverVigGrad: CanvasGradient | null = null;
+    let cachedSpeedVigGrad: CanvasGradient | null = null;
+    let cachedVigDimKey = '';
     let cachedSkyKey: string | null = null;
     let cachedHorizonY = Math.round(pxH * 0.35);
 
     const ensureBiomeLayers = (biome: RoadBiomeConfig, sky: SkyAtmosphereConfig) => {
-      const nextSkyKey = `${biome.id}:${sky.id}:${pxW}`;
+      const nextSkyKey = `${biome.id}:${sky.id}:${pxW}x${pxH}`;
       if (cachedSkyKey === nextSkyKey && cachedSkyGrad && cachedMeadowGrad && cachedHorizonMistGrad) return;
       cachedSkyKey = nextSkyKey;
       cachedSkyGrad = ctx.createLinearGradient(0, 0, 0, cachedHorizonY + Math.round(14 * HD_UI_SCALE));
@@ -764,12 +930,16 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     const resize = () => {
       viewW = window.innerWidth;
       viewH = window.innerHeight;
-      pxH = 450;
-      pxW = Math.max(280, Math.round(pxH * (viewW / Math.max(1, viewH))));
+      pxH = isSoftwareGl
+        ? Math.min(680, Math.max(520, viewH))
+        : Math.min(920, Math.max(580, Math.round(viewH * Math.min(window.devicePixelRatio || 1, 1.5))));
+      HD_UI_SCALE = pxH / 340;
+      pxW = Math.max(320, Math.round(pxH * (viewW / Math.max(1, viewH))));
       displayCanvas.width = pxW;
       displayCanvas.height = pxH;
       ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'medium';
+      ctx.imageSmoothingQuality = 'high';
+      webglWorld?.resize(viewW, viewH);
 
       cachedHorizonY = Math.round(pxH * 0.35);
       cachedSkyGrad = null;
@@ -804,6 +974,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let visualDriftAngle = 0; // -1..+1 controls pixel-art car yaw silhouette
     let heroRollRad = 0;
     let heroPitchY = 0;
+    let heroAirPitchRad = 0;
     let levelFinished = false;
 
     // Gameplay metrics
@@ -842,6 +1013,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let crashGroundY = VALLEY_FLOOR_Y;
     let crashBody: CrashBody3D = createCrashBody3D();
 
+    // Mountain Drive physics & stunt state
+    let mountainState: MountainPhysicsState | null = null;
+
     // 2-Lane Highway Traffic Mode & Dopamine Rush state
     let trafficCars: TrafficCarState[] = [];
     let nextTrafficId = 1;
@@ -871,6 +1045,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let parkingClearDelay = 0;
     let parkingStageClearedBanner = false;
     let parkingReverseHoldTimer = 0;
+    let parkingSonarTimer = 0;
     let parkingGearOverride: ParkingGear | null = null;
     let parkingLastSyncedPropGear: ParkingGear = parkingGearRef.current;
 
@@ -1246,7 +1421,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       return best;
     }
 
-    function populateTreesAround(centerZ: number, isAdventure = false) {
+    function populateTreesAround(centerZ: number, isAdventure = false, isMountain = false) {
       if (valleyProps.length > 0 && valleyProps[0].z > centerZ + 40) {
         compactInPlace(valleyProps, (p) => p.z <= centerZ + 40);
       }
@@ -1254,7 +1429,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         propSpawnCursorZ = centerZ + 22;
       }
       while (propSpawnCursorZ > centerZ - 195) {
-        propSpawnCursorZ -= isAdventure ? 1.85 + Math.random() * 1.35 : 5.2 + Math.random() * 4.4;
+        propSpawnCursorZ -=
+          isAdventure
+            ? 1.85 + Math.random() * 1.35
+            : isMountain
+            ? 2.35 + Math.random() * 1.85
+            : 5.2 + Math.random() * 4.4;
         const anchor = findClosestTrackAnchor(propSpawnCursorZ);
         const side = Math.random() > 0.5 ? 1 : -1;
         const baseX = anchor ? anchor.x : 0;
@@ -1262,7 +1442,32 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         const nx = anchor ? anchor.nx : 1;
         const nz = anchor ? anchor.nz : 0;
 
-        if (isAdventure) {
+        if (isMountain) {
+          // Near mountain edge: rocks, scrub bushes, and dirt outcrops along shoulder
+          const shoulderLat = side * (6.8 + Math.random() * 6.5);
+          const nearRoll = Math.random();
+          valleyProps.push({
+            x: baseX + nx * shoulderLat,
+            z: baseZ + nz * shoulderLat,
+            lateralOffset: shoulderLat,
+            scale: 0.72 + Math.random() * 0.68,
+            shade: Math.random(),
+            variant: nearRoll < 0.36 ? 2 : nearRoll < 0.7 ? 3 : nearRoll < 0.9 ? 4 : 0,
+          });
+          if (Math.random() < 0.85) {
+            const slopeSide = Math.random() < 0.65 ? -side : side;
+            const slopeLat = slopeSide * (14.5 + Math.random() * 28.0);
+            const farRoll = Math.random();
+            valleyProps.push({
+              x: baseX + nx * slopeLat,
+              z: baseZ + nz * slopeLat,
+              lateralOffset: slopeLat,
+              scale: 0.95 + Math.random() * 0.95,
+              shade: Math.random(),
+              variant: farRoll < 0.55 ? 0 : farRoll < 0.75 ? 2 : farRoll < 0.9 ? 3 : 4,
+            });
+          }
+        } else if (isAdventure) {
           const nearLat = side * (7.6 + Math.random() * 7.6);
           valleyProps.push({
             x: baseX + nx * nearLat,
@@ -1304,6 +1509,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       const effectiveMode: GameModeId = curLevel ? curLevel.mode : gameModeRef.current;
       const isHighway = effectiveMode === 'highway_traffic';
       const isParking = effectiveMode === 'parking';
+      const isMountain = effectiveMode === 'mountain_drive';
       const trackOpts = curLevel
         ? { curveMultiplier: curLevel.curveMultiplier, widthMultiplier: curLevel.widthMultiplier }
         : undefined;
@@ -1313,6 +1519,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       levelFinished = false;
       heroRollRad = 0;
       heroPitchY = 0;
+      heroAirPitchRad = 0;
       recordedGhostFrameCount = 0;
       ghostRecordTimer = 0;
       runElapsedSec = 0;
@@ -1347,6 +1554,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       groundRestTimer = 0;
       crashGroundY = VALLEY_FLOOR_Y;
       crashBody = createCrashBody3D();
+      mountainState = null;
       trafficCars = [];
       nextTrafficId = 1;
       trafficSpawnCursor = 62;
@@ -1354,7 +1562,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       nearMisses = 0;
       isTrafficCrash = false;
       trafficCrashTimer = 0;
-      crashReason = 'Guardrail Breached';
+      crashReason = isMountain ? 'Fell Off Mountain Cliff' : 'Guardrail Breached';
       slipstreamCharge = 0;
       slipstreamCarId = null;
       slipstreamBoostTimer = 0;
@@ -1372,9 +1580,10 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       parkingClearDelay = 0;
       parkingStageClearedBanner = false;
       parkingReverseHoldTimer = 0;
+      parkingSonarTimer = 0;
       parkingGearOverride = null;
 
-      const isAdventureStart = !isHighway && !isParking;
+      const isAdventureStart = !isHighway && !isParking && !isMountain;
       if (isParking) {
         track = [];
         parkingStages = createParkingStages();
@@ -1389,6 +1598,36 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         camHeading = -Math.PI / 2;
         visualDriftAngle = 0;
         activeGhost = null;
+      } else if (isMountain) {
+        track = generateMountainTrack(
+          80,
+          STEP_DIST,
+          seed,
+          curLevel ? curLevel.curveMultiplier : 1
+        );
+        const startPt = track[0];
+        const initSpd = carRef.current.baseSpeed * 0.85;
+        mountainState = createInitialMountainState(
+          startPt.x,
+          startPt.z,
+          startPt.y,
+          startPt.heading,
+          initSpd
+        );
+        driftState = createInitialDriftState(
+          startPt.x,
+          startPt.z,
+          startPt.y,
+          startPt.heading,
+          initSpd
+        );
+        camFocusX = driftState.x;
+        camFocusY = driftState.y;
+        camFocusZ = driftState.z;
+        camHeading = startPt.heading;
+        visualDriftAngle = 0;
+        const savedGhost = loadBestGhostRun(effectiveMode);
+        activeGhost = savedGhost || generateDevRivalGhost(effectiveMode);
       } else {
         track = isHighway
           ? generateHighwayTrack(75, STEP_DIST, seed, trackOpts)
@@ -1426,6 +1665,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             seed,
             existingCars: trafficCars,
             difficultyProgress: baseDiff,
+            mode: effectiveMode,
+            recentRunRanks: recentRunRanksRef.current,
           });
           trafficCars = batch.cars;
           nextTrafficId = batch.nextId;
@@ -1468,7 +1709,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       valleyProps.length = 0;
       propSpawnCursorZ = driftState.z + 22;
       if (!isParking) {
-        populateTreesAround(driftState.z, isAdventureStart);
+        populateTreesAround(driftState.z, isAdventureStart, isMountain);
       }
 
       const pStage = isParking ? parkingStages[0] : null;
@@ -1484,9 +1725,24 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         direction: activeDir,
         nearMissText: '',
         isDrifting: false,
-        biomeName: isAdventureStart ? startAdvZone.chapter.name : startBiome.name,
+        biomeName: isMountain
+          ? 'Alpine Peaks'
+          : isAdventureStart
+          ? startAdvZone.chapter.name
+          : startBiome.name,
         overtakes: 0,
         nearMisses: 0,
+        mountain:
+          isMountain && mountainState
+            ? {
+                jumpsCleared: 0,
+                bestAirTimeSec: 0,
+                currentPeakNum: mountainState.currentPeakNum,
+                currentSlopePct: mountainState.currentSlopePct,
+                isAirborne: false,
+                airTimeSec: 0,
+              }
+            : undefined,
         parking:
           isParking && pStage && parkingState
             ? {
@@ -1766,6 +2022,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let lastHudMsg = '';
     let lastHudOvertakes = -1;
     let lastHudNearMisses = -1;
+    let lastHudJumps = -1;
+    let lastHudSlope = -999;
+    let lastHudAirborne = false;
 
     // 4. Main Simulation & Pixel-Art Rendering Loop
     let animId = 0;
@@ -1785,18 +2044,39 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     };
 
     let lastFrameDrawMs = 0;
+    let lastRafCallbackMs = 0;
+    let avgRafIntervalMs = 16.67;
+    let smoothDt = 1 / 60;
     function loop() {
       const now = performance.now();
       const phase = phaseRef.current;
-      // On 120Hz+ ProMotion screens, cap frame cadence near ~60fps when High FPS Mode is off
-      if (phase === 'playing' && !highFpsRef.current && lastFrameDrawMs > 0 && now - lastFrameDrawMs < 11.5) {
+      if (lastRafCallbackMs > 0) {
+        const rafGap = now - lastRafCallbackMs;
+        if (rafGap > 1 && rafGap < 45) {
+          avgRafIntervalMs = avgRafIntervalMs * 0.85 + rafGap * 0.15;
+        }
+      }
+      lastRafCallbackMs = now;
+      // Only throttle genuine >95Hz high-refresh displays when High FPS Mode is off; never drop 60Hz VSync jitter frames
+      if (
+        phase === 'playing' &&
+        !highFpsRef.current &&
+        avgRafIntervalMs < 11.2 &&
+        lastFrameDrawMs > 0 &&
+        now - lastFrameDrawMs < 13.5
+      ) {
         scheduleNextFrame(0);
         return;
       }
       lastFrameDrawMs = now;
       const rawDt = (now - lastTime) / 1000;
       lastTime = now;
-      const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
+      const clampedDt = Math.min(Math.max(rawDt, 0.001), 0.05);
+      smoothDt =
+        phase === 'playing' && clampedDt < 0.038
+          ? smoothDt * 0.55 + clampedDt * 0.45
+          : clampedDt;
+      const dt = smoothDt;
 
       if (phase === 'paused') {
         if (pausedFrameDrawn && !pendingResetRef.current) {
@@ -1863,6 +2143,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           coinsCollected: coinsRun,
           overtakes,
           nearMisses,
+          jumpsCleared: mountainState?.jumpsCleared,
+          bestAirTimeSec: mountainState ? Number(mountainState.bestAirTimeSec.toFixed(2)) : undefined,
           crashReason: reason,
           isVictory,
         });
@@ -1909,7 +2191,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       const effectiveMode: GameModeId = curLevel ? curLevel.mode : gameModeRef.current;
       const isHighwayMode = effectiveMode === 'highway_traffic';
       const isParkingMode = effectiveMode === 'parking';
-      const isAdventureMode = !isHighwayMode && !isParkingMode;
+      const isMountainMode = effectiveMode === 'mountain_drive';
+      const isAdventureMode = !isHighwayMode && !isParkingMode && !isMountainMode;
       const effectiveRoadMode: RoadSelectionMode = curLevel ? curLevel.biome : roadModeRef.current;
       const effectiveSkyMode: SkyThemeId = curLevel ? curLevel.sky : skyModeRef.current;
       const activeTrackOpts = curLevel
@@ -1929,9 +2212,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         });
       }
 
-      // Title Showcase Cruise along the continuous S-curve viaduct, 2-lane highway, or Parking plaza preview!
+      // Title Showcase Cruise along the continuous S-curve viaduct, 2-lane highway, Mountain Drive, or Parking plaza preview!
       if (phase === 'title') {
-        const speed = isHighwayMode ? 17.0 : 13.0;
+        const speed = isHighwayMode ? 17.0 : isMountainMode ? 24.0 : 13.0;
         if (isParkingMode && parkingStages.length > 0 && parkingState) {
           const st = parkingStages[parkingStageIdx];
           camFocusX += (Math.sin(now * 0.00055) * 1.6 - camFocusX) * Math.min(1, 3.0 * dt);
@@ -1939,6 +2222,94 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           camFocusZ += ((st.targetBay.z + 11) - camFocusZ) * Math.min(1, 3.0 * dt);
           camHeading = -Math.PI / 2;
           visualDriftAngle = 0;
+        } else if (isMountainMode) {
+          if (!mountainState && track.length > 0) {
+            const p0 = track[0];
+            mountainState = createInitialMountainState(p0.x, p0.z, p0.y, p0.heading, speed);
+          }
+          const mSurfDemo = sampleMountainSurface(
+            mountainState ? mountainState.x : driftState.x,
+            mountainState ? mountainState.z : driftState.z,
+            track,
+            STEP_DIST,
+            1.5
+          );
+          const cp = mSurfDemo.closestPoint;
+          const targetH = cp ? cp.heading : -Math.PI / 2;
+          const steerDemo = cp
+            ? Math.max(
+                -1,
+                Math.min(
+                  1,
+                  -mSurfDemo.signedPerpOffset * 0.42 +
+                    normalizeAngle(targetH - (mountainState?.heading ?? driftState.heading)) * 2.2
+                )
+              )
+            : 0;
+          if (mountainState) {
+            const mDemoRes = stepMountainPhysics(
+              mountainState,
+              {
+                steerInput: steerDemo,
+                throttle: mSurfDemo.isRamp || mountainState.isAirborne ? 1.18 : 1.0,
+                isFever: mSurfDemo.isRamp || mountainState.isAirborne,
+                roadAllowanceBonus: 2.0,
+              },
+              { topSpeed: 28, driftGrip: 0.78, handlingRate: 2.8 },
+              track,
+              STEP_DIST,
+              dt
+            );
+            if (mDemoRes.fellReason && cp) {
+              mountainState = createInitialMountainState(cp.x, cp.z, cp.y, cp.heading, speed);
+            } else {
+              mountainState = mDemoRes.state;
+            }
+            driftState.x = mountainState.x;
+            driftState.y = mountainState.y;
+            driftState.z = mountainState.z;
+            driftState.vx = mountainState.vx;
+            driftState.vz = mountainState.vz;
+            driftState.heading = mountainState.heading;
+            driftState.isDrifting = mountainState.isDrifting;
+            driftState.driftFactor = mountainState.driftFactor;
+            if (cp) {
+              camHeading += normalizeAngle(cp.heading - camHeading) * Math.min(1, 5.0 * dt);
+            }
+            const angleDiff = normalizeAngle(driftState.heading - camHeading);
+            visualDriftAngle +=
+              (Math.max(-0.65, Math.min(0.65, angleDiff * 1.8)) - visualDriftAngle) *
+              Math.min(1, 7 * dt);
+            activeDir = visualDriftAngle >= 0 ? 'right' : 'left';
+            wheelSpinPhase += dt * 18;
+            const targetAirPitch = mountainState.isAirborne
+              ? -Math.max(-0.32, Math.min(0.35, (mountainState.vy / 24) * 0.55))
+              : -Math.max(-0.22, Math.min(0.22, (mountainState.currentSlopePct / 100) * 0.36));
+            heroAirPitchRad += (targetAirPitch - heroAirPitchRad) * Math.min(1, 8 * dt);
+            heroRollRad += (-visualDriftAngle * 0.036 - heroRollRad) * Math.min(1, 8 * dt);
+            heroPitchY += (0 - heroPitchY) * Math.min(1, 8 * dt);
+            if (!mountainState.isAirborne) {
+              if (Math.abs(visualDriftAngle) > 0.24) {
+                tireEmitMode = 'drift';
+                tireSlipIntensity = Math.min(1, Math.abs(visualDriftAngle) * 0.95);
+              } else {
+                tireEmitMode = 'spray';
+                tireSlipIntensity = 0.42;
+              }
+            }
+            const lastPt = track[track.length - 1];
+            if (lastPt && driftState.z - lastPt.z < 155) {
+              const ext = extendMountainTrack(track, 24, STEP_DIST, seed);
+              for (let e = 0; e < ext.length; e++) track.push(ext[e]);
+              while (track.length > 96 && track[0].z > driftState.z + 32) {
+                track.shift();
+              }
+              populateTreesAround(driftState.z, false, true);
+            }
+            camFocusX += (driftState.x - camFocusX) * Math.min(1, 8 * dt);
+            camFocusY += (driftState.y - camFocusY) * Math.min(1, 8 * dt);
+            camFocusZ += (driftState.z - camFocusZ) * Math.min(1, 8 * dt);
+          }
         } else {
         const roadEval = evaluateCarOnSCurveRoad(driftState.x, driftState.z, track, 2.0);
         const targetHeading = roadEval.closestPoint ? roadEval.closestPoint.heading : -Math.PI / 2;
@@ -2204,10 +2575,10 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             if (hitRes.coneHitsDelta > 0) {
               parkingHits += hitRes.coneHitsDelta;
               parkingStageHits += hitRes.coneHitsDelta;
-              soundFX.playGuardrailSpark();
-              triggerHaptic('medium');
+              soundFX.playConeKnock(hitRes.impactSpeed);
+              triggerHaptic('medium', false, 'collision');
               cameraTrauma = Math.min(1, cameraTrauma + 0.35);
-              nearMissText = `CONE CLIPPED! (${parkingHits}/${PARKING_MAX_HITS})`;
+              nearMissText = `CONE CLIPPED! (${parkingHits} HITS)`;
               nearMissTimer = 1.1;
               pushCallout(parkingState.x, 1.8, parkingState.z, 'CONE HIT!', '#f97316', 0.9);
             }
@@ -2216,47 +2587,67 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               parkingHits += 1;
               parkingStageHits += 1;
               parkingHitCooldown = 0.65;
-              soundFX.playTrafficCrunch(0.55);
-              triggerHaptic('heavy');
-              cameraTrauma = Math.min(1, cameraTrauma + 0.45);
-              screenFlashAlpha = 0.14;
-              screenFlashColor = '#e2e8f0';
+              soundFX.playTrafficCrunch(hitRes.impactSpeed >= 9 ? 0.65 : 0.35);
+              triggerHaptic(hitRes.impactSpeed >= 9 ? 'heavy' : 'light', false, 'collision');
+              cameraTrauma = Math.min(1, cameraTrauma + (hitRes.impactSpeed >= 9 ? 0.45 : 0.22));
+              if (hitRes.impactSpeed >= 8.5) {
+                screenFlashAlpha = 0.14;
+                screenFlashColor = '#e2e8f0';
+              }
 
               const impactDir = parkingState.gear === 'R' ? 'rear' : 'front';
-              const pkDmg = applyImpactToCarDamage({
+              const pkDmg = evaluateSpeedGatedImpact({
                 damage: activeDamageState,
                 impactZone: impactDir,
-                severity: 0.44,
+                impactSpeed: hitRes.impactSpeed,
+                minDamageSpeed: 8.5,
+                highSpeedThreshold: 13.0,
+                hitQuality: 0.72,
                 sideBias: steerInput < 0 ? -1 : 1,
+                allowTotaling: false,
               });
-              activeDamageState = pkDmg.nextDamage;
-              onCarDamageChangeRef.current?.(activeDamageState);
-              if (pkDmg.newlyDetached.length > 0) {
-                soundFX.playPartDetach(pkDmg.newlyDetached.length);
-                for (let dp = 0; dp < pkDmg.newlyDetached.length; dp++) {
-                  spawnDetachedPart(
-                    pkDmg.newlyDetached[dp],
-                    parkingState.x,
-                    0,
-                    parkingState.z,
-                    parkingState.vx,
-                    parkingState.vz,
-                    0.06,
-                    currentAppearance.primaryColor,
-                    currentCar.accentColor,
-                    steerInput < 0 ? -1 : 1
-                  );
+              if (pkDmg.appliedSeverity > 0) {
+                activeDamageState = pkDmg.nextDamage;
+                onCarDamageChangeRef.current?.(activeDamageState);
+                if (pkDmg.newlyDetached.length > 0) {
+                  soundFX.playPartDetach(pkDmg.newlyDetached.length);
+                  for (let dp = 0; dp < pkDmg.newlyDetached.length; dp++) {
+                    spawnDetachedPart(
+                      pkDmg.newlyDetached[dp],
+                      parkingState.x,
+                      0,
+                      parkingState.z,
+                      parkingState.vx,
+                      parkingState.vz,
+                      0.06,
+                      currentAppearance.primaryColor,
+                      currentCar.accentColor,
+                      steerInput < 0 ? -1 : 1
+                    );
+                  }
                 }
               }
 
-              const lbl = hitRes.carBump ? 'BUMPER BENT!' : 'BARRIER IMPACT!';
-              nearMissText = `${lbl} (${parkingHits}/${PARKING_MAX_HITS})`;
+              const lbl =
+                pkDmg.appliedSeverity > 0
+                  ? hitRes.carBump
+                    ? 'BUMPER BENT!'
+                    : 'BARRIER IMPACT!'
+                  : 'BUMPER TAP!';
+              nearMissText = `${lbl} (${parkingHits} HITS)`;
               nearMissTimer = 1.2;
-              pushCallout(parkingState.x, 1.9, parkingState.z, lbl, '#ef4444', 0.95);
-            }
+              pushCallout(
+                parkingState.x,
+                1.9,
+                parkingState.z,
+                lbl,
+                pkDmg.appliedSeverity > 0 ? '#ef4444' : '#fbbf24',
+                0.95
+              );
 
-            if (parkingHits >= PARKING_MAX_HITS) {
-              finalizeGameOver('Parking Test Failed (3 Strikes)', false);
+              if (isCarTotaled(activeDamageState)) {
+                finalizeGameOver('Car Destroyed in Lot', false);
+              }
             }
 
             // Emit tire marks & smoke on fast handbrake J-turns in Stage 6 or peel-outs!
@@ -2268,6 +2659,23 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             }
 
             const bayStatus = evaluateParkingBayStatus(parkingState, curStage);
+            const liveProx = evaluateParkingProximity(parkingState, curStage);
+            if (
+              parkingState.gear !== 'P' &&
+              liveProx.minClearanceM < 1.85 &&
+              Math.hypot(parkingState.vx, parkingState.vz) > 0.16 &&
+              !bayStatus.readyToLock
+            ) {
+              parkingSonarTimer -= simDt;
+              if (parkingSonarTimer <= 0) {
+                soundFX.playParkingBeep(liveProx.minClearanceM, parkingState.gear);
+                const tUrgency = Math.max(0, Math.min(1, (liveProx.minClearanceM - 0.35) / 1.5));
+                parkingSonarTimer = 0.14 + tUrgency * 0.44;
+              }
+            } else {
+              parkingSonarTimer = Math.max(0, parkingSonarTimer - simDt);
+            }
+
             if (bayStatus.readyToLock) {
               parkingLockTimer =
                 parkingState.gear === 'P'
@@ -2281,7 +2689,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 const stageCoins = 40 + parkingStageIdx * 10;
                 score += stagePts;
                 coinsRun += stageCoins;
-                soundFX.playFeverBurst();
+                soundFX.playParkingLock();
                 triggerHaptic('fever');
                 nearMissText =
                   parkingStageHits === 0
@@ -2309,14 +2717,26 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
                 const mEv: Partial<Record<MissionType, number>> = { parking_clears: 1 };
                 if (parkingStageHits === 0) mEv.zero_hit_parks = 1;
-                if (curStage.maneuverType === 'parallel') mEv.parallel_parks = 1;
+                if (
+                  curStage.maneuverType === 'parallel' ||
+                  curStage.maneuverType === 'offset_chicane_parallel'
+                ) {
+                  mEv.parallel_parks = 1;
+                }
                 if (
                   curStage.maneuverType === 'reverse_bay' ||
-                  curStage.maneuverType === 'slalom_reverse'
+                  curStage.maneuverType === 'slalom_reverse' ||
+                  curStage.maneuverType === 'underground_tight' ||
+                  curStage.maneuverType === 'loading_dock'
                 ) {
                   mEv.reverse_parks = 1;
                 }
-                if (curStage.maneuverType === 'gymkhana_180') mEv.gymkhana_parks = 1;
+                if (
+                  curStage.maneuverType === 'gymkhana_180' ||
+                  curStage.maneuverType === 'valet_gauntlet'
+                ) {
+                  mEv.gymkhana_parks = 1;
+                }
                 if (bayStatus.centerDistM <= 0.35 && bayStatus.headingErrorDeg <= 4.0) {
                   mEv.precision_aligns = 1;
                 }
@@ -2411,7 +2831,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             (slipstreamBoostTimer > 0 ? 0.18 : slipstreamCharge * 0.14) +
             Math.min(0.25, distance * 0.00025);
           const resolvedPedals = resolveDrivingPedals({
-            mode: isHighwayMode ? 'highway_traffic' : 'drift',
+            mode: effectiveMode,
             keyUp,
             keyDown,
             pedalGas: pedalGasRef.current,
@@ -2423,7 +2843,48 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           const accelInput = resolvedPedals.gasInput;
           const effectiveHandbrake = resolvedPedals.handbrake;
 
-          if (isHighwayMode) {
+          let mountainStepRes: ReturnType<typeof stepMountainPhysics> | null = null;
+          if (isMountainMode) {
+            if (!mountainState && track.length > 0) {
+              const p0 = preRoadEval.closestPoint || track[0];
+              mountainState = createInitialMountainState(
+                driftState.x,
+                driftState.z,
+                driftState.y,
+                driftState.heading,
+                Math.hypot(driftState.vx, driftState.vz)
+              );
+            }
+            if (mountainState) {
+              mountainStepRes = stepMountainPhysics(
+                mountainState,
+                {
+                  steerInput,
+                  throttle: resolvedPedals.throttle,
+                  handbrake: effectiveHandbrake,
+                  isFever,
+                  roadAllowanceBonus: stats.roadAllowanceBonus,
+                },
+                {
+                  topSpeed: stats.topSpeed * speedBoost,
+                  driftGrip: stats.driftGrip,
+                  handlingRate: stats.handlingRate,
+                },
+                track,
+                STEP_DIST,
+                simDt
+              );
+              mountainState = mountainStepRes.state;
+              driftState.x = mountainState.x;
+              driftState.y = mountainState.y;
+              driftState.z = mountainState.z;
+              driftState.vx = mountainState.vx;
+              driftState.vz = mountainState.vz;
+              driftState.heading = mountainState.heading;
+              driftState.isDrifting = mountainState.isDrifting;
+              driftState.driftFactor = mountainState.driftFactor;
+            }
+          } else if (isHighwayMode) {
             driftState = stepHighwayPhysics(
               driftState,
               {
@@ -2619,7 +3080,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 1.4
               );
             }
-          } else {
+          } else if (!isMountainMode) {
             const curBiome = resolveRoadBiome(effectiveRoadMode, distance);
             if (curBiome.id !== lastBiomeId) {
               lastBiomeId = curBiome.id;
@@ -2654,17 +3115,164 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             finalizeGameOver(`Stage ${curLevel.number} Complete!`, true);
           }
 
-          const roadCheck = evaluateCarOnSCurveRoad(
-            driftState.x,
-            driftState.z,
-            track,
-            stats.roadAllowanceBonus
-          );
+          const mountainSurfaceNow = isMountainMode
+            ? sampleMountainSurface(
+                driftState.x,
+                driftState.z,
+                track,
+                STEP_DIST,
+                stats.roadAllowanceBonus
+              )
+            : null;
+          const roadCheck = isMountainMode && mountainSurfaceNow
+            ? {
+                onRoad: !mountainStepRes?.fellReason,
+                nearEdge:
+                  mountainSurfaceNow.onRoadCorridor &&
+                  !mountainSurfaceNow.inChasmGap &&
+                  Math.abs(mountainSurfaceNow.signedPerpOffset) >=
+                    mountainSurfaceNow.halfWidth * 0.78,
+                perpDistance: Math.abs(mountainSurfaceNow.signedPerpOffset),
+                signedPerpOffset: mountainSurfaceNow.signedPerpOffset,
+                halfWidth: mountainSurfaceNow.halfWidth,
+                closestPoint: mountainSurfaceNow.closestPoint,
+              }
+            : evaluateCarOnSCurveRoad(
+                driftState.x,
+                driftState.z,
+                track,
+                stats.roadAllowanceBonus
+              );
 
           if (roadCheck.closestPoint) {
-            driftState.y += (roadCheck.closestPoint.y - driftState.y) * Math.min(1, 14 * simDt);
+            if (!isMountainMode) {
+              driftState.y += (roadCheck.closestPoint.y - driftState.y) * Math.min(1, 14 * simDt);
+            }
             // Smoothly follow road curve heading with chase camera
             camHeading += normalizeAngle(roadCheck.closestPoint.heading - camHeading) * Math.min(1, 3.8 * simDt);
+          }
+
+          if (isMountainMode && mountainState && mountainStepRes) {
+            if (mountainStepRes.bermBounce) {
+              const edgeSign = (mountainSurfaceNow?.signedPerpOffset ?? 1) >= 0 ? 1 : -1;
+              const bermDmg = evaluateSpeedGatedImpact({
+                damage: activeDamageState,
+                impactZone: edgeSign < 0 ? 'left' : 'right',
+                impactSpeed: mountainStepRes.impactSpeed ?? 8,
+                minDamageSpeed: 13.5,
+                highSpeedThreshold: 24.0,
+                hitQuality: 0.42,
+                sideBias: edgeSign,
+                allowTotaling: false,
+              });
+              if (bermDmg.appliedSeverity > 0) {
+                activeDamageState = bermDmg.nextDamage;
+                onCarDamageChangeRef.current?.(activeDamageState);
+              }
+              soundFX.playGuardrailSpark();
+              triggerHaptic('medium', false, 'collision');
+              cameraTrauma = Math.min(1, cameraTrauma + 0.34);
+              heroRollRad += edgeSign * 0.16;
+              nearMissText = 'RIDGE BERM BOUNCE!';
+              nearMissTimer = 0.85;
+              pushCallout(driftState.x, driftState.y + 1.5, driftState.z, 'RIDGE BERM!', '#fbbf24', 0.85);
+              for (let bp = 0; bp < 6; bp++) {
+                pushSmokePuff({
+                  x: driftState.x + (Math.random() - 0.5) * 0.8,
+                  y: driftState.y + 0.18,
+                  z: driftState.z + (Math.random() - 0.5) * 0.8,
+                  vx: -edgeSign * (1.8 + Math.random() * 2.2),
+                  vy: 0.9 + Math.random() * 1.4,
+                  vz: (Math.random() - 0.5) * 2.0,
+                  radius: 0.34,
+                  maxRadius: 1.35,
+                  life: 0.48,
+                  maxLife: 0.48,
+                  tint: 'dirt',
+                });
+              }
+            }
+            if (mountainStepRes.justLaunched) {
+              soundFX.playTurboChirp();
+              triggerHaptic('medium', false, 'drift');
+              cameraTrauma = Math.min(1, cameraTrauma + 0.2);
+              pushShockwave({
+                x: driftState.x,
+                y: driftState.y + 0.25,
+                z: driftState.z,
+                radius: 0.6,
+                maxRadius: 4.5,
+                color: '#f97316',
+                life: 0.36,
+                maxLife: 0.36,
+              });
+              pushCallout(
+                driftState.x,
+                driftState.y + 1.8,
+                driftState.z,
+                'PEAK LAUNCH!',
+                '#fb923c',
+                1.0
+              );
+              nearMissText = 'MEGA LAUNCH!';
+              nearMissTimer = 1.0;
+            }
+            if (mountainStepRes.justLanded) {
+              const airBonus = Math.round(250 + mountainStepRes.landedAirTimeSec * 420);
+              const airCoins = Math.max(4, Math.round(6 * stats.coinMultiplier));
+              score += airBonus * combo;
+              coinsRun += airCoins;
+              fever = Math.min(100, fever + 22);
+              combo = Math.min(25, combo + 1);
+              if (combo > maxCombo) maxCombo = combo;
+              soundFX.playGroundSlam(
+                Math.min(0.65, 0.28 + mountainStepRes.landingImpactSpeed * 0.03)
+              );
+              triggerHaptic('medium', false, 'drift');
+              heroPitchY = 2.8;
+              cameraTrauma = Math.min(1, cameraTrauma + 0.24);
+              const airLabel =
+                mountainStepRes.landedAirTimeSec >= 0.85
+                  ? `MEGA AIR ${mountainStepRes.landedAirTimeSec.toFixed(1)}s! +${airBonus}`
+                  : `PEAK JUMP! +${airBonus}`;
+              nearMissText = `${airLabel} (+${airCoins} CR)`;
+              nearMissTimer = 1.6;
+              pushShockwave({
+                x: driftState.x,
+                y: driftState.y + 0.15,
+                z: driftState.z,
+                radius: 0.6,
+                maxRadius: 5.2,
+                color: '#34d399',
+                life: 0.4,
+                maxLife: 0.4,
+              });
+              pushCallout(
+                driftState.x,
+                driftState.y + 1.85,
+                driftState.z,
+                airLabel,
+                '#34d399',
+                1.25
+              );
+              for (let lp = 0; lp < 10; lp++) {
+                const ang = Math.random() * Math.PI * 2;
+                const spd = 2.5 + Math.random() * 4.5;
+                pushSmokePuff({
+                  x: driftState.x + Math.cos(ang) * 0.85,
+                  y: driftState.y + 0.18,
+                  z: driftState.z + Math.sin(ang) * 0.85,
+                  vx: Math.cos(ang) * spd,
+                  vy: 0.7 + Math.random() * 1.4,
+                  vz: Math.sin(ang) * spd,
+                  radius: 0.3,
+                  maxRadius: 1.25,
+                  life: 0.42,
+                  maxLife: 0.42,
+                  tint: 'dust',
+                });
+              }
+            }
           }
 
           // Compute car silhouette angle (-1 '\' .. +1 '/'); keep highway driving crisp & planted!
@@ -2687,27 +3295,121 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             visualFrontSteer = 0;
           }
 
-          // Live cornering suspension roll & throttle/brake squat
+          // Live cornering suspension roll, throttle/brake squat, & mountain slope/jump pitch
           const targetRoll = Math.max(-0.055, Math.min(0.055, -visualDriftAngle * 0.046 - steerInput * 0.016));
           const targetPitch = brakeInput > 0 ? 1.8 : accelInput > 0 ? -1.0 : 0;
           heroRollRad += (targetRoll - heroRollRad) * Math.min(1, 10 * simDt);
           heroPitchY += (targetPitch - heroPitchY) * Math.min(1, 9 * simDt);
+          if (isMountainMode && mountainState) {
+            const targetAirPitch = mountainState.isAirborne
+              ? -Math.max(-0.34, Math.min(0.36, (mountainState.vy / Math.max(10, curSpeed)) * 0.6))
+              : -Math.max(-0.24, Math.min(0.24, (mountainState.currentSlopePct / 100) * 0.42));
+            heroAirPitchRad += (targetAirPitch - heroAirPitchRad) * Math.min(1, 9 * simDt);
+          } else {
+            heroAirPitchRad += (0 - heroAirPitchRad) * Math.min(1, 9 * simDt);
+          }
 
-          // Check Road / Guardrail Bounds
-          if (!roadCheck.onRoad) {
+          // Check Road / Guardrail / Mountain Cliff & Chasm Bounds
+          let shouldCrashOut = false;
+          if (!roadCheck.onRoad || (isMountainMode && mountainStepRes?.fellReason)) {
+            if (!isMountainMode && roadCheck.closestPoint) {
+              const cpRail = roadCheck.closestPoint;
+              const railSide: -1 | 1 = roadCheck.signedPerpOffset >= 0 ? 1 : -1;
+              const launchSpd = Math.hypot(driftState.vx, driftState.vz);
+              const outwardLatVel = Math.max(
+                0,
+                (driftState.vx * cpRail.nx + driftState.vz * cpRail.nz) * railSide
+              );
+              const railEval = evaluateGuardrailImpact({
+                playerSpeed: launchSpd,
+                outwardLateralSpeed: outwardLatVel,
+                overallIntegrity: getCarOverallIntegrity(activeDamageState),
+              });
+              const railHitDmg = evaluateSpeedGatedImpact({
+                damage: activeDamageState,
+                impactZone: railSide < 0 ? 'left' : 'right',
+                impactSpeed: railEval.impactSpeed,
+                minDamageSpeed: 12.5,
+                highSpeedThreshold: 22.5,
+                hitQuality: railEval.hitQuality,
+                sideBias: railSide,
+                allowTotaling: railEval.shouldBreach,
+              });
+              if (railHitDmg.appliedSeverity > 0) {
+                activeDamageState = railHitDmg.nextDamage;
+                onCarDamageChangeRef.current?.(activeDamageState);
+              }
+              if (railEval.shouldBreach || isCarTotaled(activeDamageState)) {
+                shouldCrashOut = true;
+              } else {
+                // Slow or glancing rail contact bounces safely back onto the road without losing!
+                const clampedLat = railSide * Math.max(0, roadCheck.halfWidth - 0.18);
+                const alongS = (driftState.x - cpRail.x) * cpRail.tx + (driftState.z - cpRail.z) * cpRail.tz;
+                driftState.x = cpRail.x + cpRail.tx * alongS + cpRail.nx * clampedLat;
+                driftState.z = cpRail.z + cpRail.tz * alongS + cpRail.nz * clampedLat;
+                const fwdSpd = Math.max(5.5, (driftState.vx * cpRail.tx + driftState.vz * cpRail.tz) * railEval.scrubbedSpeedFactor);
+                driftState.vx = cpRail.tx * fwdSpd - cpRail.nx * railSide * railEval.inwardBounceLatVel;
+                driftState.vz = cpRail.tz * fwdSpd - cpRail.nz * railSide * railEval.inwardBounceLatVel;
+                driftState.heading = normalizeAngle(
+                  driftState.heading + normalizeAngle(cpRail.heading - driftState.heading) * 0.42
+                );
+                heroRollRad += railSide * 0.18;
+                cameraTrauma = Math.min(1, cameraTrauma + 0.38);
+                combo = Math.max(1, Math.floor(combo * 0.75));
+                if (sparkAudioCooldown <= 0) {
+                  sparkAudioCooldown = 0.14;
+                  soundFX.playGuardrailSpark();
+                  triggerHaptic('medium', false, 'collision');
+                }
+                nearMissText = railHitDmg.appliedSeverity > 0 ? 'GUARDRAIL SLAM!' : 'RAIL BOUNCE!';
+                nearMissTimer = 0.85;
+                pushCallout(
+                  driftState.x,
+                  driftState.y + 1.5,
+                  driftState.z,
+                  railHitDmg.appliedSeverity > 0 ? 'HARD RAIL HIT!' : 'RAIL BOUNCE!',
+                  '#fbbf24',
+                  0.85
+                );
+                for (let sp = 0; sp < 8; sp++) {
+                  pushDebrisChunk({
+                    x: driftState.x + railSide * 0.85,
+                    y: driftState.y + 0.35,
+                    z: driftState.z,
+                    vx: -railSide * (2 + Math.random() * 4),
+                    vy: 2 + Math.random() * 4,
+                    vz: (Math.random() - 0.5) * 4,
+                    size: 0.18,
+                    rot: Math.random() * 4,
+                    vRot: 10,
+                    life: 0.35,
+                    color: sp % 2 === 0 ? '#fef08a' : '#f97316',
+                  });
+                }
+              }
+            } else {
+              shouldCrashOut = true;
+            }
+          }
+
+          if (shouldCrashOut) {
             {
-              // STAGE 1: BREACHED GUARDRAIL -> Shatter Steel Rail, Spin & Launch Into 3D Valley Tumble
+              // STAGE 1: BREACHED GUARDRAIL OR FELL OFF MOUNTAIN CLIFF/CHASM -> Crumble, Shed Parts & Tumble
               isFalling = true;
               fallTimer = 0;
               groundImpacted = false;
               groundRestTimer = 0;
+              crashReason =
+                (isMountainMode && mountainStepRes?.fellReason) || 'Guardrail Breached';
               breachedSliceIdx = roadCheck.closestPoint ? roadCheck.closestPoint.index : -1;
               breachedSide = roadCheck.signedPerpOffset >= 0 ? 1 : -1;
-              crashRoll = breachedSide * 0.24;
+              crashRoll = breachedSide * (isMountainMode ? 0.34 : 0.24);
               const launchSpeed = Math.hypot(driftState.vx, driftState.vz);
-              fallVelX = driftState.vx * 0.86 + breachedSide * 4.4;
+              fallVelX = driftState.vx * 0.86 + breachedSide * (isMountainMode ? 6.2 : 4.4);
               fallVelZ = driftState.vz * 0.86;
-              fallVelY = 3.8 + Math.min(2.6, launchSpeed * 0.09);
+              fallVelY = isMountainMode
+                ? Math.min(3.5, Math.max(-4.5, (mountainState?.vy ?? 0) * 0.6 + 2.2))
+                : 3.8 + Math.min(2.6, launchSpeed * 0.09);
               crashBody = createCrashBody3D({
                 x: driftState.x,
                 y: driftState.y,
@@ -2716,26 +3418,31 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 vy: fallVelY,
                 vz: fallVelZ,
                 yaw: 0,
-                yawVel: breachedSide * (3.1 + Math.min(3.8, launchSpeed * 0.14)),
+                yawVel: breachedSide * (3.6 + Math.min(4.2, launchSpeed * 0.16)),
                 roll: crashRoll,
-                rollVel: breachedSide * 2.7,
-                pitch: -0.14,
-                pitchVel: 1.5,
+                rollVel: breachedSide * (isMountainMode ? 3.8 : 2.7),
+                pitch: -0.18,
+                pitchVel: isMountainMode ? 2.4 : 1.5,
                 bounceCount: 0,
                 airborne: true,
               });
-              hitstopTimer = 0.075;
-              cameraTrauma = 0.92;
-              screenFlashAlpha = 0.25;
-              screenFlashColor = '#e2e8f0';
+              hitstopTimer = isMountainMode ? 0.095 : 0.075;
+              cameraTrauma = isMountainMode ? 1.0 : 0.92;
+              screenFlashAlpha = isMountainMode ? 0.34 : 0.25;
+              screenFlashColor = isMountainMode ? '#fca5a5' : '#e2e8f0';
               soundFX.playFallAndDestroy();
-              triggerHaptic('heavy');
+              triggerHaptic('heavy', false, 'collision');
 
-              // Apply initial guardrail scrape damage (bends doors/bumpers on breached side)
+              // Apply initial high-speed cliff / guardrail breach impact damage
               const railDmg = applyImpactToCarDamage({
                 damage: activeDamageState,
-                impactZone: breachedSide < 0 ? 'left' : 'right',
-                severity: 0.56,
+                impactZone:
+                  crashReason === 'Missed Mountain Jump'
+                    ? 'front'
+                    : breachedSide < 0
+                    ? 'left'
+                    : 'right',
+                severity: isMountainMode ? 1.15 : 0.85,
                 sideBias: breachedSide,
               });
               activeDamageState = railDmg.nextDamage;
@@ -2743,7 +3450,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               const anchorStart = roadCheck.closestPoint;
               const curBiomeStart = resolveRoadBiome(roadModeRef.current, distance).id;
               const latStart = anchorStart ? roadCheck.signedPerpOffset : breachedSide * 10;
-              const initFloorY = isAdventureMode
+              const initFloorY = isMountainMode
+                ? sampleMountainTerrainElevation(
+                    latStart,
+                    driftState.z,
+                    mountainSurfaceNow ? mountainSurfaceNow.referenceGroundY : 0,
+                    Boolean(anchorStart?.isChasmGap)
+                  ) + 0.15
+                : isAdventureMode
                 ? sampleAdventureTerrainElevation(
                     latStart,
                     driftState.z,
@@ -2768,7 +3482,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   );
                 }
               }
-              if (launchSpeed >= 18) {
+              if (launchSpeed >= 18 || isMountainMode) {
                 spawnDetachedPart(
                   'wheel',
                   driftState.x,
@@ -2782,10 +3496,52 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   breachedSide
                 );
               }
+              if (isMountainMode) {
+                spawnDetachedPart(
+                  'front_bumper',
+                  driftState.x,
+                  driftState.y + 0.25,
+                  driftState.z,
+                  fallVelX * 0.9,
+                  fallVelZ * 0.9,
+                  initFloorY,
+                  currentAppearance.primaryColor,
+                  currentCar.accentColor,
+                  -breachedSide
+                );
+                for (let sp = 0; sp < 10; sp++) {
+                  pushSmokePuff({
+                    x: driftState.x + (Math.random() - 0.5) * 1.4,
+                    y: driftState.y + 0.45,
+                    z: driftState.z + (Math.random() - 0.5) * 1.4,
+                    vx: (Math.random() - 0.5) * 4.2,
+                    vy: 1.5 + Math.random() * 2.5,
+                    vz: (Math.random() - 0.5) * 4.2,
+                    radius: 0.45,
+                    maxRadius: 1.85,
+                    life: 0.72,
+                    maxLife: 0.72,
+                    tint: sp % 2 === 0 ? 'dark' : 'steam',
+                  });
+                }
+              }
 
-              pushCallout(driftState.x, driftState.y + 1.6, driftState.z, 'GUARDRAIL BREACH!', '#fbbf24', 0.85);
+              pushCallout(
+                driftState.x,
+                driftState.y + 1.6,
+                driftState.z,
+                isMountainMode
+                  ? crashReason === 'Fell Into Mountain Chasm'
+                    ? 'CHASM PLUNGE!'
+                    : crashReason === 'Missed Mountain Jump'
+                    ? 'CLIFF SLAM!'
+                    : 'CLIFF FALL!'
+                  : 'GUARDRAIL BREACH!',
+                isMountainMode ? '#fb7185' : '#fbbf24',
+                0.95
+              );
 
-              // Shatter Twisted Steel Guardrail Beams + Metallic Sparks (No fire!)
+              // Shatter Twisted Steel Guardrail Beams / Alpine Timber Posts + Metallic Sparks
               const activeBiomeNow = resolveRoadBiome(roadModeRef.current, distance);
               for (let i = 0; i < 8; i++) {
                 const ang = Math.random() * Math.PI * 2;
@@ -2804,7 +3560,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   rot: Math.random() * 6,
                   vRot: (Math.random() - 0.5) * 16,
                   life: 1.4,
-                  color: i % 2 === 0 ? activeBiomeNow.railLight : '#475569',
+                  color: isMountainMode
+                    ? i % 2 === 0
+                      ? '#92400e'
+                      : '#78716c'
+                    : i % 2 === 0
+                    ? activeBiomeNow.railLight
+                    : '#475569',
                 });
               }
               for (let i = 0; i < 18; i++) {
@@ -2822,7 +3584,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   rot: Math.random() * 6,
                   vRot: (Math.random() - 0.5) * 18,
                   life: 0.65,
-                  color: i % 2 === 0 ? '#fef08a' : '#fbbf24',
+                  color: i % 2 === 0 ? '#fef08a' : '#f97316',
                 });
               }
             }
@@ -2853,7 +3615,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 const switchBonus = 250 * combo;
                 score += switchBonus;
                 soundFX.playStyleSwitch(combo);
-                triggerHaptic('medium');
+                triggerHaptic('medium', false, 'drift');
 
                 const hitMilestone =
                   (prevCombo < 5 && combo >= 5) ||
@@ -2861,7 +3623,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   (prevCombo < 15 && combo >= 15) ||
                   (prevCombo < 20 && combo >= 20);
                 if (hitMilestone) {
-                  triggerHaptic('double');
+                  triggerHaptic('double', false, 'drift');
                 }
 
                 let hypeCallout = '';
@@ -2891,6 +3653,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 combo = Math.min(25, combo + 1);
                 if (combo > maxCombo) maxCombo = combo;
                 soundFX.playDriftFlip(combo, isFever);
+                if (!wasDrifting) {
+                  triggerHaptic('light', false, 'drift');
+                }
 
                 const hitMilestone =
                   (prevCombo < 5 && combo >= 5) ||
@@ -2898,7 +3663,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   (prevCombo < 15 && combo >= 15) ||
                   (prevCombo < 20 && combo >= 20);
                 if (hitMilestone) {
-                  triggerHaptic('double');
+                  triggerHaptic('double', false, 'drift');
                 }
 
                 let hypeCallout = '';
@@ -2948,7 +3713,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 isFever = true;
                 feverTimer = 5.0;
                 soundFX.playFeverBurst();
-                triggerHaptic('fever');
+                triggerHaptic('fever', false, 'drift');
                 pushShockwave({
                   x: driftState.x,
                   y: driftState.y + 0.15,
@@ -2988,7 +3753,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               if (sparkAudioCooldown <= 0) {
                 sparkAudioCooldown = 0.15;
                 soundFX.playGuardrailSpark();
-                triggerHaptic('heavy');
+                triggerHaptic('heavy', false, 'collision');
               }
             }
 
@@ -3011,7 +3776,11 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             tireGassingNow = isGasInputNow;
             tireHighSparks = combo >= 3 || isFever;
 
-            if (driftingNow || hardRailScrape || isBrakeInputNow || isLaunchBurnout || isRainMist) {
+            const isDirtTrailRoost = isMountainMode && !mountainState?.isAirborne && simSpeedNow > 7.5;
+            if (
+              !(isMountainMode && mountainState?.isAirborne) &&
+              (driftingNow || hardRailScrape || isBrakeInputNow || isLaunchBurnout || isRainMist || isDirtTrailRoost)
+            ) {
               tireEmitMode = hardRailScrape
                 ? 'scrape'
                 : isBrakeInputNow
@@ -3032,7 +3801,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   isBrakeInputNow ? 0.75 : 0,
                   isLaunchBurnout ? 0.58 : 0,
                   hardRailScrape ? 0.8 : 0,
-                  isRainMist ? 0.48 : 0
+                  isRainMist ? 0.48 : 0,
+                  isDirtTrailRoost ? 0.52 : 0
                 )
               );
             }
@@ -3040,7 +3810,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             // Check Coins, Nitro Star Gems & Boost Pads
             for (let i = 0; i < track.length; i++) {
               const pt = track[i];
-              if (pt.hasCoin && !pt.coinCollected) {
+              const yDiffOk = !isMountainMode || Math.abs(driftState.y - pt.y) <= 5.5;
+              if (pt.hasCoin && !pt.coinCollected && yDiffOk) {
                 const d = Math.hypot(driftState.x - pt.coinX, driftState.z - pt.coinZ);
                 if (d <= stats.magnetRadius) {
                   if (d <= 2.1) {
@@ -3218,17 +3989,19 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             // Extend endless track ahead & cull far behind
             const lastPt = track[track.length - 1];
             if (lastPt && driftState.z - lastPt.z < 155) {
-              const extSlices = isHighwayMode
+              const extSlices = isMountainMode
+                ? extendMountainTrack(track, 24, STEP_DIST, seed, curLevel ? curLevel.curveMultiplier : 1)
+                : isHighwayMode
                 ? extendHighwayTrack(track, 20, STEP_DIST, seed, activeTrackOpts)
                 : extendSCurveTrack(track, 20, STEP_DIST, seed, activeTrackOpts);
               if (isAdventureMode) {
                 applyAdventureElevationProfile(extSlices, STEP_DIST, seed);
               }
               for (let s = 0; s < extSlices.length; s++) track.push(extSlices[s]);
-              while (track.length > 90 && track[0].z > driftState.z + 32) {
+              while (track.length > 96 && track[0].z > driftState.z + 32) {
                 track.shift();
               }
-              populateTreesAround(driftState.z, isAdventureMode);
+              populateTreesAround(driftState.z, isAdventureMode, isMountainMode);
             }
 
             // Handle Headlight Flash & Horn Triggers (alerts same-lane traffic to yield!)
@@ -3373,18 +4146,37 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   car: hit,
                 });
 
-                const tDmg = applyImpactToCarDamage({
+                const tDmg = evaluateSpeedGatedImpact({
                   damage: activeDamageState,
                   impactZone: impulse.isFatalCrash ? 'front' : impulse.sideBias < 0 ? 'right' : 'left',
-                  severity: impulse.impactSeverity,
+                  impactSpeed: impulse.closingSpeed,
+                  minDamageSpeed: 9.5,
+                  highSpeedThreshold: hit.isOncoming ? 24.0 : 14.5,
+                  hitQuality: impulse.hitQuality,
                   sideBias: impulse.sideBias,
+                  allowTotaling: impulse.isFatalCrash,
                 });
                 activeDamageState = tDmg.nextDamage;
+
+                const fatalCrash = impulse.isFatalCrash || tDmg.isTotaled;
+                if (fatalCrash && !isCarTotaled(activeDamageState)) {
+                  const wreckCrush = applyImpactToCarDamage({
+                    damage: activeDamageState,
+                    impactZone: 'ground_slam',
+                    severity: 1.35,
+                    sideBias: impulse.sideBias,
+                  });
+                  activeDamageState = wreckCrush.nextDamage;
+                  for (let wd = 0; wd < wreckCrush.newlyDetached.length; wd++) {
+                    if (!tDmg.newlyDetached.includes(wreckCrush.newlyDetached[wd])) {
+                      tDmg.newlyDetached.push(wreckCrush.newlyDetached[wd]);
+                    }
+                  }
+                }
                 onCarDamageChangeRef.current?.(activeDamageState);
 
-                const fatalCrash = impulse.isFatalCrash || isCarTotaled(activeDamageState);
                 if (!fatalCrash) {
-                  // Glancing sideswipe: deflect both cars laterally, scrape doors, cut combo, keep racing!
+                  // Glancing sideswipe or non-destructive bump: deflect both cars cleanly, keep racing!
                   hit.scrapeCooldown = 0.55;
                   hit.crashRoll = -impulse.sideBias * 0.22;
                   hit.crashYaw = -impulse.sideBias * 0.24;
@@ -3398,18 +4190,19 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   const nextFwd = Math.max(8, impulse.playerBounceVz);
                   driftState.vx = nextFwd * cp.tx + impulse.playerBounceVx * cp.nx;
                   driftState.vz = nextFwd * cp.tz + impulse.playerBounceVx * cp.nz;
-                  cameraTrauma = Math.min(1, cameraTrauma + 0.52);
+                  cameraTrauma = Math.min(1, cameraTrauma + (tDmg.appliedSeverity > 0 ? 0.52 : 0.28));
                   heroRollRad += impulse.sideBias * 0.22;
                   combo = Math.max(1, Math.floor(combo * 0.5));
-                  soundFX.playTrafficCrunch(0.55);
-                  triggerHaptic('medium');
-                  nearMissText = 'SIDESWIPE!';
+                  soundFX.playTrafficCrunch(tDmg.appliedSeverity > 0 ? 0.55 : 0.35);
+                  triggerHaptic(tDmg.appliedSeverity > 0 ? 'medium' : 'light', false, 'collision');
+                  const bumpTxt = tDmg.appliedSeverity > 0 ? 'SIDESWIPE!' : 'BUMP!';
+                  nearMissText = bumpTxt;
                   nearMissTimer = 0.85;
                   pushCallout(
                     driftState.x,
                     driftState.y + 1.85,
                     driftState.z,
-                    'SIDESWIPE!',
+                    bumpTxt,
                     '#fb923c',
                     0.75
                   );
@@ -3451,7 +4244,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 } else {
                   isTrafficCrash = true;
                   trafficCrashTimer = 0;
-                  crashReason = hit.isOncoming ? 'Head-On Collision' : 'Traffic Impact';
+                  crashReason = hit.isOncoming ? 'Head-On Collision' : 'High-Speed Impact';
                   crashGroundY = driftState.y + 0.04;
                   crashRoll = impulse.sideBias * (hit.isOncoming ? 0.34 : 0.24);
                   hitstopTimer = 0.085;
@@ -3459,7 +4252,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   screenFlashAlpha = 0.32;
                   screenFlashColor = '#f8fafc';
                   soundFX.playTrafficCrunch(hit.isOncoming ? 1.25 : 0.95);
-                  triggerHaptic('heavy');
+                  triggerHaptic('heavy', false, 'collision');
 
                   hit.crashed = true;
                   hit.crashVs = impulse.trafficCrashSpeedS;
@@ -3723,6 +4516,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                     seed,
                     existingCars: trafficCars,
                     difficultyProgress: diffProg,
+                    mode: effectiveMode,
+                    recentRunRanks: recentRunRanksRef.current,
                   });
                   for (let b = 0; b < batch.cars.length; b++) trafficCars.push(batch.cars[b]);
                   nextTrafficId = batch.nextId;
@@ -3735,7 +4530,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         // End of Drift/Highway branch; Parking branch handled above.
 
         if (isFalling && simDt > 0) {
-          // STAGE 2 & 3: 3D Rigid-Body Valley Tumble -> Sloped Terrain Bounce & Skid
+          // STAGE 2 & 3: 3D Rigid-Body Valley / Mountain Tumble -> Sloped Terrain Bounce & Skid
           fallTimer += simDt;
           const anchorNow = findClosestTrackAnchor(driftState.z);
           const curBiomeNow = resolveRoadBiome(roadModeRef.current, distance);
@@ -3743,8 +4538,16 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             ? (driftState.x - anchorNow.x) * anchorNow.nx + (driftState.z - anchorNow.z) * anchorNow.nz
             : breachedSide * 10;
           const advZoneCrash = isAdventureMode ? resolveAdventureZone(distance) : null;
+          const mtnRefY = anchorNow
+            ? anchorNow.isChasmGap
+              ? anchorNow.y - 3.2
+              : anchorNow.y
+            : 0;
+          const mtnInChasm = Boolean(anchorNow?.isChasmGap);
           crashGroundY =
-            (advZoneCrash
+            (isMountainMode
+              ? sampleMountainTerrainElevation(latOffsetNow, driftState.z, mtnRefY, mtnInChasm)
+              : advZoneCrash
               ? sampleAdventureTerrainElevation(
                   latOffsetNow,
                   driftState.z,
@@ -3753,7 +4556,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 )
               : sampleTerrainElevation(latOffsetNow, driftState.z, curBiomeNow.id)) + 0.18;
           const groundSlopeX =
-            ((advZoneCrash
+            ((isMountainMode
+              ? sampleMountainTerrainElevation(latOffsetNow + 0.6, driftState.z, mtnRefY, mtnInChasm)
+              : advZoneCrash
               ? sampleAdventureTerrainElevation(
                   latOffsetNow + 0.6,
                   driftState.z,
@@ -3761,7 +4566,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   advZoneCrash
                 )
               : sampleTerrainElevation(latOffsetNow + 0.6, driftState.z, curBiomeNow.id)) -
-              (advZoneCrash
+              (isMountainMode
+                ? sampleMountainTerrainElevation(latOffsetNow - 0.6, driftState.z, mtnRefY, mtnInChasm)
+                : advZoneCrash
                 ? sampleAdventureTerrainElevation(
                     latOffsetNow - 0.6,
                     driftState.z,
@@ -3778,26 +4585,40 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           fallVelX = crashBody.vx;
           fallVelY = crashBody.vy;
           fallVelZ = crashBody.vz;
-          fallRotation = Math.max(-0.68, Math.min(0.68, crashBody.roll));
+          fallRotation = Math.max(-0.85, Math.min(0.85, crashBody.roll));
 
           if (stepRes.impactedGround) {
             if (crashBody.bounceCount === 1) {
               groundImpacted = true;
               groundRestTimer = 0;
-              hitstopTimer = 0.065;
+              hitstopTimer = isMountainMode ? 0.085 : 0.065;
               cameraTrauma = 1.0;
-              screenFlashAlpha = 0.28;
-              screenFlashColor = '#e2e8f0';
-              soundFX.playGroundSlam(1.2);
-              triggerHaptic('heavy');
+              screenFlashAlpha = isMountainMode ? 0.36 : 0.28;
+              screenFlashColor = isMountainMode ? '#fca5a5' : '#e2e8f0';
+              soundFX.playGroundSlam(isMountainMode ? 1.35 : 1.2);
+              triggerHaptic('heavy', false, 'collision');
 
               const slamDmg = applyImpactToCarDamage({
                 damage: activeDamageState,
                 impactZone: 'ground_slam',
-                severity: 1.32,
+                severity: isMountainMode ? 1.65 : 1.32,
                 sideBias: breachedSide,
               });
               activeDamageState = slamDmg.nextDamage;
+              if (isMountainMode) {
+                const extraCrumb = applyImpactToCarDamage({
+                  damage: activeDamageState,
+                  impactZone: 'front',
+                  severity: 1.05,
+                  sideBias: -breachedSide,
+                });
+                activeDamageState = extraCrumb.nextDamage;
+                for (let ec = 0; ec < extraCrumb.newlyDetached.length; ec++) {
+                  if (!slamDmg.newlyDetached.includes(extraCrumb.newlyDetached[ec])) {
+                    slamDmg.newlyDetached.push(extraCrumb.newlyDetached[ec]);
+                  }
+                }
+              }
               onCarDamageChangeRef.current?.(activeDamageState);
               if (slamDmg.newlyDetached.length > 0) {
                 soundFX.playPartDetach(slamDmg.newlyDetached.length);
@@ -3812,7 +4633,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                     crashGroundY,
                     currentAppearance.primaryColor,
                     currentCar.accentColor,
-                    breachedSide
+                    dp % 2 === 0 ? breachedSide : -breachedSide
                   );
                 }
               }
@@ -3828,32 +4649,57 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 currentAppearance.rimHex,
                 -breachedSide
               );
+              if (isMountainMode) {
+                spawnDetachedPart(
+                  'wheel',
+                  driftState.x,
+                  driftState.y + 0.35,
+                  driftState.z,
+                  fallVelX * 0.7,
+                  fallVelZ * 0.7,
+                  crashGroundY,
+                  currentAppearance.primaryColor,
+                  currentAppearance.rimHex,
+                  breachedSide
+                );
+              }
 
-              const dustRingCol = curBiomeNow.id === 'canyon' ? '#ea580c' : '#d6d3d1';
+              const dustRingCol = isMountainMode
+                ? '#f97316'
+                : curBiomeNow.id === 'canyon'
+                ? '#ea580c'
+                : '#d6d3d1';
               pushShockwave({
                 x: driftState.x,
                 y: crashGroundY + 0.15,
                 z: driftState.z,
                 radius: 0.7,
-                maxRadius: 8.4,
+                maxRadius: isMountainMode ? 10.2 : 8.4,
                 color: dustRingCol,
                 life: 0.56,
                 maxLife: 0.56,
               });
-              pushCallout(driftState.x, driftState.y + 2.2, driftState.z, 'GROUND IMPACT!', '#f8fafc', 0.9);
+              pushCallout(
+                driftState.x,
+                driftState.y + 2.2,
+                driftState.z,
+                isMountainMode ? 'WRECKED ON THE CLIFF!' : 'GROUND IMPACT!',
+                isMountainMode ? '#fb7185' : '#f8fafc',
+                1.0
+              );
 
               const groundPalette = [
                 currentAppearance.primaryColor,
                 currentCar.accentColor,
                 '#78716c',
                 '#475569',
+                '#f97316',
                 '#fef08a',
-                '#94a3b8',
               ];
-              for (let i = 0; i < 42; i++) {
+              for (let i = 0; i < (isMountainMode ? 52 : 42); i++) {
                 const ang = Math.random() * Math.PI * 2;
                 const spd = 4 + Math.random() * 14;
-                const isScrap = i < 10;
+                const isScrap = i < (isMountainMode ? 15 : 10);
                 pushDebrisChunk({
                   x: driftState.x,
                   y: crashGroundY + 0.35,
@@ -3861,18 +4707,18 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   vx: Math.cos(ang) * spd,
                   vy: 4 + Math.random() * 9.5,
                   vz: Math.sin(ang) * spd,
-                  size: isScrap ? 0.45 : 0.28 + Math.random() * 0.34,
-                  w: isScrap ? 0.78 : undefined,
-                  h: isScrap ? 0.36 : undefined,
+                  size: isScrap ? 0.48 : 0.28 + Math.random() * 0.34,
+                  w: isScrap ? 0.84 : undefined,
+                  h: isScrap ? 0.38 : undefined,
                   gravity: 26,
                   rot: Math.random() * 6,
                   vRot: (Math.random() - 0.5) * 16,
-                  life: 1.15,
+                  life: 1.25,
                   color: groundPalette[i % groundPalette.length],
                 });
               }
 
-              for (let i = 0; i < 20; i++) {
+              for (let i = 0; i < (isMountainMode ? 26 : 20); i++) {
                 pushSmokePuff({
                   x: driftState.x + (Math.random() - 0.5) * 2.4,
                   y: crashGroundY + 0.4,
@@ -3882,15 +4728,15 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   vz: (Math.random() - 0.5) * 7.5,
                   radius: 0.85,
                   maxRadius: 3.1,
-                  life: 0.92,
-                  maxLife: 0.92,
-                  tint: i % 3 === 0 ? 'steam' : 'dust',
+                  life: 0.96,
+                  maxLife: 0.96,
+                  tint: i % 3 === 0 ? 'dark' : i % 3 === 1 ? 'steam' : 'dust',
                 });
               }
             } else {
-              cameraTrauma = Math.min(1, cameraTrauma + 0.45);
-              soundFX.playGroundSlam(0.55);
-              for (let i = 0; i < 10; i++) {
+              cameraTrauma = Math.min(1, cameraTrauma + 0.48);
+              soundFX.playGroundSlam(0.6);
+              for (let i = 0; i < 12; i++) {
                 const ang = Math.random() * Math.PI * 2;
                 const spd = 3 + Math.random() * 7;
                 pushDebrisChunk({
@@ -3905,7 +4751,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   rot: Math.random() * 6,
                   vRot: (Math.random() - 0.5) * 14,
                   life: 0.65,
-                  color: i % 2 === 0 ? '#fef08a' : '#78716c',
+                  color: i % 2 === 0 ? '#f97316' : '#78716c',
                 });
               }
             }
@@ -3948,29 +4794,47 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           }
 
           if (groundImpacted) {
-            if (Math.random() < 0.45) {
+            if (Math.random() < (isMountainMode ? 0.7 : 0.45)) {
               pushSmokePuff({
                 x: driftState.x + (Math.random() - 0.5) * 0.8,
                 y: driftState.y + 0.55,
                 z: driftState.z + (Math.random() - 0.5) * 0.8,
                 vx: (Math.random() - 0.5) * 1.4,
-                vy: 2.2 + Math.random() * 2.2,
+                vy: 2.4 + Math.random() * 2.4,
                 vz: (Math.random() - 0.5) * 1.4,
-                radius: 0.35,
-                maxRadius: 1.45,
-                life: 0.65,
-                maxLife: 0.65,
-                tint: 'steam',
+                radius: isMountainMode ? 0.48 : 0.35,
+                maxRadius: isMountainMode ? 1.85 : 1.45,
+                life: 0.75,
+                maxLife: 0.75,
+                tint: isMountainMode && Math.random() < 0.55 ? 'dark' : 'steam',
               });
             }
-            if (stepRes.justSettled || Math.hypot(crashBody.vx, crashBody.vz) < 4.5 || fallTimer > 2.0) {
+            if (stepRes.justSettled || Math.hypot(crashBody.vx, crashBody.vz) < 4.5 || fallTimer > 2.2) {
               groundRestTimer += simDt;
-              if (groundRestTimer >= 0.72) {
-                finalizeGameOver('Guardrail Breached');
+              if (groundRestTimer >= (isMountainMode ? 0.95 : 0.72)) {
+                if (!isCarTotaled(activeDamageState)) {
+                  activeDamageState = applyImpactToCarDamage({
+                    damage: activeDamageState,
+                    impactZone: 'ground_slam',
+                    severity: 1.35,
+                    sideBias: breachedSide,
+                  }).nextDamage;
+                  onCarDamageChangeRef.current?.(activeDamageState);
+                }
+                finalizeGameOver(crashReason);
               }
             }
-          } else if (fallTimer >= 3.0) {
-            finalizeGameOver('Guardrail Breached');
+          } else if (fallTimer >= (isMountainMode ? 3.5 : 3.0)) {
+            if (!isCarTotaled(activeDamageState)) {
+              activeDamageState = applyImpactToCarDamage({
+                damage: activeDamageState,
+                impactZone: 'ground_slam',
+                severity: 1.35,
+                sideBias: breachedSide,
+              }).nextDamage;
+              onCarDamageChangeRef.current?.(activeDamageState);
+            }
+            finalizeGameOver(crashReason);
           }
         } else if (isTrafficCrash && simDt > 0) {
           trafficCrashTimer += simDt;
@@ -4169,8 +5033,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           const dRounded = Math.round(distance);
           const fRounded = Math.round(fever);
           const kmhRounded = Math.round(speedNow * (isParkingMode ? 3.6 : 7.2));
+          const mJumps = mountainState?.jumpsCleared ?? 0;
+          const mSlope = mountainState?.currentSlopePct ?? 0;
+          const mAir = mountainState?.isAirborne ?? false;
           if (
             isParkingMode ||
+            (isMountainMode && (mAir || mJumps !== lastHudJumps || mSlope !== lastHudSlope || mAir !== lastHudAirborne)) ||
             sRounded !== lastHudScore ||
             dRounded !== lastHudDist ||
             combo !== lastHudCombo ||
@@ -4194,8 +5062,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             lastHudMsg = nearMissText;
             lastHudOvertakes = overtakes;
             lastHudNearMisses = nearMisses;
+            lastHudJumps = mJumps;
+            lastHudSlope = mSlope;
+            lastHudAirborne = mAir;
             const activeBiome = resolveRoadBiome(effectiveRoadMode, distance);
-            const activeAdvName = isAdventureMode
+            const activeAdvName = isMountainMode
+              ? 'Alpine Peaks'
+              : isAdventureMode
               ? resolveAdventureZone(distance).chapter.name
               : activeBiome.name;
             const curSt = isParkingMode && parkingStages.length > 0 ? parkingStages[parkingStageIdx] : null;
@@ -4216,6 +5089,17 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               biomeName: activeAdvName,
               overtakes,
               nearMisses,
+              mountain:
+                isMountainMode && mountainState
+                  ? {
+                      jumpsCleared: mountainState.jumpsCleared,
+                      bestAirTimeSec: Number(mountainState.bestAirTimeSec.toFixed(2)),
+                      currentPeakNum: mountainState.currentPeakNum,
+                      currentSlopePct: mountainState.currentSlopePct,
+                      isAirborne: mountainState.isAirborne,
+                      airTimeSec: Number(mountainState.airTimeSec.toFixed(2)),
+                    }
+                  : undefined,
               parking:
                 curSt && parkingState && baySt && prox
                   ? {
@@ -4363,18 +5247,23 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
         const tireId = currentCustom?.tires || 'stock';
         const isSprayOnly = tireEmitMode === 'spray';
-        const markColor =
-          tireId === 'drag_slick'
-            ? '#090b10'
-            : tireId === 'rain_groove'
-            ? '#0c1624'
-            : tireId === 'semi_slick'
-            ? '#0d1017'
-            : '#11141c';
+        const markColor = isMountainMode
+          ? '#46301f'
+          : tireId === 'drag_slick'
+          ? '#090b10'
+          : tireId === 'rain_groove'
+          ? '#0c1624'
+          : tireId === 'semi_slick'
+          ? '#0d1017'
+          : '#11141c';
         const markWidth =
           anchors.tireWidthScale *
-          (tireBrakingNow ? 1.16 : tireEmitMode === 'burnout' ? 1.12 : 1.0);
-        const markAlpha = isSprayOnly
+          (tireBrakingNow ? 1.16 : tireEmitMode === 'burnout' ? 1.12 : isMountainMode ? 1.1 : 1.0);
+        const markAlpha = isMountainMode
+          ? isSprayOnly
+            ? 0.34
+            : 0.58
+          : isSprayOnly
           ? 0.42
           : tireBrakingNow
           ? 0.88
@@ -4452,7 +5341,11 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             : Math.min(0.92, 0.45 + tireSlipIntensity * 0.55);
 
         if (Math.random() < smokeChance) {
-          const smokeTint: SmokePuff['tint'] = isFever
+          const smokeTint: SmokePuff['tint'] = isMountainMode
+            ? isFever
+              ? 'cyan'
+              : 'dirt'
+            : isFever
             ? 'cyan'
             : tireId === 'rain_groove'
             ? 'aqua'
@@ -4462,13 +5355,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             ? 'warm'
             : 'white';
           const compoundScale =
-            tireId === 'drift_spec'
+            (isMountainMode ? 1.24 : 1.0) *
+            (tireId === 'drift_spec'
               ? 1.24
               : tireId === 'drag_slick'
               ? 1.18
               : tireId === 'rain_groove'
               ? 0.92
-              : 1.0;
+              : 1.0);
 
           for (let w = 0; w < 2; w++) {
             const isLeft = w === 0;
@@ -4512,8 +5406,23 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               });
             }
 
-            // High-combo, Fever, or hot Semi-Slick curb sparks directly off loaded rear tire
-            if (
+            // Flung dirt clods & pebbles on mountain terrain, or sparks on paved curbs
+            if (isMountainMode && Math.random() < (tireGassingNow ? 0.55 : 0.32)) {
+              pushDebrisChunk({
+                x: wx,
+                y: driftState.y + 0.08,
+                z: wz,
+                vx: -cosH * (3.2 + Math.random() * 2.5) + rightH_X * sideSign * 0.9 + (Math.random() - 0.5) * 1.8,
+                vy: 1.6 + Math.random() * 2.1,
+                vz: -sinH * (3.2 + Math.random() * 2.5) + rightH_Z * sideSign * 0.9 + (Math.random() - 0.5) * 1.8,
+                size: 0.12 + Math.random() * 0.14,
+                gravity: 18,
+                rot: Math.random() * 6,
+                vRot: (Math.random() - 0.5) * 8,
+                life: 0.34,
+                color: Math.random() < 0.3 ? '#78716c' : Math.random() < 0.5 ? '#7c5838' : '#573c26',
+              });
+            } else if (
               (tireHighSparks || tireEmitMode === 'scrape') &&
               (anchor.isCameraFacing || tireEmitMode === 'scrape') &&
               Math.random() < 0.35
@@ -4564,62 +5473,103 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         }
       }
 
-      // A. Anime Sky Gradient, Dynamic Stars/Aurora/God-Rays & Offscreen Celestial Sun/Moon
-      ctx.fillStyle = cachedSkyGrad || sky.skyStops[1];
-      ctx.fillRect(0, 0, pxW, horizonY + Math.round(14 * HD_UI_SCALE));
+      const playerAdvZone = isAdventureMode ? resolveAdventureZone(distance) : null;
+      const aheadAdvZone = isAdventureMode ? resolveAdventureZone(distance + 58) : null;
+      const inDeepCave = Boolean(playerAdvZone && playerAdvZone.caveBlend > 0.72);
+      const useWebglBackdrop = Boolean(webglWorld) && !inDeepCave;
 
-      const logPxW = pxW / HD_UI_SCALE;
-      const logHorizonY = horizonY / HD_UI_SCALE;
-      const sunLogX = logPxW * sky.celestialXRatio - (camHeading + Math.PI / 2) * 18;
-      const sunLogY = logHorizonY * sky.celestialYRatio;
+      if (useWebglBackdrop) {
+        ctx.clearRect(0, 0, pxW, pxH);
+        webglWorld!.render({
+          nowMs: now,
+          pxW,
+          pxH,
+          fovScale,
+          horizonY,
+          shakeX,
+          shakeY,
+          camWorldX,
+          camWorldY,
+          camWorldZ,
+          fwdX,
+          fwdZ,
+          biome,
+          sky,
+          inDeepCave,
+        });
 
-      ctx.save();
-      ctx.scale(HD_UI_SCALE, HD_UI_SCALE);
-      renderDynamicSkyAtmosphere({
-        ctx,
-        pxW: logPxW,
-        horizonY: logHorizonY,
-        nowMs: now,
-        camHeading,
-        sky,
-        sunScreenX: sunLogX,
-        sunScreenY: sunLogY,
-      });
+        // Soft high-altitude atmospheric cirrus wisps (cached offscreen sprite, zero per-frame gradient allocation)
+        const cloudDrift = (camHeading + Math.PI / 2) * 28;
+        ctx.save();
+        ctx.globalAlpha = sky.isNight ? 0.16 : 0.28;
+        const wispTint = sky.id === 'golden_sunset' ? '253, 214, 178' : sky.isNight ? '148, 163, 184' : '248, 250, 252';
+        const wispImg = getWispSprite(wispTint);
+        for (let w = 0; w < 4; w++) {
+          const span = pxW + 420 * HD_UI_SCALE;
+          const rawX = ((w * 0.27 + 0.12) * pxW + now * (0.003 + w * 0.0008) - cloudDrift * (0.25 + w * 0.06));
+          const wx = (((rawX % span) + span) % span) - 210 * HD_UI_SCALE;
+          const wy = horizonY * (0.18 + (w % 3) * 0.11);
+          const rx = (85 + w * 24) * HD_UI_SCALE;
+          const ry = (11 + (w % 2) * 5) * HD_UI_SCALE;
+          ctx.drawImage(wispImg, wx - rx, wy - ry, rx * 2, ry * 2);
+        }
+        ctx.restore();
+      } else {
+        // Fallback 2D Sky Gradient, Stars/Aurora & Celestial Disc (also used inside deep caves)
+        ctx.fillStyle = cachedSkyGrad || sky.skyStops[1];
+        ctx.fillRect(0, 0, pxW, horizonY + Math.round(14 * HD_UI_SCALE));
 
-      ctx.drawImage(
-        celestialCanvas,
-        sunLogX - celestialCanvas.width * 0.5,
-        sunLogY - celestialCanvas.height * 0.5
-      );
+        const logPxW = pxW / HD_UI_SCALE;
+        const logHorizonY = horizonY / HD_UI_SCALE;
+        const sunLogX = logPxW * sky.celestialXRatio - (camHeading + Math.PI / 2) * 18;
+        const sunLogY = logHorizonY * sky.celestialYRatio;
 
-      // B. Pre-Rendered 4-Layer Cel-Shaded Shinkai Anime Clouds
-      const cloudDrift = (camHeading + Math.PI / 2) * 32;
-      const drawAnimeCloud = (
-        idx: number,
-        baseFrac: number,
-        yFrac: number,
-        parallax: number,
-        breezePxPerMs: number
-      ) => {
-        const cc = cloudCanvases[idx];
-        const span = logPxW + cc.width + 24;
-        const rawX = baseFrac * logPxW + now * breezePxPerMs - cloudDrift * parallax;
-        const wrappedX = (((rawX + cc.width * 0.5 + 12) % span) + span) % span - cc.width - 12;
-        ctx.drawImage(cc, wrappedX, logHorizonY * yFrac - cc.height * 0.65);
-      };
-      drawAnimeCloud(4, 0.20, 0.30, 0.24, 0.0022);
-      drawAnimeCloud(3, 0.56, 0.25, 0.28, 0.0031);
-      drawAnimeCloud(0, 0.14, 0.64, 0.42, 0.0018);
-      drawAnimeCloud(1, 0.88, 0.58, 0.44, 0.0015);
-      drawAnimeCloud(2, 0.46, 0.78, 0.32, 0.0026);
-      ctx.restore();
+        ctx.save();
+        ctx.scale(HD_UI_SCALE, HD_UI_SCALE);
+        renderDynamicSkyAtmosphere({
+          ctx,
+          pxW: logPxW,
+          horizonY: logHorizonY,
+          nowMs: now,
+          camHeading,
+          sky,
+          sunScreenX: sunLogX,
+          sunScreenY: sunLogY,
+        });
 
-      // C. Distant atmospheric horizon silhouette (soft depth backdrop behind 3D vistas)
-      const mtnShift = (camHeading + Math.PI / 2) * 44 * HD_UI_SCALE;
-      const clampedShift = Math.max(-155 * HD_UI_SCALE, Math.min(155 * HD_UI_SCALE, mtnShift * 0.55));
-      ctx.globalAlpha = 0.34;
-      ctx.drawImage(horizonCanvas, -Math.round(160 * HD_UI_SCALE) - clampedShift, 0);
-      ctx.globalAlpha = 1.0;
+        ctx.drawImage(
+          celestialCanvas,
+          sunLogX - celestialCanvas.width * 0.5,
+          sunLogY - celestialCanvas.height * 0.5
+        );
+
+        const cloudDrift = (camHeading + Math.PI / 2) * 32;
+        const drawAnimeCloud = (
+          idx: number,
+          baseFrac: number,
+          yFrac: number,
+          parallax: number,
+          breezePxPerMs: number
+        ) => {
+          const cc = cloudCanvases[idx];
+          const span = logPxW + cc.width + 24;
+          const rawX = baseFrac * logPxW + now * breezePxPerMs - cloudDrift * parallax;
+          const wrappedX = (((rawX + cc.width * 0.5 + 12) % span) + span) % span - cc.width - 12;
+          ctx.drawImage(cc, wrappedX, logHorizonY * yFrac - cc.height * 0.65);
+        };
+        drawAnimeCloud(4, 0.20, 0.30, 0.24, 0.0022);
+        drawAnimeCloud(3, 0.56, 0.25, 0.28, 0.0031);
+        drawAnimeCloud(0, 0.14, 0.64, 0.42, 0.0018);
+        drawAnimeCloud(1, 0.88, 0.58, 0.44, 0.0015);
+        drawAnimeCloud(2, 0.46, 0.78, 0.32, 0.0026);
+        ctx.restore();
+
+        const mtnShift = (camHeading + Math.PI / 2) * 44 * HD_UI_SCALE;
+        const clampedShift = Math.max(-155 * HD_UI_SCALE, Math.min(155 * HD_UI_SCALE, mtnShift * 0.55));
+        ctx.globalAlpha = 0.34;
+        ctx.drawImage(horizonCanvas, -Math.round(160 * HD_UI_SCALE) - clampedShift, 0);
+        ctx.globalAlpha = 1.0;
+      }
 
       // D. Collect Visible Road Slices into pre-allocated pool & sort far-to-near in place
       let visibleCount = 0;
@@ -4699,57 +5649,67 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         }
       }
 
-      const playerAdvZone = isAdventureMode ? resolveAdventureZone(distance) : null;
-      const aheadAdvZone = isAdventureMode ? resolveAdventureZone(distance + 58) : null;
+      if (!useWebglBackdrop) {
+        if (playerAdvZone) {
+          ctx.fillStyle = playerAdvZone.caveBlend > 0.45 ? playerAdvZone.chapter.caveCeiling : '#1e3522';
+        } else {
+          ctx.fillStyle = cachedMeadowGrad || biome.valleyStops[1];
+        }
+        ctx.fillRect(0, horizonY, pxW, pxH - horizonY);
 
-      if (playerAdvZone) {
-        ctx.fillStyle = playerAdvZone.caveBlend > 0.45 ? playerAdvZone.chapter.caveCeiling : '#1e3522';
-      } else {
-        ctx.fillStyle = cachedMeadowGrad || biome.valleyStops[1];
-      }
-      ctx.fillRect(0, horizonY, pxW, pxH - horizonY);
-
-      if (!playerAdvZone || playerAdvZone.caveBlend <= 0.65) {
-        renderBackgroundVista3D({
-          ctx,
-          camWorldX,
-          camWorldZ,
-          fwdX,
-          fwdZ,
-          rightX,
-          rightZ,
-          biome,
-          skyIsNight: sky.isNight,
-          skyId: sky.id,
-          mtnFarColor: sky.mtnFar,
-          mtnNearColor: sky.mtnNear,
-          pxW,
-          projectInto,
-          isAdventure: isAdventureMode,
-        });
+        if (!playerAdvZone || playerAdvZone.caveBlend <= 0.65) {
+          renderBackgroundVista3D({
+            ctx,
+            camWorldX,
+            camWorldZ,
+            fwdX,
+            fwdZ,
+            rightX,
+            rightZ,
+            biome,
+            skyIsNight: sky.isNight,
+            skyId: sky.id,
+            mtnFarColor: sky.mtnFar,
+            mtnNearColor: sky.mtnNear,
+            pxW,
+            projectInto,
+            isAdventure: isAdventureMode,
+          });
+        }
+      } else if (isAdventureMode) {
+        // Adventure forest hillside ground color when WebGL sky horizon sits behind
+        ctx.fillStyle = '#1e3522';
+        ctx.fillRect(0, horizonY, pxW, pxH - horizonY);
       }
 
       // In Adventure Mode, place horizon mist & subterranean sky darkening BEHIND foreground hills/caves
-      // so no horizontal mist band slices across the green hillsides, trees, or cave walls
       if (isAdventureMode) {
-        if (cachedHorizonMistGrad && (!playerAdvZone || playerAdvZone.caveBlend < 0.35)) {
+        if (!useWebglBackdrop && cachedHorizonMistGrad && (!playerAdvZone || playerAdvZone.caveBlend < 0.35)) {
           ctx.globalAlpha = 0.45;
           ctx.fillStyle = cachedHorizonMistGrad;
           ctx.fillRect(0, Math.max(0, horizonY - Math.round(6 * HD_UI_SCALE)), pxW, Math.round(24 * HD_UI_SCALE));
           ctx.globalAlpha = 1.0;
         }
         if (playerAdvZone && playerAdvZone.caveBlend > 0.08) {
-          const skyDarkAlpha = Math.min(0.96, playerAdvZone.caveBlend * 0.96);
-          ctx.fillStyle = `rgba(8, 10, 18, ${skyDarkAlpha.toFixed(2)})`;
+          const skyDarkAlpha = Math.min(0.46, playerAdvZone.caveBlend * 0.46);
+          ctx.fillStyle = `rgba(22, 28, 44, ${skyDarkAlpha.toFixed(2)})`;
           ctx.fillRect(0, 0, pxW, horizonY + Math.round(28 * HD_UI_SCALE));
           if (aheadAdvZone && aheadAdvZone.caveBlend > 0.35) {
-            ctx.fillStyle = `rgba(8, 10, 18, ${(playerAdvZone.caveBlend * 0.55).toFixed(2)})`;
+            ctx.fillStyle = `rgba(22, 28, 44, ${(playerAdvZone.caveBlend * 0.16).toFixed(2)})`;
             ctx.fillRect(0, horizonY, pxW, Math.round((pxH - horizonY) * 0.35));
           }
         }
       }
 
-      if (isAdventureMode) {
+      if (isMountainMode) {
+        renderMountainTerrainMesh3D({
+          ctx,
+          visibleSlices: slicePool,
+          visibleCount,
+          projectInto,
+          skyIsNight: sky.isNight,
+        });
+      } else if (isAdventureMode) {
         renderAdventureTerrainMesh3D({
           ctx,
           visibleSlices: slicePool,
@@ -4764,6 +5724,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           biome,
           nowMs: now,
           projectInto,
+          webglBackdropActive: useWebglBackdrop,
         });
       }
 
@@ -4790,7 +5751,19 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
       for (let i = 0; i < propCount; i++) {
         const propItem = propSortBuf[i].prop;
-        if (isAdventureMode) {
+        if (isMountainMode) {
+          const anchor = findClosestTrackAnchor(propItem.z);
+          const refY = anchor ? (anchor.isChasmGap ? anchor.y - 3.2 : anchor.y) : 0;
+          renderMountainProp3D({
+            ctx,
+            prop: propItem,
+            roadY: refY,
+            isChasmGap: Boolean(anchor?.isChasmGap),
+            nowMs: now,
+            pxW,
+            projectInto,
+          });
+        } else if (isAdventureMode) {
           const anchor = findClosestTrackAnchor(propItem.z);
           const propDist = anchor ? anchor.index * STEP_DIST : Math.max(0, -propItem.z);
           const propZone = resolveAdventureZone(propDist, anchor ? anchor.index : -1);
@@ -4826,7 +5799,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         }
       }
 
-      if (sky.isNight && (rawBiome.id !== 'neon' || sky.id === 'red_moon') && !playerAdvZone) {
+      if (!useWebglBackdrop && sky.isNight && (rawBiome.id !== 'neon' || sky.id === 'red_moon') && !playerAdvZone) {
         ctx.fillStyle =
           sky.id === 'red_moon'
             ? rawBiome.id === 'neon'
@@ -4836,13 +5809,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         ctx.fillRect(0, horizonY, pxW, pxH - horizonY);
       }
 
-      // Soft atmospheric horizon mist blending sky backdrop seamlessly into distant terrain (non-adventure modes)
-      if (!isAdventureMode && cachedHorizonMistGrad) {
+      if (!useWebglBackdrop && !isAdventureMode && cachedHorizonMistGrad) {
         ctx.fillStyle = cachedHorizonMistGrad;
         ctx.fillRect(0, Math.max(0, horizonY - Math.round(6 * HD_UI_SCALE)), pxW, Math.round(28 * HD_UI_SCALE));
       }
 
-      // F. Parking Plaza Proving Ground OR Forest/Caves Adventure Trail OR Elevated Highway Viaduct
+      // F. Parking Plaza Proving Ground OR Mountain Drive Ridges & Ramps OR Forest/Caves Adventure Trail OR Elevated Highway Viaduct
       if (isParkingMode && parkingStages.length > 0 && parkingState) {
         const curStage = parkingStages[parkingStageIdx];
         const bayStNow = evaluateParkingBayStatus(parkingState, curStage);
@@ -4863,6 +5835,24 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           fwdZ,
           projectInto,
         });
+      } else if (isMountainMode) {
+        for (let i = 0; i < visibleCount - 1; i++) {
+          const far = slicePool[i];
+          const near = slicePool[i + 1];
+          if (Math.abs(far.pt.index - near.pt.index) > 2) continue;
+
+          const roadFog = computeDistanceFogAlpha(far.rawZ, 108, 152);
+          if (roadFog <= 0.02) continue;
+          renderMountainRoadSlice3D({
+            ctx,
+            far,
+            near,
+            fogAlpha: roadFog,
+            nowMs: now,
+            projectInto,
+          });
+          ctx.globalAlpha = 1.0;
+        }
       } else if (isAdventureMode) {
         const heroRawZAdv = (driftState.x - camWorldX) * fwdX + (driftState.z - camWorldZ) * fwdZ;
         const headlightsActiveNow = headlightsOnRef.current;
@@ -4922,9 +5912,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           ctx.globalAlpha = 1.0;
         }
 
-        // If player turns headlights OFF inside a cave, deepen cavern darkness so toggle contrast is unmistakable
+        // Subtle ambient dim when player turns headlights OFF inside a cave without sacrificing road visibility
         if (playerAdvZone && playerAdvZone.caveBlend > 0.32 && !headlightsActiveNow && !highBeamActiveNow) {
-          ctx.fillStyle = `rgba(3, 5, 11, ${(playerAdvZone.caveBlend * 0.34).toFixed(2)})`;
+          ctx.fillStyle = `rgba(12, 16, 26, ${(playerAdvZone.caveBlend * 0.15).toFixed(2)})`;
           ctx.fillRect(0, 0, pxW, pxH);
         }
 
@@ -4986,9 +5976,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         drawQuadPts(far.pR, near.pR, near.uR, far.uR, biome.wallRight, strokeWalls, 1);
         drawQuadPts(far.uL, far.uR, near.uR, near.uL, biome.underside);
 
-        // 3. Multi-Layer Textured Asphalt Road Ribbon (immutable index parity eliminates distant flicker)
-        const asphaltColor = Math.floor(far.pt.index / 2) % 2 === 0 ? biome.asphaltEven : biome.asphaltOdd;
-        drawQuadPts(far.pL, far.pR, near.pR, near.pL, asphaltColor);
+        // 3. Smooth Continuous Asphalt Road Ribbon (eliminates artificial checkerboard bands)
+        drawQuadPts(far.pL, far.pR, near.pR, near.pL, biome.asphaltEven);
 
         // Outer Paved Shoulder Apron Trim (subtle dark asphalt border outside lane lines, zero alloc)
         if (isNearMid) {
@@ -5027,9 +6016,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           drawQuadPts(pScratch0, pScratch1, pScratch2, pScratch3, sheenCol);
         }
 
-        if (isNearMid && far.pt.index % 4 === 0) {
-          ctx.strokeStyle = 'rgba(15, 23, 42, 0.28)';
-          ctx.lineWidth = Math.max(1, 0.08 * near.cM.scale);
+        if (isNearMid && far.pt.index % 6 === 0) {
+          ctx.strokeStyle = 'rgba(15, 23, 42, 0.12)';
+          ctx.lineWidth = Math.max(0.8, 0.05 * near.cM.scale);
           ctx.beginPath();
           ctx.moveTo(far.pL.x, far.pL.y);
           ctx.lineTo(far.pR.x, far.pR.y);
@@ -5408,242 +6397,49 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       }
       ctx.globalAlpha = 1.0;
 
-      // G2. Real 3D Dual Headlight Beams (Curve-Following Road Light Carpet + Volumetric Cave/Night Air Cones)
       const activeCaveBlend = playerAdvZone ? playerAdvZone.caveBlend : 0;
-      const activeHeadlightState = resolveHeadlightLighting({
+      resolveHeadlightLighting({
         headlightsOn: headlightsOnRef.current,
         highBeamTimer,
         caveBlend: activeCaveBlend,
         isNight: sky.isNight,
       });
 
-      if (activeHeadlightState.beamsActive && !isFalling && !isTrafficCrash) {
-        const beamHex = currentAppearance.headlightBeamHex;
-        const lensHex = currentAppearance.headlightLensHex;
-        const darknessFactor = Math.max(activeCaveBlend, sky.isNight ? 0.85 : 0.25);
-        const heroRawZNow = (driftState.x - camWorldX) * fwdX + (driftState.z - camWorldZ) * fwdZ;
-
-        ctx.save();
-        ctx.globalCompositeOperation = 'screen';
-
-        if (isParkingMode && parkingState) {
-          const pHeading = parkingState.heading;
-          const pfX = Math.cos(pHeading);
-          const pfZ = Math.sin(pHeading);
-          const prX = -pfZ;
-          const prZ = pfX;
-          const segCount = 9;
-          const maxD = activeHeadlightState.isHighBeam ? 32 : 24;
-          for (let s = 0; s < segCount; s++) {
-            const d0 = 1.85 + (s / segCount) * (maxD - 1.85);
-            const d1 = 1.85 + ((s + 1) / segCount) * (maxD - 1.85);
-            const tMid = 1 - s / segCount;
-            const segAlpha = Math.min(0.32, 0.24 * Math.pow(tMid, 1.3) * activeHeadlightState.strength * darknessFactor);
-            if (segAlpha <= 0.015) continue;
-            const spillCol = getHeadlightRgba(beamHex, segAlpha);
-            const coreCol = getHeadlightRgba(lensHex, segAlpha * 0.85);
-            for (const lampSign of [-1, 1]) {
-              const sep0 = lampSign * (0.64 + d0 * 0.015);
-              const sep1 = lampSign * (0.64 + d1 * 0.015);
-              const hw0 = 0.34 + d0 * 0.068;
-              const hw1 = 0.34 + d1 * 0.068;
-              const c0x = parkingState.x + pfX * d0 + prX * sep0;
-              const c0z = parkingState.z + pfZ * d0 + prZ * sep0;
-              const c1x = parkingState.x + pfX * d1 + prX * sep1;
-              const c1z = parkingState.z + pfZ * d1 + prZ * sep1;
-              if (
-                projectInto(c0x - prX * hw0, 0.04, c0z - prZ * hw0, pScratch0, 0.45) &&
-                projectInto(c0x + prX * hw0, 0.04, c0z + prZ * hw0, pScratch1, 0.45) &&
-                projectInto(c1x + prX * hw1, 0.04, c1z + prZ * hw1, pScratch2, 0.45) &&
-                projectInto(c1x - prX * hw1, 0.04, c1z - prZ * hw1, pScratch3, 0.45)
-              ) {
-                drawQuadPts(pScratch0, pScratch1, pScratch2, pScratch3, spillCol);
-              }
-              if (
-                projectInto(c0x - prX * hw0 * 0.48, 0.05, c0z - prZ * hw0 * 0.48, pScratch0, 0.45) &&
-                projectInto(c0x + prX * hw0 * 0.48, 0.05, c0z + prZ * hw0 * 0.48, pScratch1, 0.45) &&
-                projectInto(c1x + prX * hw1 * 0.48, 0.05, c1z + prZ * hw1 * 0.48, pScratch2, 0.45) &&
-                projectInto(c1x - prX * hw1 * 0.48, 0.05, c1z - prZ * hw1 * 0.48, pScratch3, 0.45)
-              ) {
-                drawQuadPts(pScratch0, pScratch1, pScratch2, pScratch3, coreCol);
-              }
-            }
-          }
-        } else if (visibleCount > 2) {
-          const heroTrackEval = evaluateCarOnSCurveRoad(driftState.x, driftState.z, track, 2.0);
-          const heroLat = heroTrackEval.closestPoint ? heroTrackEval.signedPerpOffset : 0;
-          const heroRelYaw = heroTrackEval.closestPoint
-            ? normalizeAngle(driftState.heading - heroTrackEval.closestPoint.heading)
-            : 0;
-          const aimSweepRate = Math.sin(heroRelYaw) * 0.62;
-          const spreadSlope = activeHeadlightState.isHighBeam ? 0.088 : 0.072;
-
-          for (let i = 0; i < visibleCount - 1; i++) {
-            const far = slicePool[i];
-            const near = slicePool[i + 1];
-            if (Math.abs(far.pt.index - near.pt.index) > 2) continue;
-
-            const dNear = near.rawZ - heroRawZNow;
-            const dFar = far.rawZ - heroRawZNow;
-            if (dFar <= 1.35 || dNear >= activeHeadlightState.reachMeters) continue;
-
-            const dMid = Math.max(1.35, (dNear + dFar) * 0.5);
-            const sliceZoneBlend = isAdventureMode
-              ? resolveAdventureZone(far.pt.index * STEP_DIST, far.pt.index).caveBlend
-              : 0;
-            const sliceIllum = computeHeadlightSliceIllumination({
-              rawZ: dMid,
-              headlightsOn: headlightsOnRef.current,
-              highBeamActive: highBeamTimer > 0,
-              caveBlend: Math.max(activeCaveBlend, sliceZoneBlend),
-              isNight: sky.isNight,
-            });
-            if (sliceIllum.roadIllum <= 0.015) continue;
-
-            const nPt = near.pt;
-            const fPt = far.pt;
-            const aimFadeN = Math.exp(-Math.max(0, dNear) * 0.055);
-            const aimFadeF = Math.exp(-Math.max(0, dFar) * 0.055);
-            const maxLatN = nPt.width * 0.44;
-            const maxLatF = fPt.width * 0.44;
-            const centerLatN = Math.max(
-              -maxLatN,
-              Math.min(maxLatN, heroLat * (0.28 + 0.72 * aimFadeN) + aimSweepRate * Math.min(Math.max(0, dNear), 12) * aimFadeN)
-            );
-            const centerLatF = Math.max(
-              -maxLatF,
-              Math.min(maxLatF, heroLat * (0.28 + 0.72 * aimFadeF) + aimSweepRate * Math.min(Math.max(0, dFar), 12) * aimFadeF)
-            );
-
-            const spillAlpha = Math.min(0.42, sliceIllum.roadIllum * (0.22 + 0.16 * darknessFactor));
-            const coreAlpha = Math.min(0.46, sliceIllum.coreIllum * (0.26 + 0.18 * darknessFactor));
-            const hotAlpha = Math.min(0.36, sliceIllum.coreIllum * (0.18 + 0.14 * darknessFactor));
-            const spillCol = getHeadlightRgba(beamHex, spillAlpha);
-            const coreCol = getHeadlightRgba(lensHex, coreAlpha);
-
-            for (const lampSign of [-1, 1]) {
-              const dNClamped = Math.max(1.35, dNear);
-              const dFClamped = Math.max(1.6, dFar);
-              const sepN = lampSign * (0.68 + dNClamped * 0.018);
-              const sepF = lampSign * (0.68 + dFClamped * 0.018);
-              const asymBoost = lampSign > 0 ? 1.08 : 0.96;
-              const hwN = (0.38 + dNClamped * spreadSlope) * asymBoost;
-              const hwF = (0.38 + dFClamped * spreadSlope) * asymBoost;
-
-              const latNC = centerLatN + sepN;
-              const latFC = centerLatF + sepF;
-              if (
-                projectInto(nPt.x + nPt.nx * (latNC - hwN), nPt.y + 0.04, nPt.z + nPt.nz * (latNC - hwN), pScratch0, 0.45) &&
-                projectInto(nPt.x + nPt.nx * (latNC + hwN), nPt.y + 0.04, nPt.z + nPt.nz * (latNC + hwN), pScratch1, 0.45) &&
-                projectInto(fPt.x + fPt.nx * (latFC + hwF), fPt.y + 0.04, fPt.z + fPt.nz * (latFC + hwF), pScratch2, 0.45) &&
-                projectInto(fPt.x + fPt.nx * (latFC - hwF), fPt.y + 0.04, fPt.z + fPt.nz * (latFC - hwF), pScratch3, 0.45)
-              ) {
-                drawQuadPts(pScratch0, pScratch1, pScratch2, pScratch3, spillCol);
-              }
-
-              if (coreAlpha > 0.025) {
-                const cHwN = hwN * 0.52;
-                const cHwF = hwF * 0.52;
-                if (
-                  projectInto(nPt.x + nPt.nx * (latNC - cHwN), nPt.y + 0.05, nPt.z + nPt.nz * (latNC - cHwN), pScratch0, 0.45) &&
-                  projectInto(nPt.x + nPt.nx * (latNC + cHwN), nPt.y + 0.05, nPt.z + nPt.nz * (latNC + cHwN), pScratch1, 0.45) &&
-                  projectInto(fPt.x + fPt.nx * (latFC + cHwF), fPt.y + 0.05, fPt.z + fPt.nz * (latFC + cHwF), pScratch2, 0.45) &&
-                  projectInto(fPt.x + fPt.nx * (latFC - cHwF), fPt.y + 0.05, fPt.z + fPt.nz * (latFC - cHwF), pScratch3, 0.45)
-                ) {
-                  drawQuadPts(pScratch0, pScratch1, pScratch2, pScratch3, coreCol);
-                }
-              }
-
-              if (dMid < 36 && hotAlpha > 0.03) {
-                const hHwN = hwN * 0.24;
-                const hHwF = hwF * 0.24;
-                if (
-                  projectInto(nPt.x + nPt.nx * (latNC - hHwN), nPt.y + 0.055, nPt.z + nPt.nz * (latNC - hHwN), pScratch0, 0.45) &&
-                  projectInto(nPt.x + nPt.nx * (latNC + hHwN), nPt.y + 0.055, nPt.z + nPt.nz * (latNC + hHwN), pScratch1, 0.45) &&
-                  projectInto(fPt.x + fPt.nx * (latFC + hHwF), fPt.y + 0.055, fPt.z + fPt.nz * (latFC + hHwF), pScratch2, 0.45) &&
-                  projectInto(fPt.x + fPt.nx * (latFC - hHwF), fPt.y + 0.055, fPt.z + fPt.nz * (latFC - hHwF), pScratch3, 0.45)
-                ) {
-                  drawQuadPts(pScratch0, pScratch1, pScratch2, pScratch3, getHeadlightRgba('#ffffff', hotAlpha));
-                }
-              }
-            }
-          }
-        }
-
-        // Volumetric atmospheric light rays fanning forward through dusty cave/night air from front lamps
-        const volVis = Math.max(activeCaveBlend, sky.isNight ? 0.72 : 0.16);
-        if (volVis > 0.14) {
-          const heroBaseX = isParkingMode && parkingState ? parkingState.x : driftState.x;
-          const heroBaseY = isParkingMode && parkingState ? 0 : driftState.y;
-          const heroBaseZ = isParkingMode && parkingState ? parkingState.z : driftState.z;
-          const heroAngle = isParkingMode && parkingState ? parkingState.heading : driftState.heading;
-          const hCos = Math.cos(heroAngle);
-          const hSin = Math.sin(heroAngle);
-          const hRightX = -hSin;
-          const hRightZ = hCos;
-          const beamRayLen = activeHeadlightState.isHighBeam ? 30 : 22;
-          const coneIntensity = Math.min(0.28, (0.09 + volVis * 0.14) * activeHeadlightState.strength);
-
-          for (const side of [-1, 1]) {
-            const originLat = side * 0.68;
-            const ox = heroBaseX + hCos * 1.88 + hRightX * originLat;
-            const oy = heroBaseY + 0.50;
-            const oz = heroBaseZ + hSin * 1.88 + hRightZ * originLat;
-
-            const endSpread = side * (1.28 + (activeHeadlightState.isHighBeam ? 0.35 : 0));
-            const ex = heroBaseX + hCos * beamRayLen + hRightX * endSpread;
-            const ey = heroBaseY + 0.85;
-            const ez = heroBaseZ + hSin * beamRayLen + hRightZ * endSpread;
-
-            if (
-              projectInto(ox - hRightX * 0.18, oy, oz - hRightZ * 0.18, pScratch0, 0.45) &&
-              projectInto(ox + hRightX * 0.18, oy, oz + hRightZ * 0.18, pScratch1, 0.45) &&
-              projectInto(ex + hRightX * 2.15, ey, ez + hRightZ * 2.15, pScratch2, 0.45) &&
-              projectInto(ex - hRightX * 2.15, ey, ez - hRightZ * 2.15, pScratch3, 0.45)
-            ) {
-              const rayGrad = ctx.createLinearGradient(
-                (pScratch0.x + pScratch1.x) * 0.5,
-                (pScratch0.y + pScratch1.y) * 0.5,
-                (pScratch2.x + pScratch3.x) * 0.5,
-                (pScratch2.y + pScratch3.y) * 0.5
-              );
-              rayGrad.addColorStop(0, getHeadlightRgba(lensHex, coneIntensity));
-              rayGrad.addColorStop(0.45, getHeadlightRgba(beamHex, coneIntensity * 0.46));
-              rayGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-              ctx.fillStyle = rayGrad;
-              ctx.beginPath();
-              ctx.moveTo(pScratch0.x, pScratch0.y);
-              ctx.lineTo(pScratch1.x, pScratch1.y);
-              ctx.lineTo(pScratch2.x, pScratch2.y);
-              ctx.lineTo(pScratch3.x, pScratch3.y);
-              ctx.closePath();
-              ctx.fill();
-            }
-          }
-        }
-
-        ctx.restore();
-      }
-
-      // H. Spinning Gold Nitro Coins & Teal/Gold Nitro Star Gems along the S-Curve
+      // H. Spinning Metallic 3D Gold Coins & Faceted Glowing Nitro Star Gems along the S-Curve
       for (let i = track.length - 1; i >= 0; i--) {
         const pt = track[i];
         if (pt.hasCoin && !pt.coinCollected) {
           if (
             projectInto(pt.coinX, pt.y + 0.65, pt.coinZ, pScratchTmp) &&
+            pScratchTmp.z >= 1.8 &&
             pScratchTmp.z <= 120 &&
             !(phase === 'title' && pScratchTmp.z < 24)
           ) {
-            const r = Math.max(2, Math.round(0.45 * pScratchTmp.scale));
-            const spinW = Math.max(1, Math.round(Math.abs(Math.cos(now * 0.005 + pt.index)) * r));
-            const cx = Math.round(pScratchTmp.x);
-            const cy = Math.round(pScratchTmp.y);
-            ctx.fillStyle = '#090d16';
-            ctx.fillRect(cx - spinW - 1, cy - r - 1, spinW * 2 + 2, r * 2 + 2);
-            ctx.fillStyle = '#fbbf24';
-            ctx.fillRect(cx - spinW, cy - r, spinW * 2, r * 2);
-            ctx.fillStyle = '#fef08a';
-            ctx.fillRect(cx - Math.max(1, Math.floor(spinW * 0.4)), cy - r + 1, Math.max(1, Math.floor(spinW * 0.6)), r);
+            const nearFade = Math.min(1, Math.max(0, (pScratchTmp.z - 2.0) / 2.6));
+            const r = Math.min(28, Math.max(2.5, 0.42 * pScratchTmp.scale));
+            const spinCos = Math.abs(Math.cos(now * 0.005 + pt.index));
+            const rx = Math.max(1.8, spinCos * r);
+            const cx = pScratchTmp.x;
+            const cy = pScratchTmp.y;
+
+            ctx.save();
+            ctx.globalAlpha = nearFade * 0.34;
+            ctx.fillStyle = '#020617';
+            ctx.beginPath();
+            ctx.ellipse(cx, cy + r * 1.15, Math.max(2, r * 0.75), Math.max(1.2, r * 0.26), 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.globalAlpha = nearFade;
+            const spriteDrawR = r * (32 / 28);
+            const spriteDrawRx = Math.max(2.2, (rx / Math.max(1, r)) * spriteDrawR);
+            ctx.drawImage(
+              goldCoinSprite,
+              cx - spriteDrawRx,
+              cy - spriteDrawR,
+              spriteDrawRx * 2,
+              spriteDrawR * 2
+            );
+            ctx.restore();
           }
         }
 
@@ -5655,23 +6451,24 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               pt.coinZ,
               pScratchTmp
             ) &&
+            pScratchTmp.z >= 1.8 &&
             pScratchTmp.z <= 120 &&
             !(phase === 'title' && pScratchTmp.z < 24)
           ) {
-            const gr = Math.max(3, Math.round(0.62 * pScratchTmp.scale));
-            const cx = Math.round(pScratchTmp.x);
-            const cy = Math.round(pScratchTmp.y);
-            pScratch0.x = cx;
-            pScratch0.y = cy - gr;
-            pScratch1.x = cx + gr;
-            pScratch1.y = cy;
-            pScratch2.x = cx;
-            pScratch2.y = cy + gr;
-            pScratch3.x = cx - gr;
-            pScratch3.y = cy;
-            drawQuadPts(pScratch0, pScratch1, pScratch2, pScratch3, '#06b6d4', '#090d16', 1);
-            ctx.fillStyle = '#fef08a';
-            ctx.fillRect(cx - 1, cy - 1, 2, 2);
+            const nearFade = Math.min(1, Math.max(0, (pScratchTmp.z - 2.0) / 2.6));
+            const gr = Math.min(34, Math.max(3, 0.58 * pScratchTmp.scale));
+            const cx = pScratchTmp.x;
+            const cy = pScratchTmp.y;
+            const gemDrawR = gr * (36 / 23);
+            ctx.globalAlpha = nearFade;
+            ctx.drawImage(
+              nitroGemSprite,
+              cx - gemDrawR,
+              cy - gemDrawR,
+              gemDrawR * 2,
+              gemDrawR * 2
+            );
+            ctx.globalAlpha = 1.0;
           }
         }
 
@@ -5708,14 +6505,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             const bodyTop = csy - Math.floor(canH * 0.5);
             const radY = Math.max(2, Math.round(canW * 0.28));
 
-            const grad = ctx.createLinearGradient(bodyLeft, csy, bodyLeft + canW, csy);
-            grad.addColorStop(0, '#0284c7');
-            grad.addColorStop(0.35, '#38bdf8');
-            grad.addColorStop(0.5, '#e0f2fe');
-            grad.addColorStop(0.8, '#00f0ff');
-            grad.addColorStop(1, '#0369a1');
-            ctx.fillStyle = grad;
-            ctx.fillRect(bodyLeft, bodyTop + radY, canW, Math.max(1, canH - radY * 2));
+            ctx.drawImage(
+              canisterBodySprite,
+              bodyLeft,
+              bodyTop + radY,
+              canW,
+              Math.max(1, canH - radY * 2)
+            );
 
             // Bottom cap
             ctx.fillStyle = '#0284c7';
@@ -5767,7 +6563,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         const pr = Math.min(34, Math.max(2, curRad * 0.72 * pScratchTmp.scale));
         const sx = pScratchTmp.x;
         const sy = pScratchTmp.y;
-        const baseAlpha = Math.min(0.46, (p.life / p.maxLife) * 0.54) * (1 - age * 0.25);
+        const baseAlpha =
+          Math.min(p.tint === 'dirt' ? 0.62 : 0.46, (p.life / p.maxLife) * (p.tint === 'dirt' ? 0.72 : 0.54)) *
+          (1 - age * 0.25);
 
         const outerColor =
           p.tint === 'cyan'
@@ -5780,6 +6578,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             ? '#94a3b8'
             : p.tint === 'dust'
             ? '#78716c'
+            : p.tint === 'dirt'
+            ? '#735032'
             : p.tint === 'steam'
             ? '#94a3b8'
             : p.tint === 'dark'
@@ -5797,6 +6597,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             ? '#fef3c7'
             : p.tint === 'dust'
             ? '#d6d3d1'
+            : p.tint === 'dirt'
+            ? '#d4ac82'
             : p.tint === 'steam'
             ? '#f8fafc'
             : p.tint === 'dark'
@@ -5901,35 +6703,6 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           const rawZ = (wx - camWorldX) * fwdX + (wz - camWorldZ) * fwdZ;
           if (rawZ < 1.5 || rawZ > 145) continue;
 
-          // Oncoming cars cast crisp two-tier headlight beams onto the highway asphalt ahead of them!
-          if (tc.isOncoming && !tc.crashed && rawZ < 110) {
-            const frontSample = sampleTrackAtS(track, tc.s - tc.halfLength * 0.9, STEP_DIST);
-            const midSample = sampleTrackAtS(track, tc.s - tc.halfLength - 4.8, STEP_DIST);
-            const tipSample = sampleTrackAtS(track, tc.s - tc.halfLength - 9.8, STEP_DIST);
-            if (frontSample && midSample && tipSample) {
-              const fx = frontSample.x + frontSample.nx * tc.lateralOffset;
-              const fz = frontSample.z + frontSample.nz * tc.lateralOffset;
-              const mxW = midSample.x + midSample.nx * tc.lateralOffset;
-              const mzW = midSample.z + midSample.nz * tc.lateralOffset;
-              const txW = tipSample.x + tipSample.nx * tc.lateralOffset;
-              const tzW = tipSample.z + tipSample.nz * tc.lateralOffset;
-              if (
-                projectInto(fx - frontSample.nx * 0.68, frontSample.y + 0.06, fz - frontSample.nz * 0.68, pScratch0, 0.45) &&
-                projectInto(fx + frontSample.nx * 0.68, frontSample.y + 0.06, fz + frontSample.nz * 0.68, pScratch1, 0.45) &&
-                projectInto(mxW - midSample.nx * 1.02, midSample.y + 0.05, mzW - midSample.nz * 1.02, pScratch2, 0.45) &&
-                projectInto(mxW + midSample.nx * 1.02, midSample.y + 0.05, mzW + midSample.nz * 1.02, pScratch3, 0.45) &&
-                projectInto(txW - tipSample.nx * 1.32, tipSample.y + 0.05, tzW - tipSample.nz * 1.32, pScratch4, 0.45) &&
-                projectInto(txW + tipSample.nx * 1.32, tipSample.y + 0.05, tzW + tipSample.nz * 1.32, pScratch5, 0.45)
-              ) {
-                ctx.globalAlpha = biome.isNight ? 0.36 : 0.20;
-                drawQuadPts(pScratch0, pScratch1, pScratch3, pScratch2, '#fef9c3');
-                ctx.globalAlpha = biome.isNight ? 0.18 : 0.09;
-                drawQuadPts(pScratch2, pScratch3, pScratch5, pScratch4, '#fef08a');
-                ctx.globalAlpha = 1.0;
-              }
-            }
-          }
-
           const slot = vehicleDrawBuf[vehicleCount];
           if (projectInto(wx, wy, wz, slot.proj)) {
             slot.rawZ = rawZ;
@@ -6023,7 +6796,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 : 'coast'
               : 'coast';
 
-          // Grounded Chassis Contact Shadow + Altitude Airborne Crash Shadow + Underglow
+          // Grounded Chassis Contact Shadow + Airborne Mountain Jump Shadow + Underglow
           if (isFalling || isTrafficCrash) {
             if (projectInto(driftState.x, crashGroundY, driftState.z, pScratchTmp)) {
               const alt = Math.max(0, driftState.y - crashGroundY);
@@ -6032,6 +6805,28 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               const shH = shW * 0.26;
               ctx.save();
               ctx.globalAlpha = Math.max(0.14, 0.46 * altScale);
+              ctx.fillStyle = '#020617';
+              ctx.beginPath();
+              ctx.ellipse(pScratchTmp.x, pScratchTmp.y, shW, shH, 0, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.restore();
+            }
+          } else if (isMountainMode && mountainState?.isAirborne) {
+            const jumpSurf = sampleMountainSurface(
+              driftState.x,
+              driftState.z,
+              track,
+              STEP_DIST,
+              stats.roadAllowanceBonus
+            );
+            const floorShadowY = jumpSurf.inChasmGap ? jumpSurf.terrainY : jumpSurf.roadY;
+            if (projectInto(driftState.x, floorShadowY, driftState.z, pScratchTmp)) {
+              const alt = Math.max(0, driftState.y - floorShadowY);
+              const altScale = Math.max(0.28, 1 - alt * 0.055);
+              const shW = 5.4 * pScratchTmp.scale * 0.44 * altScale;
+              const shH = shW * 0.25;
+              ctx.save();
+              ctx.globalAlpha = Math.max(0.12, 0.42 * altScale);
               ctx.fillStyle = '#020617';
               ctx.beginPath();
               ctx.ellipse(pScratchTmp.x, pScratchTmp.y, shW, shH, 0, 0, Math.PI * 2);
@@ -6081,7 +6876,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             ctx.save();
             ctx.translate(cx, cy);
             if (isFalling || isTrafficCrash) ctx.rotate(fallRotation);
-            else ctx.rotate(heroRollRad);
+            else ctx.rotate(heroRollRad + heroAirPitchRad * 0.18);
             if (visualDriftAngle < 0) ctx.scale(-1, 1);
             ctx.drawImage(customImgEl, -carDrawW * 0.5, -carDrawH * 0.5, carDrawW, carDrawH);
             ctx.restore();
@@ -6115,7 +6910,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             if (isFalling || isTrafficCrash) {
               ctx.rotate(fallRotation);
             } else {
-              ctx.rotate(heroRollRad);
+              ctx.rotate(heroRollRad + heroAirPitchRad * 0.18);
             }
             ctx.drawImage(spriteCanvas, -carDrawW * 0.5, -carDrawH * 0.5, carDrawW, carDrawH);
             ctx.restore();
@@ -6136,23 +6931,19 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 const lampZ = hBaseZ + hs * 1.88 + hc * (visibleSide * 0.68);
                 if (projectInto(lampX, hBaseY + 0.52, lampZ, pScratchTmp, 0.45)) {
                   const bloomR = Math.max(6, pScratchTmp.scale * (highBeamTimer > 0 ? 0.62 : 0.42));
+                  const bloomImg = getBloomSprite(
+                    currentAppearance.headlightBeamHex,
+                    highBeamTimer > 0
+                  );
                   ctx.save();
                   ctx.globalCompositeOperation = 'screen';
-                  const g = ctx.createRadialGradient(
-                    pScratchTmp.x,
-                    pScratchTmp.y,
-                    0,
-                    pScratchTmp.x,
-                    pScratchTmp.y,
-                    bloomR
+                  ctx.drawImage(
+                    bloomImg,
+                    pScratchTmp.x - bloomR,
+                    pScratchTmp.y - bloomR,
+                    bloomR * 2,
+                    bloomR * 2
                   );
-                  g.addColorStop(0, getHeadlightRgba('#ffffff', highBeamTimer > 0 ? 0.72 : 0.46));
-                  g.addColorStop(0.45, getHeadlightRgba(currentAppearance.headlightBeamHex, 0.24));
-                  g.addColorStop(1, 'rgba(0, 0, 0, 0)');
-                  ctx.fillStyle = g;
-                  ctx.beginPath();
-                  ctx.arc(pScratchTmp.x, pScratchTmp.y, bloomR, 0, Math.PI * 2);
-                  ctx.fill();
                   ctx.restore();
                 }
               }
@@ -6477,17 +7268,23 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           if (ap.sy < -4) ap.sy = pxH + 2;
           if (ap.sy > pxH + 4) ap.sy = -2;
 
+          const pRad = Math.max(1.1, ap.size * 0.48 * HD_UI_SCALE);
+          ctx.beginPath();
+          ctx.arc(ap.sx, ap.sy, pRad * 1.9, 0, Math.PI * 2);
+          ctx.fillStyle = inCaveNow ? 'rgba(56, 189, 248, 0.16)' : 'rgba(190, 242, 100, 0.16)';
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(ap.sx, ap.sy, pRad, 0, Math.PI * 2);
           ctx.fillStyle = inCaveNow
             ? i % 2 === 0
               ? playerAdvZone.chapter.crystalPrimary
               : playerAdvZone.chapter.lanternGlow
             : i % 3 === 0
-            ? 'rgba(190, 242, 100, 0.72)'
+            ? 'rgba(190, 242, 100, 0.82)'
             : i % 3 === 1
-            ? 'rgba(253, 230, 138, 0.65)'
-            : 'rgba(134, 239, 172, 0.68)';
-          const pSz = ap.size * HD_UI_SCALE;
-          ctx.fillRect(ap.sx, ap.sy, pSz, pSz);
+            ? 'rgba(253, 230, 138, 0.78)'
+            : 'rgba(134, 239, 172, 0.78)';
+          ctx.fill();
         }
       } else if (biome.ambientParticle !== 'none') {
         for (let i = 0; i < ambientParticles.length; i++) {
@@ -6515,11 +7312,17 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 : '#f472b6'
               : biome.ambientParticle === 'neon_orb'
               ? i % 2 === 0
-                ? 'rgba(34, 211, 238, 0.7)'
-                : 'rgba(244, 114, 182, 0.7)'
-              : 'rgba(251, 146, 60, 0.75)';
-          const pSz = ap.size * HD_UI_SCALE;
-          ctx.fillRect(ap.sx, ap.sy, pSz, Math.max(1.5, pSz * 0.75));
+                ? 'rgba(34, 211, 238, 0.72)'
+                : 'rgba(244, 114, 182, 0.72)'
+              : 'rgba(251, 146, 60, 0.78)';
+          const pRad = Math.max(1.1, ap.size * 0.48 * HD_UI_SCALE);
+          ctx.beginPath();
+          if (biome.ambientParticle === 'petal') {
+            ctx.ellipse(ap.sx, ap.sy, pRad * 1.4, pRad * 0.75, ap.phase + now * 0.003, 0, Math.PI * 2);
+          } else {
+            ctx.arc(ap.sx, ap.sy, pRad, 0, Math.PI * 2);
+          }
+          ctx.fill();
         }
       }
 
@@ -6641,32 +7444,37 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         ctx.stroke();
       }
 
-      // N. Calm Radial Velocity Vignette (steady glow in Fever / high speed, zero strobing border rects)
+      // N. Calm Radial Velocity Vignette (cached gradient by viewport, zero per-frame allocation)
       const currentKmh = curSpeedNow * 7.2;
       const showSpeedVignette = phase === 'playing' && (isFever || currentKmh > 185);
       if (showSpeedVignette) {
-        const isFeverVignette = isFever;
-        const speedStrength = isFeverVignette ? 1.0 : Math.min(1, (currentKmh - 185) / 90);
-        const cx = pxW * 0.5;
-        const cy = pxH * 0.5;
-        const rInner = Math.min(pxW, pxH) * 0.44;
-        const rOuter = Math.hypot(cx, cy);
-        const vigGrad = ctx.createRadialGradient(cx, cy, rInner, cx, cy, rOuter);
-        vigGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
-        vigGrad.addColorStop(
-          0.72,
-          isFeverVignette
-            ? 'rgba(34, 211, 238, 0.08)'
-            : `rgba(251, 191, 36, ${(0.06 * speedStrength).toFixed(3)})`
-        );
-        vigGrad.addColorStop(
-          1,
-          isFeverVignette
-            ? 'rgba(34, 211, 238, 0.22)'
-            : `rgba(251, 191, 36, ${(0.18 * speedStrength).toFixed(3)})`
-        );
-        ctx.fillStyle = vigGrad;
-        ctx.fillRect(0, 0, pxW, pxH);
+        const dimKey = `${pxW}x${pxH}`;
+        if (cachedVigDimKey !== dimKey || !cachedFeverVigGrad || !cachedSpeedVigGrad) {
+          cachedVigDimKey = dimKey;
+          const cx = pxW * 0.5;
+          const cy = pxH * 0.5;
+          const rInner = Math.min(pxW, pxH) * 0.44;
+          const rOuter = Math.hypot(cx, cy);
+          cachedFeverVigGrad = ctx.createRadialGradient(cx, cy, rInner, cx, cy, rOuter);
+          cachedFeverVigGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+          cachedFeverVigGrad.addColorStop(0.72, 'rgba(34, 211, 238, 0.08)');
+          cachedFeverVigGrad.addColorStop(1, 'rgba(34, 211, 238, 0.22)');
+
+          cachedSpeedVigGrad = ctx.createRadialGradient(cx, cy, rInner, cx, cy, rOuter);
+          cachedSpeedVigGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+          cachedSpeedVigGrad.addColorStop(0.72, 'rgba(251, 191, 36, 0.06)');
+          cachedSpeedVigGrad.addColorStop(1, 'rgba(251, 191, 36, 0.18)');
+        }
+        if (isFever) {
+          ctx.fillStyle = cachedFeverVigGrad;
+          ctx.fillRect(0, 0, pxW, pxH);
+        } else {
+          const speedStrength = Math.min(1, (currentKmh - 185) / 90);
+          ctx.globalAlpha = speedStrength;
+          ctx.fillStyle = cachedSpeedVigGrad;
+          ctx.fillRect(0, 0, pxW, pxH);
+          ctx.globalAlpha = 1.0;
+        }
       }
 
       // O. Impact & Overdrive Screen Flash Overlay
@@ -6686,6 +7494,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       cancelAnimationFrame(animId);
       if (idleTimerId !== null) window.clearTimeout(idleTimerId);
       soundFX.stopEngineSound();
+      webglWorld?.dispose();
       window.removeEventListener('resize', resize);
       window.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('pointermove', onPointerMove);
@@ -6698,10 +7507,16 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
   }, []);
 
   return (
-    <canvas
-      ref={canvasRef}
-      className="fixed inset-0 w-full h-full block select-none touch-none"
-      data-testid="drift-2d-canvas"
-    />
+    <div className="fixed inset-0 w-full h-full select-none touch-none overflow-hidden">
+      <div
+        ref={webglMountRef}
+        className="absolute inset-0 w-full h-full pointer-events-none"
+      />
+      <canvas
+        ref={canvasRef}
+        className="relative z-10 w-full h-full block select-none touch-none"
+        data-testid="drift-2d-canvas"
+      />
+    </div>
   );
 });

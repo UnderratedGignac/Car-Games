@@ -4,6 +4,7 @@ import { createNoise2D } from 'simplex-noise';
 import {
   clampByte,
   computeCarbonWeavePixel,
+  computeHeightmapNormalRgba,
   computePaddockTileMask,
   computeRadialRotorIntensity,
   computeTreadGrooveMask,
@@ -65,4 +66,27 @@ test('computeTurntableCollarMask highlights radial ring collar and telemetry gro
   const base = computeTurntableCollarMask(0.35);
   assert.ok(groove < base, 'Inner telemetry groove should be recessed');
   assert.ok(collar > base, 'Outer brushed-metal collar should catch specular highlights');
+});
+
+test('computeHeightmapNormalRgba produces neutral +Z normals on flat surfaces and tilted vectors on slopes', () => {
+  const flat = new Float32Array(16).fill(0.5);
+  const flatRgba = computeHeightmapNormalRgba(flat, 4, 4, 2.0);
+  assert.equal(flatRgba.length, 64);
+  assert.equal(flatRgba[0], 128);
+  assert.equal(flatRgba[1], 128);
+  assert.equal(flatRgba[2], 255);
+  assert.equal(flatRgba[3], 255);
+
+  const sloped = new Float32Array(16);
+  for (let y = 0; y < 4; y++) {
+    for (let x = 0; x < 4; x++) {
+      sloped[y * 4 + x] = x / 3;
+    }
+  }
+  const slopedRgba = computeHeightmapNormalRgba(sloped, 4, 4, 2.0);
+  // At x=1, hL=0, hR=2/3 => dx < 0 => R < 128 while Z remains positive (> 128)
+  const idx = (1 * 4 + 1) * 4;
+  assert.ok(slopedRgba[idx] < 120, `Expected tilted X normal < 120, got ${slopedRgba[idx]}`);
+  assert.equal(slopedRgba[idx + 1], 128);
+  assert.ok(slopedRgba[idx + 2] > 140, `Expected positive Z normal > 140, got ${slopedRgba[idx + 2]}`);
 });

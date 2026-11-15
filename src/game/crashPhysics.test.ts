@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { TrafficCarState } from './rules';
 import {
   createCrashBody3D,
+  evaluateGuardrailImpact,
   getTrafficVehicleMass,
   resolveTrafficCollisionImpulse,
   stepCrashBody3D,
@@ -182,4 +183,74 @@ test('computeFrontWheelSteerRad maps steering input cleanly for mirrored and un-
   assert.equal(customYawRight, -customYawLeft);
   assert.equal(customYawCenter, 0);
 });
+
+test('evaluateGuardrailImpact bounces low-speed or shallow grazes and breaches only on fast direct hits', () => {
+  const slowDirect = evaluateGuardrailImpact({
+    playerSpeed: 14.0,
+    outwardLateralSpeed: 8.0,
+    overallIntegrity: 100,
+  });
+  assert.equal(slowDirect.shouldBreach, false);
+  assert.ok(slowDirect.inwardBounceLatVel > 3.5);
+
+  const fastShallow = evaluateGuardrailImpact({
+    playerSpeed: 28.0,
+    outwardLateralSpeed: 3.2,
+    overallIntegrity: 100,
+  });
+  assert.equal(fastShallow.shouldBreach, false);
+
+  const fastDirect = evaluateGuardrailImpact({
+    playerSpeed: 26.5,
+    outwardLateralSpeed: 7.5,
+    overallIntegrity: 100,
+  });
+  assert.equal(fastDirect.shouldBreach, true);
+});
+
+test('resolveTrafficCollisionImpulse requires high closing speed AND solid overlap for fatal crashes', () => {
+  // 1. Slow rear-end tap (even dead-center) is non-fatal
+  const slowSameLane = makeTrafficCar({ kind: 'sedan', speed: 12, lateralOffset: 2.25, isOncoming: false });
+  const slowTap = resolveTrafficCollisionImpulse({
+    playerSpeedForward: 18.0,
+    playerLateralVel: 0.2,
+    playerLateralOffset: 2.25,
+    car: slowSameLane,
+  });
+  assert.equal(slowTap.isFatalCrash, false);
+  assert.ok(slowTap.impactSeverity <= 0.16);
+
+  // 2. High-speed rear-end with small closing speed delta (< 14.5 m/s) is non-fatal
+  const fastTraffic = makeTrafficCar({ kind: 'sedan', speed: 15, lateralOffset: 2.25, isOncoming: false });
+  const lowDeltaHit = resolveTrafficCollisionImpulse({
+    playerSpeedForward: 24.0,
+    playerLateralVel: 0,
+    playerLateralOffset: 2.25,
+    car: fastTraffic,
+  });
+  assert.equal(lowDeltaHit.isFatalCrash, false);
+  assert.ok(lowDeltaHit.impactSeverity <= 0.38);
+
+  // 3. Oncoming corner clip (low overlapFraction < 0.45) is non-fatal
+  const oncomingCar = makeTrafficCar({ kind: 'sedan', speed: 12, lateralOffset: -2.25, isOncoming: true });
+  const oncomingCornerClip = resolveTrafficCollisionImpulse({
+    playerSpeedForward: 22.0,
+    playerLateralVel: 1.5,
+    playerLateralOffset: -1.1, // absDLat = 1.15 -> overlapFraction = 1 - 1.15/1.84 = 0.375 < 0.45
+    car: oncomingCar,
+  });
+  assert.equal(oncomingCornerClip.isFatalCrash, false);
+  assert.ok(oncomingCornerClip.hitQuality < 0.45);
+
+  // 4. Center oncoming collision at speed IS fatal
+  const oncomingDirect = resolveTrafficCollisionImpulse({
+    playerSpeedForward: 22.0,
+    playerLateralVel: 0,
+    playerLateralOffset: -2.2,
+    car: oncomingCar,
+  });
+  assert.equal(oncomingDirect.isFatalCrash, true);
+  assert.ok(oncomingDirect.hitQuality >= 0.9);
+});
+
 

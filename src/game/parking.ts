@@ -13,7 +13,13 @@ export type ParkingManeuverType =
   | 'parallel'
   | 'slalom_reverse'
   | 'chicane_diagonal'
-  | 'gymkhana_180';
+  | 'gymkhana_180'
+  | 'underground_tight'
+  | 'loading_dock'
+  | 'three_point_turn'
+  | 'offset_chicane_parallel'
+  | 'double_slalom_bay'
+  | 'valet_gauntlet';
 
 export interface ParkingPhysicsState {
   x: number;
@@ -797,6 +803,243 @@ const BASE_STAGES: ParkingStageSpec[] = [
     ],
     slalomGates: [
       { id: 1, x: 0, z: -20, halfWidth: 4.0, passed: false, label: 'RUNWAY ENTRY' },
+    ],
+  },
+  {
+    stageNumber: 7,
+    id: 'underground_tight_07',
+    title: 'Deck B2 Pillars #07',
+    subtitle: 'Pillared Underground Back-In',
+    instruction: 'Thread past concrete support barriers and reverse [R] smoothly into the tight B2 bay.',
+    maneuverType: 'underground_tight',
+    plazaWidth: 22,
+    startZ: 8,
+    endZ: -44,
+    spawn: { x: 2.2, z: 1, heading: -Math.PI / 2, gear: 'D' },
+    targetBay: {
+      x: -6.2,
+      z: -26,
+      heading: 0, // Facing right (+X) toward aisle
+      width: 3.25,
+      length: 5.2,
+      angleToleranceDeg: 13,
+      distToleranceM: 1.0,
+      allowEitherDirection: false,
+      label: 'B2 REVERSE',
+    },
+    parkedCars: [
+      { id: 701, x: -6.2, z: -21.6, heading: 0, kind: 'van', color: '#475569', halfWidth: 1.0, halfLength: 2.15 },
+      { id: 702, x: -6.2, z: -30.4, heading: 0, kind: 'sedan', color: '#38bdf8', halfWidth: 0.94, halfLength: 1.95 },
+      { id: 703, x: 6.4, z: -20, heading: Math.PI, kind: 'hatch', color: '#fb7185', halfWidth: 0.88, halfLength: 1.65 },
+    ],
+    cones: [
+      { id: 1, x: -3.2, z: -24.1, knocked: false, vx: 0, vz: 0 },
+      { id: 2, x: -3.2, z: -27.9, knocked: false, vx: 0, vz: 0 },
+    ],
+    barriers: [
+      { id: 1, x: 1.8, z: -14, halfW: 0.65, halfL: 0.65, heading: 0 },
+      { id: 2, x: 1.8, z: -33, halfW: 0.65, halfL: 0.65, heading: 0 },
+    ],
+    slalomGates: [],
+  },
+  {
+    stageNumber: 8,
+    id: 'loading_dock_08',
+    title: 'Cargo Dock #08',
+    subtitle: 'Heavy Freight Alley Reverse',
+    instruction: 'Clear the lane cones, pull ahead, then reverse [R] straight between twin box trucks!',
+    maneuverType: 'loading_dock',
+    plazaWidth: 24,
+    startZ: 8,
+    endZ: -52,
+    spawn: { x: -3.2, z: 2, heading: -Math.PI / 2, gear: 'D' },
+    targetBay: {
+      x: 0.0,
+      z: -38,
+      heading: Math.PI / 2, // Facing back out (+Z) so you back straight into the dock
+      width: 3.3,
+      length: 5.5,
+      angleToleranceDeg: 12,
+      distToleranceM: 1.05,
+      allowEitherDirection: false,
+      label: 'DOCK BACK-IN',
+    },
+    parkedCars: [
+      { id: 801, x: -4.1, z: -38, heading: Math.PI / 2, kind: 'box_truck', color: '#f59e0b', halfWidth: 1.08, halfLength: 2.6 },
+      { id: 802, x: 4.1, z: -38, heading: Math.PI / 2, kind: 'box_truck', color: '#cbd5e1', halfWidth: 1.08, halfLength: 2.6 },
+    ],
+    cones: [
+      { id: 1, x: -2.0, z: -29, knocked: false, vx: 0, vz: 0 },
+      { id: 2, x: 2.0, z: -29, knocked: false, vx: 0, vz: 0 },
+      { id: 3, x: -2.0, z: -15, knocked: false, vx: 0, vz: 0 },
+      { id: 4, x: 4.5, z: -15, knocked: false, vx: 0, vz: 0 },
+    ],
+    barriers: [
+      { id: 1, x: 0.0, z: -43.2, halfW: 5.5, halfL: 0.55, heading: 0 },
+    ],
+    slalomGates: [
+      { id: 1, x: 1.2, z: -15, halfWidth: 2.6, passed: false, label: 'DOCK APPROACH' },
+    ],
+  },
+  {
+    stageNumber: 9,
+    id: 'three_point_turn_09',
+    title: 'Alley K-Turn #09',
+    subtitle: 'Tight 3-Point Return',
+    instruction: 'Enter the dead-end court, execute a clean D/R 3-point turnaround, and park facing out!',
+    maneuverType: 'three_point_turn',
+    plazaWidth: 20,
+    startZ: 8,
+    endZ: -44,
+    spawn: { x: 4.2, z: 1, heading: -Math.PI / 2, gear: 'D' },
+    targetBay: {
+      x: -5.4,
+      z: -12,
+      heading: Math.PI / 2, // Facing back out (+Z)
+      width: 3.3,
+      length: 5.3,
+      angleToleranceDeg: 14,
+      distToleranceM: 1.1,
+      allowEitherDirection: false,
+      label: 'K-TURN BAY',
+    },
+    parkedCars: [
+      { id: 901, x: -5.4, z: -18.8, heading: Math.PI / 2, kind: 'sedan', color: '#0ea5e9', halfWidth: 0.94, halfLength: 1.95 },
+      { id: 902, x: -5.4, z: -5.2, heading: Math.PI / 2, kind: 'hatch', color: '#ec4899', halfWidth: 0.88, halfLength: 1.65 },
+      { id: 903, x: 5.6, z: -28, heading: -Math.PI / 2, kind: 'van', color: '#94a3b8', halfWidth: 1.0, halfLength: 2.15 },
+    ],
+    cones: [
+      { id: 1, x: 0.0, z: -23, knocked: false, vx: 0, vz: 0 },
+      { id: 2, x: -3.0, z: -34, knocked: false, vx: 0, vz: 0 },
+      { id: 3, x: 3.0, z: -34, knocked: false, vx: 0, vz: 0 },
+    ],
+    barriers: [
+      { id: 1, x: 0.0, z: -39.5, halfW: 9.0, halfL: 0.5, heading: 0 },
+    ],
+    slalomGates: [
+      { id: 1, x: 3.8, z: -20, halfWidth: 2.8, passed: false, label: 'TURN COURT' },
+    ],
+  },
+  {
+    stageNumber: 10,
+    id: 'harbor_parallel_10',
+    title: 'Harbor Curb #10',
+    subtitle: 'Left-Side Chicane Parallel',
+    instruction: 'Sweep past the promenade cones, shift [R], and parallel-park on the left seawall curb.',
+    maneuverType: 'offset_chicane_parallel',
+    plazaWidth: 24,
+    startZ: 8,
+    endZ: -52,
+    spawn: { x: 3.0, z: 2, heading: -Math.PI / 2, gear: 'D' },
+    targetBay: {
+      x: -7.4,
+      z: -32,
+      heading: -Math.PI / 2,
+      width: 3.1,
+      length: 5.7,
+      angleToleranceDeg: 12,
+      distToleranceM: 0.95,
+      allowEitherDirection: false,
+      label: 'SEAWALL CURB',
+    },
+    parkedCars: [
+      { id: 1001, x: -7.4, z: -39.1, heading: -Math.PI / 2, kind: 'sports', color: '#22d3ee', halfWidth: 0.96, halfLength: 1.95 },
+      { id: 1002, x: -7.4, z: -24.9, heading: -Math.PI / 2, kind: 'van', color: '#f97316', halfWidth: 1.0, halfLength: 2.15 },
+      { id: 1003, x: 6.0, z: -28, heading: -Math.PI / 2, kind: 'sedan', color: '#64748b', halfWidth: 0.94, halfLength: 1.95 },
+    ],
+    cones: [
+      { id: 1, x: -1.5, z: -13, knocked: false, vx: 0, vz: 0 },
+      { id: 2, x: 2.5, z: -21, knocked: false, vx: 0, vz: 0 },
+      { id: 3, x: -4.6, z: -28, knocked: false, vx: 0, vz: 0 },
+      { id: 4, x: -4.6, z: -36, knocked: false, vx: 0, vz: 0 },
+    ],
+    barriers: [
+      { id: 1, x: -9.8, z: -32, halfW: 0.45, halfL: 9.5, heading: -Math.PI / 2 },
+    ],
+    slalomGates: [],
+  },
+  {
+    stageNumber: 11,
+    id: 'double_slalom_11',
+    title: 'Pro S-Slalom #11',
+    subtitle: '5-Gate Weave + NW 45° Bay',
+    instruction: 'Snake smoothly through all 5 alternating slalom gates without clipping cones, then slot NW!',
+    maneuverType: 'double_slalom_bay',
+    plazaWidth: 24,
+    startZ: 8,
+    endZ: -66,
+    spawn: { x: 0, z: 3, heading: -Math.PI / 2, gear: 'D' },
+    targetBay: {
+      x: -5.2,
+      z: -51,
+      heading: -Math.PI * 0.75, // Angled 45° NW
+      width: 3.35,
+      length: 5.4,
+      angleToleranceDeg: 13,
+      distToleranceM: 1.1,
+      allowEitherDirection: false,
+      label: '45° NW BAY',
+    },
+    parkedCars: [
+      { id: 1101, x: -1.6, z: -53.8, heading: -Math.PI * 0.75, kind: 'sports', color: '#a855f7', halfWidth: 0.96, halfLength: 1.95 },
+      { id: 1102, x: -8.6, z: -48.2, heading: -Math.PI * 0.75, kind: 'hatch', color: '#10b981', halfWidth: 0.88, halfLength: 1.65 },
+    ],
+    cones: [
+      { id: 1, x: 0.0, z: -7.5, knocked: false, vx: 0, vz: 0 },
+      { id: 2, x: 0.0, z: -15.5, knocked: false, vx: 0, vz: 0 },
+      { id: 3, x: 0.0, z: -23.5, knocked: false, vx: 0, vz: 0 },
+      { id: 4, x: 0.0, z: -31.5, knocked: false, vx: 0, vz: 0 },
+      { id: 5, x: 0.0, z: -39.5, knocked: false, vx: 0, vz: 0 },
+    ],
+    barriers: [],
+    slalomGates: [
+      { id: 1, x: 3.4, z: -7.5, halfWidth: 2.3, passed: false, label: 'GATE 1' },
+      { id: 2, x: -3.4, z: -15.5, halfWidth: 2.3, passed: false, label: 'GATE 2' },
+      { id: 3, x: 3.4, z: -23.5, halfWidth: 2.3, passed: false, label: 'GATE 3' },
+      { id: 4, x: -3.4, z: -31.5, halfWidth: 2.3, passed: false, label: 'GATE 4' },
+      { id: 5, x: 3.4, z: -39.5, halfWidth: 2.3, passed: false, label: 'GATE 5' },
+    ],
+  },
+  {
+    stageNumber: 12,
+    id: 'valet_gauntlet_12',
+    title: 'Master Gauntlet #12',
+    subtitle: 'Chicane + Handbrake 180° Box',
+    instruction: 'Clear both slalom gates, thread the chicane, whip a 180° J-turn, and lock the Pro VIP Box!',
+    maneuverType: 'valet_gauntlet',
+    plazaWidth: 24,
+    startZ: 8,
+    endZ: -68,
+    spawn: { x: 0, z: 3, heading: -Math.PI / 2, gear: 'D' },
+    targetBay: {
+      x: 0.0,
+      z: -53,
+      heading: Math.PI / 2, // Reverse-facing after 180° pivot
+      width: 3.45,
+      length: 5.4,
+      angleToleranceDeg: 13,
+      distToleranceM: 1.05,
+      allowEitherDirection: false,
+      label: 'MASTER VIP',
+    },
+    parkedCars: [
+      { id: 1201, x: -4.0, z: -53, heading: Math.PI / 2, kind: 'sports', color: '#f43f5e', halfWidth: 0.96, halfLength: 1.95 },
+      { id: 1202, x: 4.0, z: -53, heading: Math.PI / 2, kind: 'sports', color: '#06b6d4', halfWidth: 0.96, halfLength: 1.95 },
+    ],
+    cones: [
+      { id: 1, x: -5.2, z: -31, knocked: false, vx: 0, vz: 0 },
+      { id: 2, x: 5.2, z: -31, knocked: false, vx: 0, vz: 0 },
+      { id: 3, x: -2.4, z: -47, knocked: false, vx: 0, vz: 0 },
+      { id: 4, x: 2.4, z: -47, knocked: false, vx: 0, vz: 0 },
+    ],
+    barriers: [
+      { id: 1, x: 3.4, z: -13, halfW: 0.55, halfL: 3.4, heading: 0 },
+      { id: 2, x: -3.4, z: -24, halfW: 0.55, halfL: 3.4, heading: 0 },
+      { id: 3, x: 0.0, z: -39, halfW: 0.7, halfL: 0.7, heading: 0 },
+    ],
+    slalomGates: [
+      { id: 1, x: -3.2, z: -13, halfWidth: 2.5, passed: false, label: 'CHICANE 1' },
+      { id: 2, x: 3.2, z: -24, halfWidth: 2.5, passed: false, label: 'CHICANE 2' },
     ],
   },
 ];
