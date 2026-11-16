@@ -7405,18 +7405,37 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             const suspScale = Math.max(0.86, 1 - Math.max(0, suspensionY) * 0.65);
             const shadowRx = carDrawW * 0.42 * suspScale;
             const shadowRy = carDrawH * 0.14 * suspScale;
-            ctx.globalAlpha = 0.44;
-            ctx.fillStyle = '#020617';
+            ctx.save();
+            ctx.translate(cx, shadowCy);
+            ctx.rotate(heroRollRad * 0.6);
+            ctx.scale(1, Math.max(0.05, shadowRy / Math.max(1, shadowRx)));
+            const heroShGrad = ctx.createRadialGradient(0, 0, shadowRx * 0.15, 0, 0, shadowRx * 1.25);
+            heroShGrad.addColorStop(0, 'rgba(2, 6, 23, 0.56)');
+            heroShGrad.addColorStop(0.45, 'rgba(2, 6, 23, 0.40)');
+            heroShGrad.addColorStop(0.75, 'rgba(2, 6, 23, 0.15)');
+            heroShGrad.addColorStop(1, 'rgba(2, 6, 23, 0)');
+            ctx.fillStyle = heroShGrad;
             ctx.beginPath();
-            ctx.ellipse(cx, shadowCy, shadowRx, shadowRy, heroRollRad * 0.6, 0, Math.PI * 2);
+            ctx.arc(0, 0, shadowRx * 1.25, 0, Math.PI * 2);
             ctx.fill();
+            ctx.restore();
 
             if (cachedAppearance.underglowHex) {
-              ctx.globalAlpha = isFever ? 0.38 : 0.24;
-              ctx.fillStyle = cachedAppearance.underglowHex;
+              ctx.save();
+              ctx.translate(cx, shadowCy);
+              ctx.rotate(heroRollRad * 0.6);
+              ctx.scale(1, Math.max(0.05, (shadowRy * 1.25) / Math.max(1, shadowRx * 1.18)));
+              const heroUgGrad = ctx.createRadialGradient(0, 0, shadowRx * 0.3, 0, 0, shadowRx * 1.3);
+              const ugA = isFever ? '66' : '4d';
+              const ugB = isFever ? '2e' : '1f';
+              heroUgGrad.addColorStop(0, cachedAppearance.underglowHex + ugA);
+              heroUgGrad.addColorStop(0.6, cachedAppearance.underglowHex + ugB);
+              heroUgGrad.addColorStop(1, cachedAppearance.underglowHex + '00');
+              ctx.fillStyle = heroUgGrad;
               ctx.beginPath();
-              ctx.ellipse(cx, shadowCy, shadowRx * 1.18, shadowRy * 1.25, heroRollRad * 0.6, 0, Math.PI * 2);
+              ctx.arc(0, 0, shadowRx * 1.3, 0, Math.PI * 2);
               ctx.fill();
+              ctx.restore();
             }
 
             // Twin red taillight / brake-light ground reflection bounce

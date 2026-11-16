@@ -619,6 +619,73 @@ export function computeAutomotiveNormalShade(
   return Math.max(0.8, Math.min(1.25, 0.92 + sunDot * 0.19 + fresnel + groundBounce));
 }
 
+export interface AutomotivePaintResponse {
+  shade: number;
+  envR: number;
+  envG: number;
+  envB: number;
+  envMix: number;
+}
+
+const PAINT_SUN_X = 0.316;
+const PAINT_SUN_Y = 0.88;
+const PAINT_SUN_Z = 0.384;
+
+// Clearcoat paint response: base lambert/fresnel shade PLUS a procedural
+// environment reflection (sky gradient above the horizon, asphalt below,
+// warm sun glint) mixed in at grazing angles — realistic metallic paint.
+export function computeAutomotivePaintResponse(
+  nx: number,
+  ny: number,
+  nz: number,
+  cosY: number,
+  sinY: number,
+  cosP: number,
+  sinP: number
+): AutomotivePaintResponse {
+  const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+  const rnx = (nx / len) * cosY + (nz / len) * sinY;
+  const rny = ny / len;
+  const viewZ = Math.abs((-nx / len * sinY + nz / len * cosY) * cosP + rny * sinP);
+  const sunDot = rnx * 0.28 + rny * 0.78 + viewZ * 0.34;
+  const fresnel = Math.pow(Math.max(0, 1 - viewZ), 2.2) * 0.07;
+  const groundBounce = Math.max(0, -rny) * 0.04;
+  const shade = Math.max(0.8, Math.min(1.25, 0.92 + sunDot * 0.19 + fresnel + groundBounce));
+
+  // Reflect the view vector about the normal, sample the environment.
+  const rx = 2 * viewZ * rnx;
+  const ry = 2 * viewZ * rny;
+  const rz = 2 * viewZ * viewZ - 1;
+  let envR: number;
+  let envG: number;
+  let envB: number;
+  if (ry >= 0) {
+    const t = Math.min(1, ry);
+    envR = 158 - 107 * t;
+    envG = 184 - 97 * t;
+    envB = 219 - 66 * t;
+    const glint = Math.pow(Math.max(0, rx * PAINT_SUN_X + ry * PAINT_SUN_Y + rz * PAINT_SUN_Z), 24);
+    envR += glint * 120;
+    envG += glint * 110;
+    envB += glint * 90;
+  } else {
+    const t = Math.min(1, -ry * 2);
+    envR = 96 - 70 * t;
+    envG = 104 - 76 * t;
+    envB = 122 - 88 * t;
+  }
+  const facing = rny > -0.2 ? 1 : 0.3;
+  const envMix = Math.min(0.34, (0.04 + Math.pow(Math.max(0, 1 - viewZ), 2.0) * 0.3) * facing);
+  return {
+    shade,
+    envR: Math.min(255, envR),
+    envG: Math.min(255, envG),
+    envB: Math.min(255, envB),
+    envMix,
+  };
+}
+
+
 export function getPixelCarCanvas(
   car: CarSpec,
   driftAngleNorm: number, // -1.0 ('\') .. 0 .. +1.0 ('/')
@@ -752,6 +819,8 @@ export function getPixelCarCanvas(
 
     // Preserve exact colWhite (door roundels) & glowing lamps untouched; gently shade car panels by 3D normal + Fresnel
     let shadedCol = col;
+    let flake = false;
+    const flakeSeed = ((a.x * 7 + a.y * 13 + a.z * 3) | 0) & 1023;
     if (
       col !== colWhite &&
       col !== colTail &&
@@ -770,8 +839,18 @@ export function getPixelCarCanvas(
       const nx = uy * vz - uz * vy;
       const ny = uz * vx - ux * vz;
       const nz = ux * vy - uy * vx;
-      const shade = computeAutomotiveNormalShade(nx, ny, nz, cosY, sinY, cosP, sinP);
-      shadedCol = applyCurvatureShade(col, shade);
+      const paint = computeAutomotivePaintResponse(nx, ny, nz, cosY, sinY, cosP, sinP);
+      shadedCol = applyCurvatureShade(col, paint.shade);
+      const glassTri = alpha < 1 || col === colGlassDark || col === colGlassMid || col === colGlassSpec;
+      flake = !glassTri;
+      if (flake && paint.envMix > 0.01) {
+        const m = paint.envMix;
+        const im = 1 - m;
+        const r = ((shadedCol & 0xff) * im + paint.envR * m) | 0;
+        const g = (((shadedCol >>> 8) & 0xff) * im + paint.envG * m) | 0;
+        const b = (((shadedCol >>> 16) & 0xff) * im + paint.envB * m) | 0;
+        shadedCol = 0xff000000 | (b << 16) | (g << 8) | r;
+      }
     }
 
     for (let y = minY; y <= maxY; y++) {
@@ -782,8 +861,22 @@ export function getPixelCarCanvas(
         const w1 = ((p2.x - px) * (p0.y - py) - (p2.y - py) * (p0.x - px)) * invArea;
         const w2 = 1 - w0 - w1;
         if (w0 >= -0.02 && w1 >= -0.02 && w2 >= -0.02) {
+          let outCol = shadedCol;
+          if (flake) {
+            const h = ((x * 73856093) ^ (y * 19349663) ^ flakeSeed) >>> 0;
+            const grain = (((h >>> 16) & 255) - 128) * 0.00035;
+            let r = (outCol & 0xff) * (1 + grain);
+            let g = ((outCol >>> 8) & 0xff) * (1 + grain);
+            let b = ((outCol >>> 16) & 0xff) * (1 + grain);
+            if ((h & 0xffff) > 0xffe8) {
+              r += 16;
+              g += 16;
+              b += 14;
+            }
+            outCol = 0xff000000 | (Math.min(255, b | 0) << 16) | (Math.min(255, g | 0) << 8) | Math.min(255, r | 0);
+          }
           const z = w0 * p0.z + w1 * p1.z + w2 * p2.z + zBias;
-          plot(x, y, z, shadedCol, alpha);
+          plot(x, y, z, outCol, alpha);
         }
       }
     }
@@ -3780,18 +3873,41 @@ export function getPixelCarCanvas(
 
   if (resolved.underglowHex && !isWrecked) {
     ctx.save();
-    ctx.globalAlpha = 0.65;
-    ctx.fillStyle = resolved.underglowHex;
+    ctx.translate(shX, shY + 2);
+    ctx.rotate(shadowTilt);
+    ctx.scale(1, Math.max(0.05, (shRy + 6) / Math.max(1, shRx + 11)));
+    const ugGrad = ctx.createRadialGradient(0, 0, (shRx + 11) * 0.2, 0, 0, (shRx + 11) * 1.15);
+    ugGrad.addColorStop(0, resolved.underglowHex + 'b3');
+    ugGrad.addColorStop(0.55, resolved.underglowHex + '66');
+    ugGrad.addColorStop(1, resolved.underglowHex + '00');
+    ctx.fillStyle = ugGrad;
     ctx.beginPath();
-    ctx.ellipse(shX, shY + 2, shRx + 11, shRy + 6, shadowTilt, 0, Math.PI * 2);
+    ctx.arc(0, 0, (shRx + 11) * 1.15, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
   }
 
-  ctx.fillStyle = isFever ? 'rgba(6, 182, 212, 0.45)' : 'rgba(9, 13, 22, 0.48)';
+  ctx.save();
+  ctx.translate(shX, shY);
+  ctx.rotate(shadowTilt);
+  ctx.scale(1, Math.max(0.05, shRy / Math.max(1, shRx)));
+  const shGrad = ctx.createRadialGradient(0, 0, shRx * 0.18, 0, 0, shRx * 1.22);
+  if (isFever) {
+    shGrad.addColorStop(0, 'rgba(6, 182, 212, 0.50)');
+    shGrad.addColorStop(0.5, 'rgba(6, 182, 212, 0.34)');
+    shGrad.addColorStop(0.78, 'rgba(6, 182, 212, 0.12)');
+    shGrad.addColorStop(1, 'rgba(6, 182, 212, 0)');
+  } else {
+    shGrad.addColorStop(0, 'rgba(5, 8, 16, 0.58)');
+    shGrad.addColorStop(0.45, 'rgba(5, 8, 16, 0.42)');
+    shGrad.addColorStop(0.75, 'rgba(5, 8, 16, 0.16)');
+    shGrad.addColorStop(1, 'rgba(5, 8, 16, 0)');
+  }
+  ctx.fillStyle = shGrad;
   ctx.beginPath();
-  ctx.ellipse(shX, shY, shRx, shRy, shadowTilt, 0, Math.PI * 2);
+  ctx.arc(0, 0, shRx * 1.22, 0, Math.PI * 2);
   ctx.fill();
+  ctx.restore();
 
   // Blit crisp Z-buffered anti-aliased vehicle via reusable scratch canvas!
   if (!heroScratchCanvas) {
@@ -4142,6 +4258,8 @@ export function getTrafficVehicleCanvas(
     const invArea = 1 / area;
 
     let shadedCol = col;
+    let flake = false;
+    const flakeSeed = ((a.x * 7 + a.y * 13 + a.z * 3) | 0) & 1023;
     if (
       col !== colTail &&
       col !== colTailBright &&
@@ -4159,8 +4277,18 @@ export function getTrafficVehicleCanvas(
       const nx = uy * vz - uz * vy;
       const ny = uz * vx - ux * vz;
       const nz = ux * vy - uy * vx;
-      const shade = computeAutomotiveNormalShade(nx, ny, nz, cosY, sinY, cosP, sinP);
-      shadedCol = applyTrafficShade(col, shade);
+      const paint = computeAutomotivePaintResponse(nx, ny, nz, cosY, sinY, cosP, sinP);
+      shadedCol = applyTrafficShade(col, paint.shade);
+      const glassTri = col === colGlassDark || col === colGlassMid || col === colGlassSpec;
+      flake = !glassTri;
+      if (flake && paint.envMix > 0.01) {
+        const m = paint.envMix;
+        const im = 1 - m;
+        const r = ((shadedCol & 0xff) * im + paint.envR * m) | 0;
+        const g = (((shadedCol >>> 8) & 0xff) * im + paint.envG * m) | 0;
+        const b = (((shadedCol >>> 16) & 0xff) * im + paint.envB * m) | 0;
+        shadedCol = 0xff000000 | (b << 16) | (g << 8) | r;
+      }
     }
 
     for (let y = minY; y <= maxY; y++) {
@@ -4171,7 +4299,21 @@ export function getTrafficVehicleCanvas(
         const w1 = ((p2.x - px) * (p0.y - py) - (p2.y - py) * (p0.x - px)) * invArea;
         const w2 = 1 - w0 - w1;
         if (w0 >= -0.02 && w1 >= -0.02 && w2 >= -0.02) {
-          plot(x, y, w0 * p0.z + w1 * p1.z + w2 * p2.z + zBias, shadedCol);
+          let outCol = shadedCol;
+          if (flake) {
+            const h = ((x * 73856093) ^ (y * 19349663) ^ flakeSeed) >>> 0;
+            const grain = (((h >>> 16) & 255) - 128) * 0.00035;
+            let r = (outCol & 0xff) * (1 + grain);
+            let g = ((outCol >>> 8) & 0xff) * (1 + grain);
+            let b = ((outCol >>> 16) & 0xff) * (1 + grain);
+            if ((h & 0xffff) > 0xffe8) {
+              r += 16;
+              g += 16;
+              b += 14;
+            }
+            outCol = 0xff000000 | (Math.min(255, b | 0) << 16) | (Math.min(255, g | 0) << 8) | Math.min(255, r | 0);
+          }
+          plot(x, y, w0 * p0.z + w1 * p1.z + w2 * p2.z + zBias, outCol);
         }
       }
     }
