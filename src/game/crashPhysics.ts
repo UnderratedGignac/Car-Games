@@ -78,19 +78,20 @@ export function evaluateGuardrailImpact({
   overallIntegrity = 100,
 }: GuardrailImpactParams): GuardrailImpactOutcome {
   const safeOutward = Math.max(0, outwardLateralSpeed);
-  const hitQuality = Math.max(0, Math.min(1, safeOutward / 10.5));
-  const integrityFactor = overallIntegrity < 65 ? 0.85 : 1.0;
+  const hitQuality = Math.max(0, Math.min(1, safeOutward / 8.5));
+  const integrityFactor = overallIntegrity < 75 ? 0.8 : 1.0;
 
-  // Guardrail only breaches & wrecks the car when speed is high AND it is slammed well into the rail
-  const isHighSpeed = playerSpeed >= 24.0 * integrityFactor;
-  const isWellHit = safeOutward >= 6.5 * integrityFactor;
-  const shouldBreach = isHighSpeed && isWellHit;
+  // Guardrail breaks through when slammed at racing speed with decisive outward angle (or when chassis is weakened)
+  const isHighSpeed = playerSpeed >= 17.5 * integrityFactor;
+  const isWellHit = safeOutward >= 3.8 * integrityFactor;
+  const weakenedBreach = overallIntegrity <= 65 && playerSpeed >= 11.0 && safeOutward >= 2.2;
+  const shouldBreach = (isHighSpeed && isWellHit) || weakenedBreach;
 
   return {
     shouldBreach,
     hitQuality: Number(hitQuality.toFixed(3)),
-    impactSpeed: Number((safeOutward * 1.65 + playerSpeed * 0.25).toFixed(2)),
-    scrubbedSpeedFactor: shouldBreach ? 0.86 : safeOutward > 4.0 ? 0.84 : 0.92,
+    impactSpeed: Number((safeOutward * 1.8 + playerSpeed * 0.32).toFixed(2)),
+    scrubbedSpeedFactor: shouldBreach ? 0.82 : safeOutward > 3.5 ? 0.84 : 0.92,
     inwardBounceLatVel: Math.max(3.5, safeOutward * 0.52 + 2.2),
   };
 }
@@ -349,4 +350,402 @@ export function stepTrafficCrashBody(
   }
 
   return { hitRail, bouncedGround };
+}
+
+export interface Obb2D {
+  x: number;
+  z: number;
+  heading: number;
+  halfLength: number;
+  halfWidth: number;
+}
+
+export interface ObbContact2D {
+  hit: boolean;
+  overlap: number;
+  normalX: number;
+  normalZ: number;
+}
+
+/**
+ * Computes exact 2D Separating Axis Theorem (SAT) overlap between two oriented bounding boxes.
+ * Normal always points from `b` toward `a` (direction to push `a` out of `b`).
+ */
+export function computeObbOverlap2D(
+  a: Obb2D,
+  b: Obb2D,
+  out: ObbContact2D = { hit: false, overlap: 0, normalX: 0, normalZ: 0 }
+): ObbContact2D {
+  const axF = Math.cos(a.heading);
+  const azF = Math.sin(a.heading);
+  const axR = -azF;
+  const azR = axF;
+
+  const bxF = Math.cos(b.heading);
+  const bzF = Math.sin(b.heading);
+  const bxR = -bzF;
+  const bzR = bxF;
+
+  const dx = a.x - b.x;
+  const dz = a.z - b.z;
+
+  let minOverlap = Infinity;
+  let bestNx = 0;
+  let bestNz = 0;
+
+  // Test the 4 SAT axes: aF, aR, bF, bR
+  for (let axisIdx = 0; axisIdx < 4; axisIdx++) {
+    const nx = axisIdx === 0 ? axF : axisIdx === 1 ? axR : axisIdx === 2 ? bxF : bxR;
+    const nz = axisIdx === 0 ? azF : axisIdx === 1 ? azR : axisIdx === 2 ? bzF : bzR;
+
+    const projA =
+      a.halfLength * Math.abs(axF * nx + azF * nz) +
+      a.halfWidth * Math.abs(axR * nx + azR * nz);
+    const projB =
+      b.halfLength * Math.abs(bxF * nx + bzF * nz) +
+      b.halfWidth * Math.abs(bxR * nx + bzR * nz);
+
+    const centerDist = dx * nx + dz * nz;
+    const overlap = projA + projB - Math.abs(centerDist);
+    if (overlap <= 0) {
+      out.hit = false;
+      out.overlap = 0;
+      out.normalX = 0;
+      out.normalZ = 0;
+      return out;
+    }
+
+    if (overlap < minOverlap) {
+      minOverlap = overlap;
+      const sign = centerDist >= 0 ? 1 : -1;
+      bestNx = nx * sign;
+      bestNz = nz * sign;
+    }
+  }
+
+  out.hit = true;
+  out.overlap = minOverlap;
+  out.normalX = bestNx;
+  out.normalZ = bestNz;
+  return out;
+}
+
+export interface SolidGuardrailParams {
+  vx: number;
+  vz: number;
+  heading: number;
+  tx: number;
+  tz: number;
+  nx: number;
+  nz: number;
+  roadHeading: number;
+  signedPerpOffset: number;
+  maxCenterLat: number;
+}
+
+export interface SolidGuardrailOutcome {
+  hit: boolean;
+  railSide: -1 | 1;
+  clampedLat: number;
+  outwardSpeed: number;
+  nextVx: number;
+  nextVz: number;
+  nextHeading: number;
+}
+
+/**
+ * Resolves solid barrier/guardrail containment without ever allowing the car body
+ * to phase through the rail. Reflects outward lateral velocity and bleeds tangential scrape speed.
+ */
+export function resolveSolidGuardrailContact(
+  params: SolidGuardrailParams
+): SolidGuardrailOutcome {
+  const {
+    vx,
+    vz,
+    heading,
+    tx,
+    tz,
+    nx,
+    nz,
+    roadHeading,
+    signedPerpOffset,
+    maxCenterLat,
+  } = params;
+
+  const railSide: -1 | 1 = signedPerpOffset >= 0 ? 1 : -1;
+  const safeMax = Math.max(0.8, maxCenterLat);
+  if (Math.abs(signedPerpOffset) <= safeMax) {
+    return {
+      hit: false,
+      railSide,
+      clampedLat: signedPerpOffset,
+      outwardSpeed: 0,
+      nextVx: vx,
+      nextVz: vz,
+      nextHeading: heading,
+    };
+  }
+
+  const clampedLat = railSide * safeMax;
+  const vFwd = vx * tx + vz * tz;
+  const vLat = vx * nx + vz * nz;
+  const outwardSpeed = Math.max(0, vLat * railSide);
+
+  // Realistic steel/concrete barrier friction & deflection:
+  // Shallow scrape loses minimal speed; heavy angled slam bleeds up to ~35% speed and bounces inward.
+  const impactRatio = Math.min(1, outwardSpeed / 14);
+  const fwdKeepFactor = Math.max(0.62, 0.94 - impactRatio * 0.28);
+  const nextFwd = Math.max(4.5, vFwd * fwdKeepFactor);
+  const restitution = outwardSpeed > 4.0 ? 0.36 : 0.24;
+  const inwardBounce = Math.max(1.2, outwardSpeed * restitution + 1.0);
+  const nextLat = -railSide * inwardBounce;
+
+  const nextVx = tx * nextFwd + nx * nextLat;
+  const nextVz = tz * nextFwd + nz * nextLat;
+
+  // Gently deflect heading back parallel to the barrier wall
+  let diff = roadHeading - heading;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  let nextHeading = heading + diff * (0.35 + impactRatio * 0.25);
+  while (nextHeading > Math.PI) nextHeading -= Math.PI * 2;
+  while (nextHeading < -Math.PI) nextHeading += Math.PI * 2;
+
+  return {
+    hit: true,
+    railSide,
+    clampedLat,
+    outwardSpeed: Number(outwardSpeed.toFixed(2)),
+    nextVx,
+    nextVz,
+    nextHeading,
+  };
+}
+
+export interface HighwaySolidContactOutcome {
+  primaryCar: TrafficCarState | null;
+  impactSpeed: number;
+  hitQuality: number;
+  sideBias: -1 | 1;
+  nextPlayerS: number;
+  nextPlayerLat: number;
+  nextPlayerFwdVel: number;
+  nextPlayerLatVel: number;
+}
+
+const obbScratchA: Obb2D = { x: 0, z: 0, heading: 0, halfLength: 1.9, halfWidth: 0.88 };
+const obbScratchB: Obb2D = { x: 0, z: 0, heading: 0, halfLength: 1.9, halfWidth: 0.94 };
+const obbContactScratch: ObbContact2D = { hit: false, overlap: 0, normalX: 0, normalZ: 0 };
+
+/**
+ * Solves solid 2D OBB-vs-OBB collisions in road (s, lat) frame between the player
+ * and ALL nearby traffic vehicles (including crashed & cooldown cars), preventing any ghosting.
+ */
+export function resolveHighwayTrafficSolidPass(params: {
+  playerS: number;
+  playerLat: number;
+  playerHeadingRelRoad: number;
+  playerFwdVel: number;
+  playerLatVel: number;
+  playerHalfLength?: number;
+  playerHalfWidth?: number;
+  playerMass?: number;
+  roadHalfWidth: number;
+  trafficCars: TrafficCarState[];
+}): HighwaySolidContactOutcome {
+  const {
+    playerHalfLength = 1.88,
+    playerHalfWidth = 0.86,
+    playerMass = 1.32,
+    roadHalfWidth,
+    trafficCars,
+  } = params;
+
+  let curS = params.playerS;
+  let curLat = params.playerLat;
+  let vFwd = params.playerFwdVel;
+  let vLat = params.playerLatVel;
+
+  let primaryCar: TrafficCarState | null = null;
+  let maxImpactSpeed = 0;
+  let maxHitQuality = 0;
+  let bestSideBias: -1 | 1 = 1;
+
+  // Road coordinates mapped to Obb2D: x -> lateralOffset, z -> s, heading=PI/2 -> forward along +s
+  obbScratchA.halfLength = playerHalfLength;
+  obbScratchA.halfWidth = playerHalfWidth;
+  obbScratchA.heading = Math.PI * 0.5 + params.playerHeadingRelRoad;
+
+  for (let iter = 0; iter < 3; iter++) {
+    let anyThisIter = false;
+    for (let i = 0; i < trafficCars.length; i++) {
+      const car = trafficCars[i];
+      if (Math.abs(car.s - curS) > 8.5) continue;
+
+      obbScratchA.x = curLat;
+      obbScratchA.z = curS;
+
+      obbScratchB.x = car.lateralOffset;
+      obbScratchB.z = car.s;
+      obbScratchB.halfLength = car.halfLength;
+      obbScratchB.halfWidth = car.halfWidth;
+      obbScratchB.heading = car.crashed
+        ? Math.PI * 0.5 + (car.crashYaw ?? 0)
+        : Math.PI * 0.5 + (car.crashYaw ?? 0) * 0.5;
+
+      const contact = computeObbOverlap2D(obbScratchA, obbScratchB, obbContactScratch);
+      if (!contact.hit) continue;
+
+      anyThisIter = true;
+      const tMass = getTrafficVehicleMass(car.kind);
+      const invP = 1 / playerMass;
+      const invT = 1 / tMass;
+      const invSum = invP + invT;
+
+      // Separate both vehicles proportionally to inverse mass; clamp traffic inside rails
+      const pushDist = contact.overlap + 0.02;
+      const pShare = invP / invSum;
+      const tShare = invT / invSum;
+
+      // If traffic is pushed into guardrail, player absorbs remaining separation
+      const prevCarLat = car.lateralOffset;
+      const maxCarLat = Math.max(1.0, roadHalfWidth - car.halfWidth - 0.14);
+      const rawCarLat = prevCarLat - contact.normalX * pushDist * tShare;
+      const clampedCarLat = Math.max(-maxCarLat, Math.min(maxCarLat, rawCarLat));
+      const clampedExcess = Math.abs(rawCarLat - clampedCarLat);
+
+      car.lateralOffset = clampedCarLat;
+      car.s -= contact.normalZ * pushDist * tShare;
+
+      curS += contact.normalZ * pushDist * pShare;
+      curLat += contact.normalX * (pushDist * pShare + clampedExcess);
+
+      // Keep player inside rails too
+      const maxPlayerLat = Math.max(1.0, roadHalfWidth - playerHalfWidth - 0.12);
+      if (Math.abs(curLat) > maxPlayerLat) {
+        const overflow = Math.abs(curLat) - maxPlayerLat;
+        const pSign = curLat >= 0 ? 1 : -1;
+        curLat = pSign * maxPlayerLat;
+        // Push traffic car further away if pinched against rail
+        car.lateralOffset = Math.max(
+          -maxCarLat,
+          Math.min(maxCarLat, car.lateralOffset - pSign * overflow * 0.9)
+        );
+      }
+
+      // Compute relative closing velocity along contact normal
+      const carVelS = car.crashed
+        ? car.crashVs ?? 0
+        : car.isOncoming
+        ? -car.speed
+        : car.speed;
+      const carVelLat = car.crashed ? car.crashVelLat ?? 0 : 0;
+
+      const relVx = vLat - carVelLat;
+      const relVz = vFwd - carVelS;
+      const vn = relVx * contact.normalX + relVz * contact.normalZ;
+
+      if (vn < 0) {
+        const closing = -vn;
+        const restitution = 0.28;
+        const j = (-(1 + restitution) * vn) / invSum;
+
+        vLat += j * invP * contact.normalX;
+        vFwd += j * invP * contact.normalZ;
+
+        if (car.crashed) {
+          car.crashVelLat = carVelLat - j * invT * contact.normalX;
+          car.crashVs = carVelS - j * invT * contact.normalZ;
+        } else {
+          // Nudge non-crashed traffic car slightly off trajectory without destroying it
+          const latKick = -j * invT * contact.normalX * 0.45;
+          car.lateralOffset = Math.max(
+            -maxCarLat,
+            Math.min(maxCarLat, car.lateralOffset + latKick * 0.04)
+          );
+          if (Math.abs(contact.normalZ) > 0.5) {
+            car.s -= (j * invT * contact.normalZ) * 0.04;
+          }
+        }
+
+        const dLat = curLat - car.lateralOffset;
+        const overlapFrac = Math.max(0, Math.min(1, 1 - Math.abs(dLat) / Math.max(0.8, car.halfWidth + playerHalfWidth)));
+        if (closing > maxImpactSpeed || !primaryCar) {
+          primaryCar = car;
+          maxImpactSpeed = Math.max(maxImpactSpeed, closing);
+          maxHitQuality = Math.max(maxHitQuality, overlapFrac);
+          bestSideBias = dLat >= 0 ? 1 : -1;
+        }
+      } else if (!primaryCar) {
+        const dLat = curLat - car.lateralOffset;
+        const overlapFrac = Math.max(0, Math.min(1, 1 - Math.abs(dLat) / Math.max(0.8, car.halfWidth + playerHalfWidth)));
+        primaryCar = car;
+        maxHitQuality = overlapFrac;
+        bestSideBias = dLat >= 0 ? 1 : -1;
+      }
+    }
+    if (!anyThisIter) break;
+  }
+
+  return {
+    primaryCar,
+    impactSpeed: Number(maxImpactSpeed.toFixed(2)),
+    hitQuality: Number(maxHitQuality.toFixed(3)),
+    sideBias: bestSideBias,
+    nextPlayerS: curS,
+    nextPlayerLat: curLat,
+    nextPlayerFwdVel: vFwd,
+    nextPlayerLatVel: vLat,
+  };
+}
+
+/**
+ * Ensures nearby traffic vehicles maintain solid physical separation from each other
+ * (so yielding, slowing, or crashed traffic cars never overlap or ghost through each other).
+ */
+export function resolveTrafficInterCarSpacing(
+  trafficCars: TrafficCarState[],
+  roadHalfWidth: number
+): void {
+  const n = trafficCars.length;
+  for (let i = 0; i < n; i++) {
+    const a = trafficCars[i];
+    for (let j = i + 1; j < n; j++) {
+      const b = trafficCars[j];
+      const ds = a.s - b.s;
+      const minSepS = a.halfLength + b.halfLength + 0.25;
+      if (Math.abs(ds) >= minSepS) continue;
+
+      const dLat = a.lateralOffset - b.lateralOffset;
+      const minSepLat = a.halfWidth + b.halfWidth + 0.12;
+      if (Math.abs(dLat) >= minSepLat) continue;
+
+      const penS = minSepS - Math.abs(ds);
+      const penLat = minSepLat - Math.abs(dLat);
+      const sameLane = Math.abs(dLat) < (a.halfWidth + b.halfWidth) * 0.65;
+
+      if (sameLane || penS < penLat) {
+        const signS = ds >= 0 ? 1 : -1;
+        const shift = penS * 0.5 + 0.02;
+        a.s += signS * shift;
+        b.s -= signS * shift;
+        if (!a.crashed && !b.crashed && a.isOncoming === b.isOncoming) {
+          // Match speed of leading same-direction vehicle smoothly on bumper touch
+          if ((a.isOncoming && ds < 0) || (!a.isOncoming && ds > 0)) {
+            b.speed = Math.min(b.speed, a.speed);
+          } else {
+            a.speed = Math.min(a.speed, b.speed);
+          }
+        }
+      } else {
+        const signLat = dLat >= 0 ? 1 : -1;
+        const shift = penLat * 0.5 + 0.02;
+        const maxA = Math.max(1.0, roadHalfWidth - a.halfWidth - 0.14);
+        const maxB = Math.max(1.0, roadHalfWidth - b.halfWidth - 0.14);
+        a.lateralOffset = Math.max(-maxA, Math.min(maxA, a.lateralOffset + signLat * shift));
+        b.lateralOffset = Math.max(-maxB, Math.min(maxB, b.lateralOffset - signLat * shift));
+      }
+    }
+  }
 }

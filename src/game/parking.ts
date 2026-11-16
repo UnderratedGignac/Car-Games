@@ -4,6 +4,7 @@
  */
 
 import { TrafficVehicleKind, normalizeAngle } from './rules';
+import { computeObbOverlap2D, type Obb2D, type ObbContact2D } from './crashPhysics';
 
 export type ParkingGear = 'P' | 'R' | 'D';
 
@@ -354,97 +355,141 @@ export function stepParkingObstacles(
     }
   }
 
-  // 3. Solid parked cars (oriented box check in car local frame -> push out smoothly)
-  for (let i = 0; i < stage.parkedCars.length; i++) {
-    const oc = stage.parkedCars[i];
-    const cosH = Math.cos(-oc.heading);
-    const sinH = Math.sin(-oc.heading);
-    const rx = state.x - oc.x;
-    const rz = state.z - oc.z;
-    // Note: in our coordinate convention, oc.heading points forward along (cos(h), sin(h))
-    const localLong = rx * Math.cos(oc.heading) + rz * Math.sin(oc.heading);
-    const localLat = -rx * Math.sin(oc.heading) + rz * Math.cos(oc.heading);
+  // 3. Solid 2D OBB-vs-OBB SAT solver (3 iterations) against parked cars, Jersey barriers, and perimeter curbs
+  const playerHalfL = 1.94;
+  const playerHalfW = 0.90;
+  const halfPlaza = stage.plazaWidth * 0.5;
+  const minPlazaZ = stage.endZ - 8;
+  const maxPlazaZ = stage.startZ + 8;
 
-    const padLong = oc.halfLength + 1.15;
-    const padLat = oc.halfWidth + 0.85;
-    if (Math.abs(localLong) < padLong && Math.abs(localLat) < padLat) {
-      const penLong = padLong - Math.abs(localLong);
-      const penLat = padLat - Math.abs(localLat);
-      let pushLocalLong = 0;
-      let pushLocalLat = 0;
-      if (penLat < penLong) {
-        pushLocalLat = (localLat >= 0 ? 1 : -1) * (penLat + 0.04);
-      } else {
-        pushLocalLong = (localLong >= 0 ? 1 : -1) * (penLong + 0.04);
-      }
-      const fwdX = Math.cos(oc.heading);
-      const fwdZ = Math.sin(oc.heading);
-      const rgtX = -fwdZ;
-      const rgtZ = fwdX;
-      state.x += fwdX * pushLocalLong + rgtX * pushLocalLat;
-      state.z += fwdZ * pushLocalLong + rgtZ * pushLocalLat;
+  const playerObb: Obb2D = {
+    x: state.x,
+    z: state.z,
+    heading: state.heading,
+    halfLength: playerHalfL,
+    halfWidth: playerHalfW,
+  };
+  const obstacleObb: Obb2D = { x: 0, z: 0, heading: 0, halfLength: 1, halfWidth: 1 };
+  const contactOut: ObbContact2D = { hit: false, overlap: 0, normalX: 0, normalZ: 0 };
 
-      const curSpd = Math.hypot(state.vx, state.vz);
-      if (curSpd > 0.75) {
-        carBump = true;
-        impactSpeed = Math.max(impactSpeed, curSpd);
-      }
-      // Dampen velocity away from obstacle
-      const normX = pushLocalLong !== 0 ? fwdX * Math.sign(pushLocalLong) : rgtX * Math.sign(pushLocalLat);
-      const normZ = pushLocalLong !== 0 ? fwdZ * Math.sign(pushLocalLong) : rgtZ * Math.sign(pushLocalLat);
-      const vNorm = state.vx * normX + state.vz * normZ;
-      if (vNorm < 0) {
-        state.vx -= normX * vNorm * 1.35;
-        state.vz -= normZ * vNorm * 1.35;
-        state.speed *= -0.25;
-      }
-      void cosH;
-      void sinH;
+  const applySolidSurfaceImpulse = (nx: number, nz: number, restitution = 0.22) => {
+    const vNorm = state.vx * nx + state.vz * nz;
+    if (vNorm < 0) {
+      const closing = -vNorm;
+      // Preserve tangential sliding friction while bouncing normal component solidly
+      const vTanX = state.vx - vNorm * nx;
+      const vTanZ = state.vz - vNorm * nz;
+      const tanFriction = 0.88;
+      const rebound = closing > 1.2 ? closing * restitution : 0;
+      state.vx = vTanX * tanFriction + nx * rebound;
+      state.vz = vTanZ * tanFriction + nz * rebound;
+      const fwdX = Math.cos(state.heading);
+      const fwdZ = Math.sin(state.heading);
+      state.speed = state.vx * fwdX + state.vz * fwdZ;
+      return closing;
     }
-  }
+    return 0;
+  };
 
-  // 4. Concrete Jersey Barriers
-  for (let i = 0; i < stage.barriers.length; i++) {
-    const b = stage.barriers[i];
-    const rx = state.x - b.x;
-    const rz = state.z - b.z;
-    const fwdX = Math.cos(b.heading);
-    const fwdZ = Math.sin(b.heading);
-    const rgtX = -fwdZ;
-    const rgtZ = fwdX;
+  for (let iter = 0; iter < 3; iter++) {
+    let anyContact = false;
 
-    const localLong = rx * fwdX + rz * fwdZ;
-    const localLat = rx * rgtX + rz * rgtZ;
-    const padLong = b.halfL + 0.92;
-    const padLat = b.halfW + 0.92;
+    // 3a. Parked obstacle cars (exact oriented car rectangles)
+    for (let i = 0; i < stage.parkedCars.length; i++) {
+      const oc = stage.parkedCars[i];
+      playerObb.x = state.x;
+      playerObb.z = state.z;
+      obstacleObb.x = oc.x;
+      obstacleObb.z = oc.z;
+      obstacleObb.heading = oc.heading;
+      obstacleObb.halfLength = oc.halfLength;
+      obstacleObb.halfWidth = oc.halfWidth;
 
-    if (Math.abs(localLong) < padLong && Math.abs(localLat) < padLat) {
-      const penLong = padLong - Math.abs(localLong);
-      const penLat = padLat - Math.abs(localLat);
-      let pushLong = 0;
-      let pushLat = 0;
-      if (penLat < penLong) {
-        pushLat = (localLat >= 0 ? 1 : -1) * (penLat + 0.04);
-      } else {
-        pushLong = (localLong >= 0 ? 1 : -1) * (penLong + 0.04);
+      const c = computeObbOverlap2D(playerObb, obstacleObb, contactOut);
+      if (c.hit) {
+        anyContact = true;
+        state.x += c.normalX * (c.overlap + 0.015);
+        state.z += c.normalZ * (c.overlap + 0.015);
+        const curSpd = Math.hypot(state.vx, state.vz);
+        const closing = applySolidSurfaceImpulse(c.normalX, c.normalZ, 0.24);
+        if (Math.max(curSpd, closing) > 0.65) {
+          carBump = true;
+          impactSpeed = Math.max(impactSpeed, curSpd, closing);
+        }
       }
-      state.x += fwdX * pushLong + rgtX * pushLat;
-      state.z += fwdZ * pushLong + rgtZ * pushLat;
+    }
 
-      const curSpd = Math.hypot(state.vx, state.vz);
-      if (curSpd > 0.75) {
+    // 3b. Concrete Jersey Barriers
+    for (let i = 0; i < stage.barriers.length; i++) {
+      const b = stage.barriers[i];
+      playerObb.x = state.x;
+      playerObb.z = state.z;
+      obstacleObb.x = b.x;
+      obstacleObb.z = b.z;
+      obstacleObb.heading = b.heading;
+      obstacleObb.halfLength = b.halfL;
+      obstacleObb.halfWidth = b.halfW;
+
+      const c = computeObbOverlap2D(playerObb, obstacleObb, contactOut);
+      if (c.hit) {
+        anyContact = true;
+        state.x += c.normalX * (c.overlap + 0.015);
+        state.z += c.normalZ * (c.overlap + 0.015);
+        const curSpd = Math.hypot(state.vx, state.vz);
+        const closing = applySolidSurfaceImpulse(c.normalX, c.normalZ, 0.22);
+        if (Math.max(curSpd, closing) > 0.65) {
+          barrierHit = true;
+          impactSpeed = Math.max(impactSpeed, curSpd, closing);
+        }
+      }
+    }
+
+    // 3c. Solid parking deck perimeter curbs / end walls (accounting for rotated car bumper corners!)
+    const cosH = Math.abs(Math.cos(state.heading));
+    const sinH = Math.abs(Math.sin(state.heading));
+    const extentX = cosH * playerHalfL + sinH * playerHalfW;
+    const extentZ = sinH * playerHalfL + cosH * playerHalfW;
+
+    const maxCenterX = Math.max(1.5, halfPlaza - extentX - 0.05);
+    if (state.x > maxCenterX) {
+      anyContact = true;
+      state.x = maxCenterX;
+      const closing = applySolidSurfaceImpulse(-1, 0, 0.2);
+      if (closing > 0.85) {
         barrierHit = true;
-        impactSpeed = Math.max(impactSpeed, curSpd);
+        impactSpeed = Math.max(impactSpeed, closing);
       }
-      const normX = pushLong !== 0 ? fwdX * Math.sign(pushLong) : rgtX * Math.sign(pushLat);
-      const normZ = pushLong !== 0 ? fwdZ * Math.sign(pushLong) : rgtZ * Math.sign(pushLat);
-      const vNorm = state.vx * normX + state.vz * normZ;
-      if (vNorm < 0) {
-        state.vx -= normX * vNorm * 1.35;
-        state.vz -= normZ * vNorm * 1.35;
-        state.speed *= -0.25;
+    } else if (state.x < -maxCenterX) {
+      anyContact = true;
+      state.x = -maxCenterX;
+      const closing = applySolidSurfaceImpulse(1, 0, 0.2);
+      if (closing > 0.85) {
+        barrierHit = true;
+        impactSpeed = Math.max(impactSpeed, closing);
       }
     }
+
+    const minCenterZ = minPlazaZ + extentZ + 0.05;
+    const maxCenterZ = maxPlazaZ - extentZ - 0.05;
+    if (state.z < minCenterZ) {
+      anyContact = true;
+      state.z = minCenterZ;
+      const closing = applySolidSurfaceImpulse(0, 1, 0.2);
+      if (closing > 0.85) {
+        barrierHit = true;
+        impactSpeed = Math.max(impactSpeed, closing);
+      }
+    } else if (state.z > maxCenterZ) {
+      anyContact = true;
+      state.z = maxCenterZ;
+      const closing = applySolidSurfaceImpulse(0, -1, 0.2);
+      if (closing > 0.85) {
+        barrierHit = true;
+        impactSpeed = Math.max(impactSpeed, closing);
+      }
+    }
+
+    if (!anyContact) break;
   }
 
   return {
@@ -484,6 +529,8 @@ export function evaluateParkingProximity(
   };
 
   const halfPlaza = stage.plazaWidth * 0.5;
+  const minPlazaZ = stage.endZ - 8;
+  const maxPlazaZ = stage.startZ + 8;
   const sensorRange = 3.2;
 
   for (let c = 0; c < corners.length; c++) {
@@ -491,7 +538,12 @@ export function evaluateParkingProximity(
     const wx = state.x + fwdX * corner.l + rgtX * corner.r;
     const wz = state.z + fwdZ * corner.l + rgtZ * corner.r;
 
-    let minDist = Math.min(Math.abs(halfPlaza - wx), Math.abs(-halfPlaza - wx));
+    let minDist = Math.min(
+      Math.max(0, halfPlaza - wx),
+      Math.max(0, wx + halfPlaza),
+      Math.max(0, wz - minPlazaZ),
+      Math.max(0, maxPlazaZ - wz)
+    );
 
     for (let i = 0; i < stage.parkedCars.length; i++) {
       const oc = stage.parkedCars[i];

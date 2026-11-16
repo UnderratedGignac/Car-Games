@@ -17,9 +17,9 @@ import {
   repairSinglePart,
 } from './damage';
 
-test('createMintDamageState initializes all 8 detachable parts at 100% integrity', () => {
+test('createMintDamageState initializes all 12 detachable parts at 100% integrity', () => {
   const mint = createMintDamageState();
-  assert.equal(CAR_PART_IDS.length, 8);
+  assert.equal(CAR_PART_IDS.length, 12);
   assert.equal(getCarOverallIntegrity(mint), 100);
   assert.equal(getDamageVisualCacheKey(mint), 'mint');
   assert.equal(isCarTotaled(mint), false);

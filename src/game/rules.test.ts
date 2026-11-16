@@ -23,6 +23,7 @@ import {
   generateHighwayTrack,
   extendHighwayTrack,
   sampleTrackAtS,
+  sampleSCurveSurface,
   generateTrafficBatch,
   evaluateTrafficInteraction,
   VALLEY_BASE_Y,
@@ -1443,6 +1444,65 @@ test('getAdaptiveHighwayTrafficDensity slightly increases traffic density only i
   assert.ok(
     boostedBatch.cars.length <= baselineBatch.cars.length * 1.25,
     'Density increase must stay modest while preserving safe passing gaps'
+  );
+});
+
+test('sampleSCurveSurface computes interpolated groundY and signed uphill/downhill slope', () => {
+  const track = generateSCurveTrack(15, 3.4, 7).map((p, idx) => ({
+    ...p,
+    y: idx < 7 ? idx * 0.68 : 7 * 0.68 - (idx - 7) * 0.68,
+  }));
+  const uphillSurf = sampleSCurveSurface(track[3].x, track[3].z, track, 3.4);
+  const downhillSurf = sampleSCurveSurface(track[10].x, track[10].z, track, 3.4);
+  assert.ok(uphillSurf.roadSlope > 0.15, `Expected positive uphill slope, got ${uphillSurf.roadSlope}`);
+  assert.ok(downhillSurf.roadSlope < -0.15, `Expected negative downhill slope, got ${downhillSurf.roadSlope}`);
+  assert.ok(Math.abs(uphillSurf.groundY - track[3].y) < 0.05);
+});
+
+test('stepDriftPhysics and stepHighwayPhysics decelerate uphill and accelerate downhill via roadSlope', () => {
+  const initUp = createInitialDriftState(0, 0, 0, -Math.PI / 2, 22);
+  const initDown = createInitialDriftState(0, 0, 0, -Math.PI / 2, 22);
+
+  let upDrift = initUp;
+  let downDrift = initDown;
+  for (let i = 0; i < 20; i++) {
+    upDrift = stepDriftPhysics(
+      upDrift,
+      { steerInput: 0, throttle: 0.7, roadSlope: 0.25 },
+      { topSpeed: 26, driftGrip: 0.8, handlingRate: 2.4 },
+      0.02
+    );
+    downDrift = stepDriftPhysics(
+      downDrift,
+      { steerInput: 0, throttle: 0.7, roadSlope: -0.25 },
+      { topSpeed: 26, driftGrip: 0.8, handlingRate: 2.4 },
+      0.02
+    );
+  }
+  assert.ok(
+    Math.hypot(downDrift.vx, downDrift.vz) > Math.hypot(upDrift.vx, upDrift.vz) + 1.5,
+    'Drift car must climb slower uphill and carry more momentum downhill'
+  );
+
+  let upHwy = createInitialDriftState(0, 0, 0, -Math.PI / 2, 22);
+  let downHwy = createInitialDriftState(0, 0, 0, -Math.PI / 2, 22);
+  for (let i = 0; i < 20; i++) {
+    upHwy = stepHighwayPhysics(
+      upHwy,
+      { steerInput: 0, accelInput: 0.5, brakeInput: 0, roadSlope: 0.25 },
+      { topSpeed: 28, handlingRate: 2.6 },
+      0.02
+    );
+    downHwy = stepHighwayPhysics(
+      downHwy,
+      { steerInput: 0, accelInput: 0.5, brakeInput: 0, roadSlope: -0.25 },
+      { topSpeed: 28, handlingRate: 2.6 },
+      0.02
+    );
+  }
+  assert.ok(
+    Math.hypot(downHwy.vx, downHwy.vz) > Math.hypot(upHwy.vx, upHwy.vz) + 1.5,
+    'Highway car must climb slower uphill and accelerate faster downhill'
   );
 });
 

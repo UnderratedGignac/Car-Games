@@ -3871,6 +3871,8 @@ export function stepDriftPhysics(
     throttle: number;     // 0..1.3
     handbrake?: boolean;  // manual drift trigger
     roadTangentAngle?: number; // subtle stabilization assist when no steering is held
+    roadSlope?: number;   // forward grade dy/ds (>0 uphill, <0 downhill)
+    airborne?: boolean;   // true when wheels are off the road surface
   },
   stats: {
     topSpeed: number;
@@ -3885,6 +3887,32 @@ export function stepDriftPhysics(
   const forwardZ = Math.sin(state.heading);
   const rightX = -forwardZ;
   const rightZ = forwardX;
+
+  if (inputs.airborne) {
+    // Mid-air ballistic glide: minimal yaw authority, zero tire traction or road drive
+    const airAngVel = inputs.steerInput * 0.65;
+    const nextAngVel =
+      state.angularVelocity + (airAngVel - state.angularVelocity) * Math.min(1, 6.0 * clampedDt);
+    const nextHeading = normalizeAngle(state.heading + nextAngVel * clampedDt);
+    const airDrag = Math.exp(-0.18 * clampedDt);
+    const nextVx = state.vx * airDrag;
+    const nextVz = state.vz * airDrag;
+    const curSpd = Math.hypot(nextVx, nextVz);
+    const slip = curSpd > 2.0 ? normalizeAngle(nextHeading - Math.atan2(nextVz, nextVx)) : 0;
+    return {
+      x: state.x + nextVx * clampedDt,
+      z: state.z + nextVz * clampedDt,
+      y: state.y,
+      vx: nextVx,
+      vz: nextVz,
+      heading: nextHeading,
+      angularVelocity: nextAngVel,
+      slipAngle: slip,
+      absSlipAngle: Math.abs(slip),
+      isDrifting: false,
+      driftFactor: 0,
+    };
+  }
 
   // Steering angular velocity:
   // In screen space (X right, -Z up/forward):
@@ -3910,10 +3938,23 @@ export function stepDriftPhysics(
   const vForward = state.vx * forwardX + state.vz * forwardZ;
   const vLateral = state.vx * rightX + state.vz * rightZ;
 
-  // Engine drive acceleration
-  const desiredForwardSpeed = stats.topSpeed * Math.max(0.55, inputs.throttle);
-  const accelRate = 4.2;
-  const nextVForward = vForward + (desiredForwardSpeed - vForward) * Math.min(1, accelRate * clampedDt);
+  // Engine drive acceleration + authentic longitudinal slope gravity (-g * sin(theta))
+  const slope = Math.max(-0.45, Math.min(0.45, inputs.roadSlope ?? 0));
+  const sinTheta = slope / Math.hypot(1, slope);
+  const slopeGravityAccel = -22.0 * sinTheta;
+  const slopeSpeedShift = -slope * stats.topSpeed * 0.28;
+  const desiredForwardSpeed = Math.max(
+    6.5,
+    stats.topSpeed * Math.max(0.55, inputs.throttle) + slopeSpeedShift
+  );
+  const accelRate = slope > 0.04 ? 3.5 : 4.2;
+  const nextVForward = Math.max(
+    4.0,
+    Math.min(
+      stats.topSpeed * 1.48,
+      vForward + (desiredForwardSpeed - vForward) * Math.min(1, accelRate * clampedDt) + slopeGravityAccel * clampedDt
+    )
+  );
 
   // Lateral friction: lower grip during active steering or handbrake produces juicy tail-out drift!
   const isActivelyTurning = Math.abs(inputs.steerInput) > 0.1 || !!inputs.handbrake;
@@ -3979,6 +4020,8 @@ export function stepHighwayPhysics(
     brakeInput: number;        // 0..1 (Brake pedal)
     handbrake?: boolean;       // optional emergency drift swerve
     roadTangentAngle?: number; // highway direction for strong self-centering
+    roadSlope?: number;        // forward grade dy/ds (>0 uphill, <0 downhill)
+    airborne?: boolean;        // true while airborne off steep crests
   },
   stats: {
     topSpeed: number;
@@ -3992,6 +4035,31 @@ export function stepHighwayPhysics(
   const forwardZ = Math.sin(state.heading);
   const rightX = -forwardZ;
   const rightZ = forwardX;
+
+  if (inputs.airborne) {
+    const airAngVel = inputs.steerInput * 0.55;
+    const nextAngVel =
+      state.angularVelocity + (airAngVel - state.angularVelocity) * Math.min(1, 6.0 * clampedDt);
+    const nextHeading = normalizeAngle(state.heading + nextAngVel * clampedDt);
+    const airDrag = Math.exp(-0.18 * clampedDt);
+    const nextVx = state.vx * airDrag;
+    const nextVz = state.vz * airDrag;
+    const curSpd = Math.hypot(nextVx, nextVz);
+    const slip = curSpd > 2.0 ? normalizeAngle(nextHeading - Math.atan2(nextVz, nextVx)) : 0;
+    return {
+      x: state.x + nextVx * clampedDt,
+      z: state.z + nextVz * clampedDt,
+      y: state.y,
+      vx: nextVx,
+      vz: nextVz,
+      heading: nextHeading,
+      angularVelocity: nextAngVel,
+      slipAngle: slip,
+      absSlipAngle: Math.abs(slip),
+      isDrifting: false,
+      driftFactor: 0,
+    };
+  }
 
   const steerRate = stats.handlingRate * (inputs.handbrake ? 1.15 : 0.78);
   let targetAngVel = inputs.steerInput * steerRate;
@@ -4026,25 +4094,31 @@ export function stepHighwayPhysics(
   const vForward = state.vx * forwardX + state.vz * forwardZ;
   const vLateral = state.vx * rightX + state.vz * rightZ;
 
-  // Gas & Brake Pedal Speed Band:
-  // - Brake held -> smoothly slow down to ~36% topSpeed (never stalls/reverses)
-  // - Gas held   -> accelerate smoothly up to ~138% topSpeed
-  // - Coasting   -> settle at ~78% topSpeed cruise
+  // Gas & Brake Pedal Speed Band + authentic grade gravity (-g * sin(theta))
   const accel = Math.max(0, Math.min(1, inputs.accelInput));
   const brake = Math.max(0, Math.min(1, inputs.brakeInput));
+  const slope = Math.max(-0.45, Math.min(0.45, inputs.roadSlope ?? 0));
+  const sinTheta = slope / Math.hypot(1, slope);
+  const slopeGravityAccel = -20.5 * sinTheta;
+  const slopeSpeedShift = -slope * stats.topSpeed * 0.26;
 
-  let desiredSpeed = stats.topSpeed * 0.78;
+  let desiredSpeed = stats.topSpeed * 0.78 + slopeSpeedShift;
   let speedResponseRate = 3.2;
   if (brake > 0.05) {
     desiredSpeed = stats.topSpeed * (0.78 - 0.42 * brake); // down to 0.36 * topSpeed
     speedResponseRate = 8.8;
   } else if (accel > 0.05) {
-    desiredSpeed = stats.topSpeed * (0.78 + 0.60 * accel); // up to 1.38 * topSpeed
-    speedResponseRate = 5.6;
+    desiredSpeed = stats.topSpeed * (0.78 + 0.60 * accel) + slopeSpeedShift; // up to ~1.38 * topSpeed
+    speedResponseRate = slope > 0.04 ? 4.6 : 5.6;
   }
 
-  const nextVForward =
-    vForward + (desiredSpeed - vForward) * Math.min(1, speedResponseRate * clampedDt);
+  const nextVForward = Math.max(
+    Math.min(vForward, stats.topSpeed * 0.36),
+    Math.min(
+      stats.topSpeed * 1.48,
+      vForward + (desiredSpeed - vForward) * Math.min(1, speedResponseRate * clampedDt) + slopeGravityAccel * clampedDt
+    )
+  );
 
   // High lateral grip keeps tires planted cleanly through lane weaves
   const effectiveGrip = inputs.handbrake ? 2.4 : 13.5;
@@ -4805,6 +4879,91 @@ export function sampleTrackAtS(
     nx: -tz,
     nz: tx,
     width: a.width + (b.width - a.width) * t,
+  };
+}
+
+/**
+ * Samples continuous interpolated elevation (groundY) and forward grade (roadSlope = dy/ds)
+ * for any world XZ position along an S-curve track.
+ */
+export function sampleSCurveSurface(
+  carX: number,
+  carZ: number,
+  track: SCurvePoint[],
+  stepDistance = 2.6
+): {
+  groundY: number;
+  roadSlope: number;
+  closestPoint: SCurvePoint | null;
+  alongS: number;
+  signedPerpOffset: number;
+  halfWidth: number;
+} {
+  if (track.length === 0) {
+    return {
+      groundY: 0,
+      roadSlope: 0,
+      closestPoint: null,
+      alongS: 0,
+      signedPerpOffset: 0,
+      halfWidth: 4.0,
+    };
+  }
+
+  let bestIdx = 0;
+  let bestDistSq = Infinity;
+  for (let i = 0; i < track.length; i++) {
+    const pt = track[i];
+    if (Math.abs(carZ - pt.z) > 16) continue;
+    const dx = carX - pt.x;
+    const dz = carZ - pt.z;
+    const dSq = dx * dx + dz * dz;
+    if (dSq < bestDistSq) {
+      bestDistSq = dSq;
+      bestIdx = i;
+    }
+  }
+  if (bestDistSq === Infinity) {
+    for (let i = 0; i < track.length; i++) {
+      const pt = track[i];
+      const dx = carX - pt.x;
+      const dz = carZ - pt.z;
+      const dSq = dx * dx + dz * dz;
+      if (dSq < bestDistSq) {
+        bestDistSq = dSq;
+        bestIdx = i;
+      }
+    }
+  }
+
+  const pt = track[bestIdx];
+  const prevPt = track[Math.max(0, bestIdx - 1)];
+  const nextPt = track[Math.min(track.length - 1, bestIdx + 1)];
+  const dx = carX - pt.x;
+  const dz = carZ - pt.z;
+  const alongS = dx * pt.tx + dz * pt.tz;
+  const signedPerpOffset = dx * pt.nx + dz * pt.nz;
+
+  let groundY = pt.y;
+  const neighbor = alongS >= 0 ? nextPt : prevPt;
+  if (neighbor !== pt) {
+    const t = Math.max(0, Math.min(1, Math.abs(alongS) / Math.max(0.5, stepDistance)));
+    groundY = pt.y + (neighbor.y - pt.y) * t;
+  }
+
+  let roadSlope = 0;
+  const span = (nextPt.index - prevPt.index) * Math.max(0.5, stepDistance);
+  if (span > 0.4) {
+    roadSlope = Math.max(-0.48, Math.min(0.48, (nextPt.y - prevPt.y) / span));
+  }
+
+  return {
+    groundY,
+    roadSlope,
+    closestPoint: pt,
+    alongS,
+    signedPerpOffset,
+    halfWidth: pt.width * 0.5,
   };
 }
 

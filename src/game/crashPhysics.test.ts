@@ -2,14 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { TrafficCarState } from './rules';
 import {
+  computeObbOverlap2D,
   createCrashBody3D,
   evaluateGuardrailImpact,
   getTrafficVehicleMass,
+  resolveHighwayTrafficSolidPass,
+  resolveSolidGuardrailContact,
   resolveTrafficCollisionImpulse,
+  resolveTrafficInterCarSpacing,
   stepCrashBody3D,
   stepTrafficCrashBody,
 } from './crashPhysics';
-import { computeFrontWheelSteerRad } from './pixelSprites';
+import { computeAutomotiveNormalShade, computeFrontWheelSteerRad } from './pixelSprites';
 
 function makeTrafficCar(overrides?: Partial<TrafficCarState>): TrafficCarState {
   return {
@@ -252,5 +256,123 @@ test('resolveTrafficCollisionImpulse requires high closing speed AND solid overl
   assert.equal(oncomingDirect.isFatalCrash, true);
   assert.ok(oncomingDirect.hitQuality >= 0.9);
 });
+
+test('computeObbOverlap2D resolves oriented rectangular overlap and rejects separated boxes', () => {
+  const a = { x: 0, z: 0, halfLength: 2.0, halfWidth: 0.9, heading: 0 };
+  const b = { x: 1.4, z: 0.5, halfLength: 2.0, halfWidth: 0.9, heading: Math.PI / 6 };
+  const c = { x: 6.0, z: 6.0, halfLength: 2.0, halfWidth: 0.9, heading: 0 };
+
+  const contact = computeObbOverlap2D(a, b);
+  assert.ok(contact.hit, 'Rotated nearby OBBs must overlap');
+  assert.ok(contact.overlap > 0.1);
+  assert.ok(Math.abs(Math.hypot(contact.normalX, contact.normalZ) - 1) < 1e-4);
+
+  const noContact = computeObbOverlap2D(a, c);
+  assert.equal(noContact.hit, false);
+});
+
+test('resolveSolidGuardrailContact strictly clamps car inside rails and deflects outward velocity', () => {
+  const res = resolveSolidGuardrailContact({
+    vx: 9.2,
+    vz: -28,
+    heading: -Math.PI / 2 + 0.45,
+    tx: 0,
+    tz: -1,
+    nx: 1,
+    nz: 0,
+    roadHeading: -Math.PI / 2,
+    signedPerpOffset: 5.4,
+    maxCenterLat: 4.05,
+  });
+  assert.equal(res.hit, true);
+  assert.equal(res.railSide, 1);
+  assert.equal(res.clampedLat, 4.05);
+  assert.ok(res.nextVx < 0, 'Outward velocity must rebound inward');
+  assert.ok(-res.nextVz > 0 && -res.nextVz < 28, 'Barrier friction scrubs forward speed');
+  assert.ok(res.outwardSpeed > 8);
+});
+
+test('resolveHighwayTrafficSolidPass prevents ghosting through traffic even during cooldown or crash states', () => {
+  const cooledCar = makeTrafficCar({
+    id: 11,
+    s: 100,
+    lateralOffset: 2.1,
+    speed: 14,
+    scrapeCooldown: 0.45,
+  });
+  const crashedCar = makeTrafficCar({
+    id: 12,
+    s: 120,
+    lateralOffset: -2.0,
+    speed: 10,
+    crashed: true,
+    crashYaw: 0.6,
+  });
+
+  // Hero overlapping cooledCar
+  const res1 = resolveHighwayTrafficSolidPass({
+    playerS: 98.2,
+    playerLat: 2.05,
+    playerHeadingRelRoad: 0,
+    playerFwdVel: 24,
+    playerLatVel: 0,
+    playerMass: 1.35,
+    roadHalfWidth: 4.9,
+    trafficCars: [cooledCar, crashedCar],
+  });
+  assert.equal(res1.primaryCar?.id, 11);
+  assert.ok(
+    Math.hypot(res1.nextPlayerS - cooledCar.s, res1.nextPlayerLat - cooledCar.lateralOffset) > 1.75,
+    'Overlapping cooled car must be separated solidly'
+  );
+  assert.ok(Math.abs(res1.nextPlayerLat) <= 4.04);
+
+  // Hero overlapping already-crashed car
+  const res2 = resolveHighwayTrafficSolidPass({
+    playerS: 119.5,
+    playerLat: -1.6,
+    playerHeadingRelRoad: 0,
+    playerFwdVel: 22,
+    playerLatVel: -1.0,
+    playerMass: 1.35,
+    roadHalfWidth: 4.9,
+    trafficCars: [cooledCar, crashedCar],
+  });
+  assert.equal(res2.primaryCar?.id, 12);
+});
+
+test('resolveTrafficInterCarSpacing keeps nearby traffic vehicles separated', () => {
+  const front = makeTrafficCar({ id: 1, s: 200, lateralOffset: 2.25, speed: 12, halfLength: 2.1 });
+  const rear = makeTrafficCar({ id: 2, s: 198.2, lateralOffset: 2.25, speed: 19, halfLength: 2.0 });
+  resolveTrafficInterCarSpacing([front, rear], 4.9);
+  assert.ok(front.s - rear.s >= 4.0, `Expected non-overlapping traffic spacing, got ${front.s - rear.s}`);
+  assert.ok(rear.speed <= front.speed, 'Trailing faster vehicle yields speed to slower car ahead');
+});
+
+test('evaluateGuardrailImpact breaches on decisive racing slams and lowered integrity, while computeAutomotiveNormalShade differentiates panels', () => {
+  const decisiveSlam = evaluateGuardrailImpact({
+    playerSpeed: 19.0,
+    outwardLateralSpeed: 4.5,
+    overallIntegrity: 100,
+  });
+  assert.equal(decisiveSlam.shouldBreach, true);
+
+  const weakenedBreach = evaluateGuardrailImpact({
+    playerSpeed: 15.0,
+    outwardLateralSpeed: 3.5,
+    overallIntegrity: 50,
+  });
+  assert.equal(weakenedBreach.shouldBreach, true);
+
+  const roofShade = computeAutomotiveNormalShade(0, 1, 0, 1, 0, 1, 0);
+  const sideShade = computeAutomotiveNormalShade(1, 0, 0, 1, 0, 1, 0);
+  const underShade = computeAutomotiveNormalShade(0, -1, 0, 1, 0, 1, 0);
+
+  assert.ok(roofShade >= 0.8 && roofShade <= 1.25);
+  assert.ok(sideShade >= 0.8 && sideShade <= 1.25);
+  assert.ok(underShade >= 0.8 && underShade <= 1.25);
+  assert.ok(roofShade > underShade, `Roof shade (${roofShade}) should exceed underside (${underShade})`);
+});
+
 
 

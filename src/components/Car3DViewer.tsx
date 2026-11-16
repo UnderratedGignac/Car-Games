@@ -768,6 +768,10 @@ export const Car3DViewer: React.FC<Car3DViewerProps> = ({
       right_door: new THREE.Group(),
       rear_bumper: new THREE.Group(),
       spoiler: new THREE.Group(),
+      front_left_wheel: new THREE.Group(),
+      front_right_wheel: new THREE.Group(),
+      rear_left_wheel: new THREE.Group(),
+      rear_right_wheel: new THREE.Group(),
     };
     for (const pid of CAR_PART_IDS) {
       carGroup.add(partGroups[pid]);

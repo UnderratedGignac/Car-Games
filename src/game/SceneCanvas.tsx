@@ -37,6 +37,7 @@ import {
   resolveCarAppearance,
   resolveRoadBiome,
   sampleTrackAtS,
+  sampleSCurveSurface,
   stepDriftPhysics,
   stepHighwayPhysics,
   stepTrafficCars,
@@ -60,7 +61,10 @@ import {
   CrashBody3D,
   createCrashBody3D,
   evaluateGuardrailImpact,
+  resolveHighwayTrafficSolidPass,
+  resolveSolidGuardrailContact,
   resolveTrafficCollisionImpulse,
+  resolveTrafficInterCarSpacing,
   stepCrashBody3D,
   stepTrafficCrashBody,
 } from './crashPhysics';
@@ -108,6 +112,7 @@ import {
 } from './adventure';
 import {
   MountainPhysicsState,
+  computeMountainCameraTarget,
   createInitialMountainState,
   extendMountainTrack,
   generateMountainTrack,
@@ -975,6 +980,16 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let heroRollRad = 0;
     let heroPitchY = 0;
     let heroAirPitchRad = 0;
+    let heroPitchRad = 0.37;
+    let fCamPitchSlope = 0.068;
+    let carVy = 0;
+    let carAirborne = false;
+    let carAirTime = 0;
+    let carGroundY = 0;
+    let prevRoadSlope = 0;
+    let activeRoadSlope = 0;
+    let suspensionY = 0;
+    let suspensionVel = 0;
     let levelFinished = false;
 
     // Gameplay metrics
@@ -1012,6 +1027,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let groundRestTimer = 0;
     let crashGroundY = VALLEY_FLOOR_Y;
     let crashBody: CrashBody3D = createCrashBody3D();
+    let isOffRoad = false;
+    let offRoadTreeHitCooldown = 0;
+    let smoothSteerInput = 0;
 
     // Mountain Drive physics & stunt state
     let mountainState: MountainPhysicsState | null = null;
@@ -1520,6 +1538,16 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       heroRollRad = 0;
       heroPitchY = 0;
       heroAirPitchRad = 0;
+      heroPitchRad = 0.37;
+      fCamPitchSlope = 0.068;
+      carVy = 0;
+      carAirborne = false;
+      carAirTime = 0;
+      carGroundY = 0;
+      prevRoadSlope = 0;
+      activeRoadSlope = 0;
+      suspensionY = 0;
+      suspensionVel = 0;
       recordedGhostFrameCount = 0;
       ghostRecordTimer = 0;
       runElapsedSec = 0;
@@ -1554,6 +1582,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       groundRestTimer = 0;
       crashGroundY = VALLEY_FLOOR_Y;
       crashBody = createCrashBody3D();
+      isOffRoad = false;
+      offRoadTreeHitCooldown = 0;
+      smoothSteerInput = 0;
       mountainState = null;
       trafficCars = [];
       nextTrafficId = 1;
@@ -1562,7 +1593,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       nearMisses = 0;
       isTrafficCrash = false;
       trafficCrashTimer = 0;
-      crashReason = isMountain ? 'Fell Off Mountain Cliff' : 'Guardrail Breached';
+      crashReason = isMountain ? 'Fell Off Mountain Cliff' : 'Guardrail Contact';
       slipstreamCharge = 0;
       slipstreamCarId = null;
       slipstreamBoostTimer = 0;
@@ -1621,6 +1652,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           startPt.heading,
           initSpd
         );
+        carGroundY = startPt.y;
         camFocusX = driftState.x;
         camFocusY = driftState.y;
         camFocusZ = driftState.z;
@@ -1644,6 +1676,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           startPt.heading,
           carRef.current.baseSpeed * 0.78
         );
+        carGroundY = startPt.y;
 
         camFocusX = driftState.x;
         camFocusY = driftState.y;
@@ -1953,7 +1986,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
       const camZ = clampMinZ !== undefined && rawCamZ < clampMinZ ? clampMinZ : rawCamZ;
       const camX = dx * fRightX + dz * fRightZ;
-      const camY = dy + camZ * 0.068;
+      const camY = dy + camZ * fCamPitchSlope;
 
       const invZ = fFovScale / camZ;
       out.x = pxW * 0.5 + camX * invZ + fShakeX;
@@ -1967,7 +2000,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     const unprojectTireToRoad = (sx: number, sy: number, roadY: number, out: { x: number; z: number }) => {
       const dy = roadY - fCamY;
       const syNorm = (fHorizonY + fShakeY - sy) / fFovScale;
-      const denom = Math.min(-0.08, syNorm - 0.068);
+      const denom = Math.min(-0.08, syNorm - fCamPitchSlope);
       const camZ = Math.max(2.0, Math.min(25.0, dy / denom));
       const camX = ((sx - pxW * 0.5 - fShakeX) * camZ) / fFovScale;
       out.x = fCamX + camZ * fFwdX + camX * fRightX;
@@ -2273,6 +2306,10 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             driftState.heading = mountainState.heading;
             driftState.isDrifting = mountainState.isDrifting;
             driftState.driftFactor = mountainState.driftFactor;
+            carGroundY = mSurfDemo.inChasmGap ? mSurfDemo.referenceGroundY : mSurfDemo.roadY;
+            activeRoadSlope = (mountainState.currentSlopePct || 0) / 100;
+            carVy = mountainState.vy;
+            carAirborne = mountainState.isAirborne;
             if (cp) {
               camHeading += normalizeAngle(cp.heading - camHeading) * Math.min(1, 5.0 * dt);
             }
@@ -2282,10 +2319,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               Math.min(1, 7 * dt);
             activeDir = visualDriftAngle >= 0 ? 'right' : 'left';
             wheelSpinPhase += dt * 18;
-            const targetAirPitch = mountainState.isAirborne
-              ? -Math.max(-0.32, Math.min(0.35, (mountainState.vy / 24) * 0.55))
-              : -Math.max(-0.22, Math.min(0.22, (mountainState.currentSlopePct / 100) * 0.36));
-            heroAirPitchRad += (targetAirPitch - heroAirPitchRad) * Math.min(1, 8 * dt);
+            const demoAirAtt = mountainState.isAirborne
+              ? Math.max(-0.34, Math.min(0.36, mountainState.vy / 20))
+              : Math.max(-0.26, Math.min(0.26, activeRoadSlope));
+            const targetPitchDemo = Math.max(0.14, Math.min(0.62, 0.37 + demoAirAtt * 0.58));
+            heroPitchRad += (targetPitchDemo - heroPitchRad) * Math.min(1, 8 * dt);
+            heroAirPitchRad = 0;
             heroRollRad += (-visualDriftAngle * 0.036 - heroRollRad) * Math.min(1, 8 * dt);
             heroPitchY += (0 - heroPitchY) * Math.min(1, 8 * dt);
             if (!mountainState.isAirborne) {
@@ -2306,12 +2345,25 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               }
               populateTreesAround(driftState.z, false, true);
             }
+            const mtnDemoAheadPt = cp ? track[Math.min(track.length - 1, Math.max(0, (cp.index - (track[0]?.index ?? 0)) + 3))] : null;
+            const mtnDemoCam = computeMountainCameraTarget({
+              carY: driftState.y,
+              carVy: mountainState.vy,
+              roadSlope: activeRoadSlope,
+              isAirborne: mountainState.isAirborne,
+              inChasmGap: mSurfDemo.inChasmGap,
+              referenceGroundY: mSurfDemo.referenceGroundY,
+              roadY: mSurfDemo.roadY,
+              aheadRoadY: mtnDemoAheadPt ? mtnDemoAheadPt.y : undefined,
+              isTitle: true,
+            });
             camFocusX += (driftState.x - camFocusX) * Math.min(1, 8 * dt);
-            camFocusY += (driftState.y - camFocusY) * Math.min(1, 8 * dt);
+            camFocusY += (mtnDemoCam.focusY - camFocusY) * Math.min(1, (mountainState.isAirborne ? 6.8 : 9.5) * dt);
             camFocusZ += (driftState.z - camFocusZ) * Math.min(1, 8 * dt);
           }
         } else {
         const roadEval = evaluateCarOnSCurveRoad(driftState.x, driftState.z, track, 2.0);
+        const demoSurf = sampleSCurveSurface(driftState.x, driftState.z, track, STEP_DIST);
         const targetHeading = roadEval.closestPoint ? roadEval.closestPoint.heading : -Math.PI / 2;
 
         if (isHighwayMode && roadEval.closestPoint) {
@@ -2337,11 +2389,17 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               accelInput: 0.25,
               brakeInput: 0,
               roadTangentAngle: targetHeading,
+              roadSlope: demoSurf.roadSlope,
             },
             { topSpeed: speed, handlingRate: 2.8 },
             dt
           );
-          driftState.y = roadEval.closestPoint.y;
+          const postDemoSurf = sampleSCurveSurface(driftState.x, driftState.z, track, STEP_DIST);
+          driftState.y = postDemoSurf.groundY;
+          carGroundY = postDemoSurf.groundY;
+          activeRoadSlope = postDemoSurf.roadSlope;
+          carAirborne = false;
+          heroPitchRad += (Math.max(0.14, Math.min(0.60, 0.37 + activeRoadSlope * 0.62)) - heroPitchRad) * Math.min(1, 8 * dt);
           camHeading += normalizeAngle(roadEval.closestPoint.heading - camHeading) * Math.min(1, 5.0 * dt);
 
           const angleDiff = normalizeAngle(driftState.heading - camHeading);
@@ -2352,6 +2410,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           for (let i = 0; i < trafficCars.length; i++) {
             trafficCars[i].s += (trafficCars[i].isOncoming ? -1 : 1) * trafficCars[i].speed * dt;
           }
+          resolveTrafficInterCarSpacing(trafficCars, HIGHWAY_ROAD_WIDTH * 0.5);
           compactInPlace(trafficCars, (c) => c.s > playerSNow - 24);
           if (trafficSpawnCursor < playerSNow + 240) {
             const batch = generateTrafficBatch({
@@ -2385,7 +2444,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           const steerDemo = 0.55 * Math.sin(now * 0.0014) + 0.35 + normalizeAngle(targetHeading - driftState.heading) * 1.4;
           driftState = stepDriftPhysics(
             driftState,
-            { steerInput: Math.max(-1, Math.min(1, steerDemo)), throttle: 0.78 },
+            { steerInput: Math.max(-1, Math.min(1, steerDemo)), throttle: 0.78, roadSlope: demoSurf.roadSlope },
             { topSpeed: speed, driftGrip: 0.72, handlingRate: 2.6 },
             dt
           );
@@ -2393,9 +2452,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           // Keep title car safely centered on the viaduct
           if (roadEval.closestPoint) {
             driftState.x += (roadEval.closestPoint.x - driftState.x) * Math.min(1, 2.8 * dt);
-            driftState.y = roadEval.closestPoint.y;
             camHeading += normalizeAngle(roadEval.closestPoint.heading - camHeading) * Math.min(1, 4.5 * dt);
           }
+          const postDemoSurf = sampleSCurveSurface(driftState.x, driftState.z, track, STEP_DIST);
+          driftState.y = postDemoSurf.groundY;
+          carGroundY = postDemoSurf.groundY;
+          activeRoadSlope = postDemoSurf.roadSlope;
+          carAirborne = false;
+          heroPitchRad += (Math.max(0.14, Math.min(0.60, 0.37 + activeRoadSlope * 0.62)) - heroPitchRad) * Math.min(1, 8 * dt);
 
           // Showcase diagonal drift pose (`/` angle) + exact tire-anchored skid marks & smoke!
           const angleDiff = normalizeAngle(driftState.heading - camHeading);
@@ -2809,6 +2873,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             }
           }
 
+          const preSurf = !isMountainMode
+            ? sampleSCurveSurface(driftState.x, driftState.z, track, STEP_DIST)
+            : null;
           const preRoadEval = evaluateCarOnSCurveRoad(
             driftState.x,
             driftState.z,
@@ -2843,23 +2910,33 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           const accelInput = resolvedPedals.gasInput;
           const effectiveHandbrake = resolvedPedals.handbrake;
 
+          const preSpeedNow = Math.hypot(driftState.vx, driftState.vz);
+          const speedSteerWeight = 1.0 - Math.min(0.26, Math.max(0, (preSpeedNow - 18) * 0.015));
+          const weightedSteerTarget = steerInput * speedSteerWeight;
+          smoothSteerInput += (weightedSteerTarget - smoothSteerInput) * Math.min(1, 18 * simDt);
+          if (Math.abs(steerInput) < 0.02 && Math.abs(smoothSteerInput) < 0.02) {
+            smoothSteerInput = 0;
+          }
+          if (offRoadTreeHitCooldown > 0) {
+            offRoadTreeHitCooldown = Math.max(0, offRoadTreeHitCooldown - simDt);
+          }
+
           let mountainStepRes: ReturnType<typeof stepMountainPhysics> | null = null;
           if (isMountainMode) {
             if (!mountainState && track.length > 0) {
-              const p0 = preRoadEval.closestPoint || track[0];
               mountainState = createInitialMountainState(
                 driftState.x,
                 driftState.z,
                 driftState.y,
                 driftState.heading,
-                Math.hypot(driftState.vx, driftState.vz)
+                preSpeedNow
               );
             }
             if (mountainState) {
               mountainStepRes = stepMountainPhysics(
                 mountainState,
                 {
-                  steerInput,
+                  steerInput: smoothSteerInput,
                   throttle: resolvedPedals.throttle,
                   handbrake: effectiveHandbrake,
                   isFever,
@@ -2888,11 +2965,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             driftState = stepHighwayPhysics(
               driftState,
               {
-                steerInput,
+                steerInput: smoothSteerInput,
                 accelInput,
                 brakeInput,
                 handbrake: effectiveHandbrake,
                 roadTangentAngle: roadTangent,
+                roadSlope: preSurf?.roadSlope ?? 0,
+                airborne: carAirborne,
               },
               {
                 topSpeed: stats.topSpeed * speedBoost,
@@ -2904,18 +2983,25 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             driftState = stepDriftPhysics(
               driftState,
               {
-                steerInput,
-                throttle: resolvedPedals.throttle,
+                steerInput: smoothSteerInput,
+                throttle: isOffRoad ? Math.min(0.68, resolvedPedals.throttle) : resolvedPedals.throttle,
                 handbrake: effectiveHandbrake,
-                roadTangentAngle: roadTangent,
+                roadTangentAngle: isOffRoad ? undefined : roadTangent,
+                roadSlope: preSurf?.roadSlope ?? 0,
+                airborne: carAirborne,
               },
               {
-                topSpeed: stats.topSpeed * speedBoost,
-                driftGrip: stats.driftGrip,
-                handlingRate: stats.handlingRate,
+                topSpeed: stats.topSpeed * speedBoost * (isOffRoad ? 0.68 : 1.0),
+                driftGrip: stats.driftGrip * (isOffRoad ? 0.66 : 1.0),
+                handlingRate: stats.handlingRate * (isOffRoad ? 0.88 : 1.0),
               },
               simDt
             );
+            if (isOffRoad && !carAirborne) {
+              const offDrag = Math.exp(-0.95 * simDt);
+              driftState.vx *= offDrag;
+              driftState.vz *= offDrag;
+            }
           }
 
           const curSpeed = Math.hypot(driftState.vx, driftState.vz);
@@ -3145,11 +3231,130 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               );
 
           if (roadCheck.closestPoint) {
-            if (!isMountainMode) {
-              driftState.y += (roadCheck.closestPoint.y - driftState.y) * Math.min(1, 14 * simDt);
-            }
             // Smoothly follow road curve heading with chase camera
             camHeading += normalizeAngle(roadCheck.closestPoint.heading - camHeading) * Math.min(1, 3.8 * simDt);
+          }
+
+          if (!isMountainMode) {
+            const postSurf = sampleSCurveSurface(driftState.x, driftState.z, track, STEP_DIST);
+            let targetGroundY = postSurf.groundY;
+            let slopeNow = postSurf.roadSlope;
+
+            if (isOffRoad && roadCheck.closestPoint) {
+              const advOffZone = isAdventureMode ? resolveAdventureZone(distance, roadCheck.closestPoint.index) : null;
+              const offBiomeId = resolveRoadBiome(effectiveRoadMode, distance).id;
+              targetGroundY = advOffZone
+                ? sampleAdventureTerrainElevation(
+                    roadCheck.signedPerpOffset,
+                    driftState.z,
+                    roadCheck.closestPoint.y,
+                    advOffZone
+                  )
+                : sampleTerrainElevation(roadCheck.signedPerpOffset, driftState.z, offBiomeId);
+              const fwdProbeZ = driftState.z + Math.sin(driftState.heading) * 1.5;
+              const fwdProbeX = driftState.x + Math.cos(driftState.heading) * 1.5;
+              const fwdLat =
+                (fwdProbeX - roadCheck.closestPoint.x) * roadCheck.closestPoint.nx +
+                (fwdProbeZ - roadCheck.closestPoint.z) * roadCheck.closestPoint.nz;
+              const fwdGroundY = advOffZone
+                ? sampleAdventureTerrainElevation(fwdLat, fwdProbeZ, roadCheck.closestPoint.y, advOffZone)
+                : sampleTerrainElevation(fwdLat, fwdProbeZ, offBiomeId);
+              slopeNow = Math.max(-0.4, Math.min(0.4, (fwdGroundY - targetGroundY) / 1.5));
+              if (!carAirborne && curSpeed > 4.0) {
+                suspensionVel += Math.sin(now * 0.048) * Math.min(2.6, curSpeed * 0.14);
+              }
+            }
+
+            carGroundY = targetGroundY;
+            activeRoadSlope = slopeNow;
+            const prevSpd = curSpeed;
+
+            if (!carAirborne) {
+              const prevExpectedVy = prevSpd * prevRoadSlope;
+              const slopeDrop = prevRoadSlope - slopeNow;
+              const crestLiftAccel = slopeDrop > 0.01 && simDt > 0 ? (prevSpd * slopeDrop) / simDt : 0;
+              const predY = driftState.y + prevExpectedVy * simDt - 0.5 * 24.0 * simDt * simDt;
+              if (prevSpd >= 18.0 && crestLiftAccel > 25.0 && predY > targetGroundY + 0.01) {
+                carAirborne = true;
+                carAirTime = simDt;
+                carVy = Math.max(1.0, prevExpectedVy * 0.95);
+                driftState.y = predY;
+              } else {
+                driftState.y = targetGroundY;
+                carVy = prevSpd * slopeNow;
+              }
+            } else {
+              carAirTime += simDt;
+              carVy -= 24.0 * simDt;
+              driftState.y += carVy * simDt;
+              if (driftState.y <= targetGroundY) {
+                const downImpact = Math.max(0, slopeNow * prevSpd - carVy);
+                driftState.y = targetGroundY;
+                carVy = slopeNow * prevSpd;
+                carAirborne = false;
+                suspensionVel -= Math.min(4.8, downImpact * 0.65);
+                if (carAirTime >= 0.16 && downImpact >= 2.2) {
+                  soundFX.playGroundSlam(Math.min(0.58, 0.22 + downImpact * 0.04));
+                  cameraTrauma = Math.min(1, cameraTrauma + Math.min(0.32, downImpact * 0.038));
+                  if (downImpact >= 5.2) {
+                    const landDmg = applyImpactToCarDamage({
+                      damage: activeDamageState,
+                      impactZone: 'ground_slam',
+                      severity: Math.min(0.55, (downImpact - 4.5) * 0.08),
+                      sideBias: visualDriftAngle >= 0 ? 1 : -1,
+                    });
+                    activeDamageState = landDmg.nextDamage;
+                    onCarDamageChangeRef.current?.(activeDamageState);
+                    if (landDmg.newlyDetached.length > 0) {
+                      soundFX.playPartDetach(landDmg.newlyDetached.length);
+                      for (let dp = 0; dp < landDmg.newlyDetached.length; dp++) {
+                        spawnDetachedPart(
+                          landDmg.newlyDetached[dp],
+                          driftState.x,
+                          driftState.y,
+                          driftState.z,
+                          driftState.vx * 0.6,
+                          driftState.vz * 0.6,
+                          driftState.y + 0.05,
+                          currentAppearance.primaryColor,
+                          currentCar.accentColor,
+                          dp % 2 === 0 ? 1 : -1
+                        );
+                      }
+                    }
+                  }
+                  for (let lp = 0; lp < 6; lp++) {
+                    const ang = Math.random() * Math.PI * 2;
+                    pushSmokePuff({
+                      x: driftState.x + Math.cos(ang) * 0.7,
+                      y: driftState.y + 0.14,
+                      z: driftState.z + Math.sin(ang) * 0.7,
+                      vx: Math.cos(ang) * (2.0 + Math.random() * 2.5),
+                      vy: 0.6 + Math.random() * 1.1,
+                      vz: Math.sin(ang) * (2.0 + Math.random() * 2.5),
+                      radius: 0.24,
+                      maxRadius: 1.0,
+                      life: 0.36,
+                      maxLife: 0.36,
+                      tint: isOffRoad ? 'dirt' : 'dust',
+                    });
+                  }
+                }
+                carAirTime = 0;
+              }
+            }
+            prevRoadSlope = slopeNow;
+          } else if (mountainState) {
+            carGroundY = mountainSurfaceNow
+              ? mountainSurfaceNow.inChasmGap
+                ? mountainSurfaceNow.referenceGroundY
+                : mountainSurfaceNow.roadY
+              : driftState.y;
+            carVy = mountainState.vy;
+            carAirborne = mountainState.isAirborne;
+            carAirTime = mountainState.airTimeSec;
+            activeRoadSlope = (mountainState.currentSlopePct || 0) / 100;
+            prevRoadSlope = activeRoadSlope;
           }
 
           if (isMountainMode && mountainState && mountainStepRes) {
@@ -3158,16 +3363,33 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               const bermDmg = evaluateSpeedGatedImpact({
                 damage: activeDamageState,
                 impactZone: edgeSign < 0 ? 'left' : 'right',
-                impactSpeed: mountainStepRes.impactSpeed ?? 8,
-                minDamageSpeed: 13.5,
-                highSpeedThreshold: 24.0,
-                hitQuality: 0.42,
+                impactSpeed: mountainStepRes.impactSpeed ?? 10,
+                minDamageSpeed: 7.5,
+                highSpeedThreshold: 19.5,
+                hitQuality: 0.65,
                 sideBias: edgeSign,
                 allowTotaling: false,
               });
               if (bermDmg.appliedSeverity > 0) {
                 activeDamageState = bermDmg.nextDamage;
                 onCarDamageChangeRef.current?.(activeDamageState);
+                if (bermDmg.newlyDetached.length > 0) {
+                  soundFX.playPartDetach(bermDmg.newlyDetached.length);
+                  for (let dp = 0; dp < bermDmg.newlyDetached.length; dp++) {
+                    spawnDetachedPart(
+                      bermDmg.newlyDetached[dp],
+                      driftState.x,
+                      driftState.y,
+                      driftState.z,
+                      driftState.vx * 0.5,
+                      driftState.vz * 0.5,
+                      driftState.y + 0.08,
+                      currentAppearance.primaryColor,
+                      currentCar.accentColor,
+                      edgeSign
+                    );
+                  }
+                }
               }
               soundFX.playGuardrailSpark();
               triggerHaptic('medium', false, 'collision');
@@ -3229,6 +3451,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                 Math.min(0.65, 0.28 + mountainStepRes.landingImpactSpeed * 0.03)
               );
               triggerHaptic('medium', false, 'drift');
+              suspensionVel -= Math.min(4.8, (mountainStepRes.landingImpactSpeed || 4) * 0.65);
               heroPitchY = 2.8;
               cameraTrauma = Math.min(1, cameraTrauma + 0.24);
               const airLabel =
@@ -3275,6 +3498,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             }
           }
 
+          // Vertical suspension spring-damper (unloads in air, compresses on landing, squats on throttle, dives on brake)
+          const airborneFlagNow = carAirborne || Boolean(isMountainMode && mountainState?.isAirborne);
+          const pedalSuspTarget = airborneFlagNow ? 0.105 : brakeInput > 0 ? -0.028 : accelInput > 0 ? 0.018 : 0;
+          suspensionVel += (-145 * (suspensionY - pedalSuspTarget) - 15 * suspensionVel) * simDt;
+          suspensionY = Math.max(-0.18, Math.min(0.16, suspensionY + suspensionVel * simDt));
+
           // Compute car silhouette angle (-1 '\' .. +1 '/'); keep highway driving crisp & planted!
           const angleRelCam = normalizeAngle(driftState.heading - camHeading);
           let targetVisualAngle = isHighwayMode
@@ -3295,101 +3524,276 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             visualFrontSteer = 0;
           }
 
-          // Live cornering suspension roll, throttle/brake squat, & mountain slope/jump pitch
+          // Live cornering suspension roll, suspension bounce, & 3D slope/airborne pitch attitude
           const targetRoll = Math.max(-0.055, Math.min(0.055, -visualDriftAngle * 0.046 - steerInput * 0.016));
-          const targetPitch = brakeInput > 0 ? 1.8 : accelInput > 0 ? -1.0 : 0;
           heroRollRad += (targetRoll - heroRollRad) * Math.min(1, 10 * simDt);
-          heroPitchY += (targetPitch - heroPitchY) * Math.min(1, 9 * simDt);
-          if (isMountainMode && mountainState) {
-            const targetAirPitch = mountainState.isAirborne
-              ? -Math.max(-0.34, Math.min(0.36, (mountainState.vy / Math.max(10, curSpeed)) * 0.6))
-              : -Math.max(-0.24, Math.min(0.24, (mountainState.currentSlopePct / 100) * 0.42));
-            heroAirPitchRad += (targetAirPitch - heroAirPitchRad) * Math.min(1, 9 * simDt);
-          } else {
-            heroAirPitchRad += (0 - heroAirPitchRad) * Math.min(1, 9 * simDt);
-          }
 
-          // Check Road / Guardrail / Mountain Cliff & Chasm Bounds
+          const effectiveVy = isMountainMode && mountainState ? mountainState.vy : carVy;
+          const airAttitude = airborneFlagNow
+            ? Math.max(-0.34, Math.min(0.36, effectiveVy / Math.max(12, curSpeed)))
+            : 0;
+          const slopeAttitude = airborneFlagNow ? 0 : Math.max(-0.28, Math.min(0.28, activeRoadSlope));
+          const pedalPitchDelta = brakeInput > 0 ? -0.055 : accelInput > 0 ? 0.04 : 0;
+          const targetSpritePitch = Math.max(
+            0.14,
+            Math.min(0.62, 0.37 + slopeAttitude * 0.65 + airAttitude * 0.58 + pedalPitchDelta)
+          );
+          heroPitchRad += (targetSpritePitch - heroPitchRad) * Math.min(1, 10 * simDt);
+          const targetPitchPx = -(suspensionY * 14) + (brakeInput > 0 ? 1.2 : accelInput > 0 ? -0.7 : 0);
+          heroPitchY += (targetPitchPx - heroPitchY) * Math.min(1, 11 * simDt);
+          heroAirPitchRad = 0;
+
+          // Guardrail Containment / Break-Through & Live Off-Road Driving (Drift / Adventure / Highway) + Mountain Bounds
           let shouldCrashOut = false;
-          if (!roadCheck.onRoad || (isMountainMode && mountainStepRes?.fellReason)) {
-            if (!isMountainMode && roadCheck.closestPoint) {
-              const cpRail = roadCheck.closestPoint;
-              const railSide: -1 | 1 = roadCheck.signedPerpOffset >= 0 ? 1 : -1;
-              const launchSpd = Math.hypot(driftState.vx, driftState.vz);
-              const outwardLatVel = Math.max(
-                0,
-                (driftState.vx * cpRail.nx + driftState.vz * cpRail.nz) * railSide
-              );
-              const railEval = evaluateGuardrailImpact({
-                playerSpeed: launchSpd,
-                outwardLateralSpeed: outwardLatVel,
-                overallIntegrity: getCarOverallIntegrity(activeDamageState),
+          if (!isMountainMode && roadCheck.closestPoint) {
+            const cpRail = roadCheck.closestPoint;
+            const maxCenterLat = Math.max(1.1, cpRail.width * 0.5 - (isHighwayMode ? 0.86 : 0.85));
+
+            if (!isOffRoad) {
+              const railRes = resolveSolidGuardrailContact({
+                vx: driftState.vx,
+                vz: driftState.vz,
+                heading: driftState.heading,
+                tx: cpRail.tx,
+                tz: cpRail.tz,
+                nx: cpRail.nx,
+                nz: cpRail.nz,
+                roadHeading: cpRail.heading,
+                signedPerpOffset: roadCheck.signedPerpOffset,
+                maxCenterLat,
               });
-              const railHitDmg = evaluateSpeedGatedImpact({
-                damage: activeDamageState,
-                impactZone: railSide < 0 ? 'left' : 'right',
-                impactSpeed: railEval.impactSpeed,
-                minDamageSpeed: 12.5,
-                highSpeedThreshold: 22.5,
-                hitQuality: railEval.hitQuality,
-                sideBias: railSide,
-                allowTotaling: railEval.shouldBreach,
-              });
-              if (railHitDmg.appliedSeverity > 0) {
-                activeDamageState = railHitDmg.nextDamage;
-                onCarDamageChangeRef.current?.(activeDamageState);
-              }
-              if (railEval.shouldBreach || isCarTotaled(activeDamageState)) {
-                shouldCrashOut = true;
-              } else {
-                // Slow or glancing rail contact bounces safely back onto the road without losing!
-                const clampedLat = railSide * Math.max(0, roadCheck.halfWidth - 0.18);
-                const alongS = (driftState.x - cpRail.x) * cpRail.tx + (driftState.z - cpRail.z) * cpRail.tz;
-                driftState.x = cpRail.x + cpRail.tx * alongS + cpRail.nx * clampedLat;
-                driftState.z = cpRail.z + cpRail.tz * alongS + cpRail.nz * clampedLat;
-                const fwdSpd = Math.max(5.5, (driftState.vx * cpRail.tx + driftState.vz * cpRail.tz) * railEval.scrubbedSpeedFactor);
-                driftState.vx = cpRail.tx * fwdSpd - cpRail.nx * railSide * railEval.inwardBounceLatVel;
-                driftState.vz = cpRail.tz * fwdSpd - cpRail.nz * railSide * railEval.inwardBounceLatVel;
-                driftState.heading = normalizeAngle(
-                  driftState.heading + normalizeAngle(cpRail.heading - driftState.heading) * 0.42
-                );
-                heroRollRad += railSide * 0.18;
-                cameraTrauma = Math.min(1, cameraTrauma + 0.38);
-                combo = Math.max(1, Math.floor(combo * 0.75));
-                if (sparkAudioCooldown <= 0) {
-                  sparkAudioCooldown = 0.14;
-                  soundFX.playGuardrailSpark();
-                  triggerHaptic('medium', false, 'collision');
+              if (railRes.hit) {
+                const railImpact = evaluateGuardrailImpact({
+                  playerSpeed: curSpeed,
+                  outwardLateralSpeed: railRes.outwardSpeed,
+                  overallIntegrity: getCarOverallIntegrity(activeDamageState),
+                });
+
+                if (railRes.outwardSpeed > 1.15) {
+                  const railDmg =
+                    railRes.outwardSpeed >= 4.0
+                      ? applyImpactToCarDamage({
+                          damage: activeDamageState,
+                          impactZone: railRes.railSide < 0 ? 'left' : 'right',
+                          severity: Math.min(0.88, 0.28 + railRes.outwardSpeed * 0.075),
+                          sideBias: railRes.railSide,
+                        })
+                      : evaluateSpeedGatedImpact({
+                          damage: activeDamageState,
+                          impactZone: railRes.railSide < 0 ? 'left' : 'right',
+                          impactSpeed: railImpact.impactSpeed,
+                          minDamageSpeed: 5.5,
+                          highSpeedThreshold: 17.5,
+                          hitQuality: Math.min(1, 0.38 + railRes.outwardSpeed * 0.09),
+                          sideBias: railRes.railSide,
+                          allowTotaling: false,
+                        });
+                  activeDamageState = railDmg.nextDamage;
+                  onCarDamageChangeRef.current?.(activeDamageState);
+                  if (railDmg.newlyDetached.length > 0) {
+                    soundFX.playPartDetach(railDmg.newlyDetached.length);
+                    for (let dp = 0; dp < railDmg.newlyDetached.length; dp++) {
+                      spawnDetachedPart(
+                        railDmg.newlyDetached[dp],
+                        driftState.x,
+                        driftState.y,
+                        driftState.z,
+                        driftState.vx * 0.45,
+                        driftState.vz * 0.45,
+                        driftState.y + 0.06,
+                        currentAppearance.primaryColor,
+                        currentCar.accentColor,
+                        railRes.railSide
+                      );
+                    }
+                  }
                 }
-                nearMissText = railHitDmg.appliedSeverity > 0 ? 'GUARDRAIL SLAM!' : 'RAIL BOUNCE!';
-                nearMissTimer = 0.85;
-                pushCallout(
-                  driftState.x,
-                  driftState.y + 1.5,
-                  driftState.z,
-                  railHitDmg.appliedSeverity > 0 ? 'HARD RAIL HIT!' : 'RAIL BOUNCE!',
-                  '#fbbf24',
-                  0.85
-                );
-                for (let sp = 0; sp < 8; sp++) {
-                  pushDebrisChunk({
-                    x: driftState.x + railSide * 0.85,
-                    y: driftState.y + 0.35,
-                    z: driftState.z,
-                    vx: -railSide * (2 + Math.random() * 4),
-                    vy: 2 + Math.random() * 4,
-                    vz: (Math.random() - 0.5) * 4,
-                    size: 0.18,
-                    rot: Math.random() * 4,
-                    vRot: 10,
-                    life: 0.35,
-                    color: sp % 2 === 0 ? '#fef08a' : '#f97316',
-                  });
+
+                if (railImpact.shouldBreach || isCarTotaled(activeDamageState)) {
+                  // SMASH THROUGH THE GUARDRAIL!
+                  breachedSliceIdx = cpRail.index;
+                  breachedSide = railRes.railSide;
+                  const advZoneBreach = isAdventureMode ? resolveAdventureZone(distance, cpRail.index) : null;
+                  const offLatProbe = railRes.railSide * (cpRail.width * 0.5 + 2.1);
+                  const offGroundProbe = advZoneBreach
+                    ? sampleAdventureTerrainElevation(offLatProbe, driftState.z, cpRail.y, advZoneBreach)
+                    : sampleTerrainElevation(offLatProbe, driftState.z, resolveRoadBiome(effectiveRoadMode, distance).id);
+                  const dropFromRoad = cpRail.y - offGroundProbe;
+
+                  // Shatter steel/wood barrier posts & sparks visually
+                  const breachBiome = resolveRoadBiome(effectiveRoadMode, distance);
+                  for (let bi = 0; bi < 8; bi++) {
+                    const ang = Math.random() * Math.PI * 2;
+                    const spd = 3 + Math.random() * 6.5;
+                    pushDebrisChunk({
+                      x: driftState.x + cpRail.nx * railRes.railSide * 0.85,
+                      y: driftState.y + 0.45,
+                      z: driftState.z + cpRail.nz * railRes.railSide * 0.85,
+                      vx: Math.cos(ang) * spd + cpRail.nx * railRes.railSide * 3.0,
+                      vy: 2.8 + Math.random() * 4.2,
+                      vz: Math.sin(ang) * spd,
+                      size: 0.42,
+                      w: 1.25,
+                      h: 0.22,
+                      gravity: 24,
+                      rot: Math.random() * 6,
+                      vRot: (Math.random() - 0.5) * 14,
+                      life: 1.25,
+                      color: isAdventureMode ? '#7c4a21' : bi % 2 === 0 ? breachBiome.railLight : '#475569',
+                    });
+                  }
+
+                  if (isHighwayMode || dropFromRoad > 3.2 || getCarOverallIntegrity(activeDamageState) < 28) {
+                    shouldCrashOut = true;
+                  } else {
+                    // Regular Adventure/Drift Mode: Break barrier & launch onto live OFF-ROAD terrain!
+                    isOffRoad = true;
+                    offRoadTreeHitCooldown = 0.22;
+                    const alongS = (driftState.x - cpRail.x) * cpRail.tx + (driftState.z - cpRail.z) * cpRail.tz;
+                    const outLat = railRes.railSide * (maxCenterLat + 1.15);
+                    driftState.x = cpRail.x + cpRail.tx * alongS + cpRail.nx * outLat;
+                    driftState.z = cpRail.z + cpRail.tz * alongS + cpRail.nz * outLat;
+                    driftState.vx = driftState.vx * 0.78 + cpRail.nx * railRes.railSide * 2.2;
+                    driftState.vz = driftState.vz * 0.78 + cpRail.nz * railRes.railSide * 2.2;
+                    carAirborne = true;
+                    carVy = Math.max(1.8, railRes.outwardSpeed * 0.32);
+                    heroRollRad += railRes.railSide * 0.24;
+                    cameraTrauma = Math.min(1, cameraTrauma + 0.62);
+                    soundFX.playTrafficCrunch(0.68);
+                    soundFX.playGuardrailSpark();
+                    triggerHaptic('heavy', false, 'collision');
+                    nearMissText = 'GUARDRAIL BROKEN · OFF-ROAD!';
+                    nearMissTimer = 1.45;
+                    pushCallout(driftState.x, driftState.y + 1.85, driftState.z, 'OFF-ROAD BREACH!', '#f59e0b', 1.15);
+                  }
+                } else {
+                  const alongS = (driftState.x - cpRail.x) * cpRail.tx + (driftState.z - cpRail.z) * cpRail.tz;
+                  driftState.x = cpRail.x + cpRail.tx * alongS + cpRail.nx * railRes.clampedLat;
+                  driftState.z = cpRail.z + cpRail.tz * alongS + cpRail.nz * railRes.clampedLat;
+                  driftState.vx = railRes.nextVx;
+                  driftState.vz = railRes.nextVz;
+                  driftState.heading = railRes.nextHeading;
+
+                  if (railRes.outwardSpeed > 1.35) {
+                    heroRollRad += railRes.railSide * Math.min(0.22, 0.08 + railRes.outwardSpeed * 0.012);
+                    cameraTrauma = Math.min(1, cameraTrauma + Math.min(0.45, 0.16 + railRes.outwardSpeed * 0.025));
+                    combo = Math.max(1, Math.floor(combo * 0.78));
+                    if (sparkAudioCooldown <= 0) {
+                      sparkAudioCooldown = 0.15;
+                      soundFX.playGuardrailSpark();
+                      triggerHaptic('medium', false, 'collision');
+                    }
+                    if (nearMissTimer <= 0.1) {
+                      nearMissText = railRes.outwardSpeed >= 4.0 ? 'GUARDRAIL IMPACT!' : 'RAIL SCRAPE!';
+                      nearMissTimer = 0.75;
+                    }
+                    for (let sp = 0; sp < 6; sp++) {
+                      pushDebrisChunk({
+                        x: driftState.x + cpRail.nx * railRes.railSide * 0.85,
+                        y: driftState.y + 0.35,
+                        z: driftState.z + cpRail.nz * railRes.railSide * 0.85,
+                        vx: -cpRail.nx * railRes.railSide * (2 + Math.random() * 4),
+                        vy: 2 + Math.random() * 3.5,
+                        vz: -cpRail.nz * railRes.railSide * (2 + Math.random() * 4) + (Math.random() - 0.5) * 3,
+                        size: 0.16,
+                        rot: Math.random() * 4,
+                        vRot: 10,
+                        life: 0.32,
+                        color: sp % 2 === 0 ? '#fef08a' : '#f97316',
+                      });
+                    }
+                  }
                 }
               }
             } else {
-              shouldCrashOut = true;
+              // Currently driving OFF-ROAD outside the guardrail!
+              if (Math.abs(roadCheck.signedPerpOffset) < cpRail.width * 0.45 && Math.abs(driftState.y - cpRail.y) < 1.6) {
+                isOffRoad = false;
+                nearMissText = 'BACK ON ROAD!';
+                nearMissTimer = 0.9;
+                pushCallout(driftState.x, driftState.y + 1.5, driftState.z, 'BACK ON TARMAC!', '#34d399', 0.85);
+              } else {
+                const advZoneOffNow = isAdventureMode ? resolveAdventureZone(distance, cpRail.index) : null;
+                const offGroundNow = advZoneOffNow
+                  ? sampleAdventureTerrainElevation(roadCheck.signedPerpOffset, driftState.z, cpRail.y, advZoneOffNow)
+                  : sampleTerrainElevation(roadCheck.signedPerpOffset, driftState.z, resolveRoadBiome(effectiveRoadMode, distance).id);
+                // Plunged into river gorge beneath wooden bridge or way out off cliff edge
+                if (cpRail.y - offGroundNow > 4.2 || Math.abs(roadCheck.signedPerpOffset) > 28) {
+                  crashReason = 'Off-Road Gorge Drop';
+                  shouldCrashOut = true;
+                } else if (offRoadTreeHitCooldown <= 0) {
+                  // Collide solidly with roadside trees, rocks & buildings while driving off-road!
+                  for (let pi = 0; pi < valleyProps.length; pi++) {
+                    const pr = valleyProps[pi];
+                    const pdx = driftState.x - pr.x;
+                    const pdz = driftState.z - pr.z;
+                    const hitRad = pr.variant === 2 ? 1.25 : 1.55;
+                    if (pdx * pdx + pdz * pdz <= hitRad * hitRad) {
+                      offRoadTreeHitCooldown = 0.48;
+                      const sideBiasProp = pdx * cpRail.nx + pdz * cpRail.nz >= 0 ? 1 : -1;
+                      const propDmg = applyImpactToCarDamage({
+                        damage: activeDamageState,
+                        impactZone: 'front',
+                        severity: curSpeed >= 13 ? 0.92 : 0.56,
+                        sideBias: sideBiasProp,
+                      });
+                      activeDamageState = propDmg.nextDamage;
+                      onCarDamageChangeRef.current?.(activeDamageState);
+                      if (propDmg.newlyDetached.length > 0) {
+                        soundFX.playPartDetach(propDmg.newlyDetached.length);
+                        for (let dp = 0; dp < propDmg.newlyDetached.length; dp++) {
+                          spawnDetachedPart(
+                            propDmg.newlyDetached[dp],
+                            driftState.x,
+                            driftState.y,
+                            driftState.z,
+                            driftState.vx * 0.4,
+                            driftState.vz * 0.4,
+                            driftState.y + 0.08,
+                            currentAppearance.primaryColor,
+                            currentCar.accentColor,
+                            sideBiasProp
+                          );
+                        }
+                      }
+                      for (let lk = 0; lk < 12; lk++) {
+                        const ang = Math.random() * Math.PI * 2;
+                        pushDebrisChunk({
+                          x: pr.x,
+                          y: driftState.y + 0.9,
+                          z: pr.z,
+                          vx: Math.cos(ang) * (3 + Math.random() * 5),
+                          vy: 2.5 + Math.random() * 4.5,
+                          vz: Math.sin(ang) * (3 + Math.random() * 5),
+                          size: 0.24 + Math.random() * 0.14,
+                          gravity: 16,
+                          rot: Math.random() * 6,
+                          vRot: (Math.random() - 0.5) * 14,
+                          life: 0.72,
+                          color: lk % 2 === 0 ? '#4d7c0f' : '#78350f',
+                        });
+                      }
+                      soundFX.playTrafficCrunch(0.75);
+                      cameraTrauma = Math.min(1, cameraTrauma + 0.72);
+                      triggerHaptic('heavy', false, 'collision');
+                      driftState.vx = -driftState.vx * 0.35 + cpRail.nx * -Math.sign(roadCheck.signedPerpOffset || 1) * 3.0;
+                      driftState.vz = -driftState.vz * 0.35;
+                      if (curSpeed >= 15.0 || isCarTotaled(activeDamageState)) {
+                        crashReason = 'Off-Road Obstacle Impact';
+                        shouldCrashOut = true;
+                      } else {
+                        nearMissText = 'OFF-ROAD OBSTACLE HIT!';
+                        nearMissTimer = 1.1;
+                        pushCallout(driftState.x, driftState.y + 1.8, driftState.z, 'IMPACT!', '#ef4444', 0.95);
+                      }
+                      break;
+                    }
+                  }
+                }
+              }
             }
+          } else if (isMountainMode && (!roadCheck.onRoad || mountainStepRes?.fellReason)) {
+            shouldCrashOut = true;
           }
 
           if (shouldCrashOut) {
@@ -3776,9 +4180,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             tireGassingNow = isGasInputNow;
             tireHighSparks = combo >= 3 || isFever;
 
-            const isDirtTrailRoost = isMountainMode && !mountainState?.isAirborne && simSpeedNow > 7.5;
+            const isDirtTrailRoost = (isMountainMode || isOffRoad) && !airborneFlagNow && simSpeedNow > 5.5;
             if (
-              !(isMountainMode && mountainState?.isAirborne) &&
+              !airborneFlagNow &&
               (driftingNow || hardRailScrape || isBrakeInputNow || isLaunchBurnout || isRainMist || isDirtTrailRoost)
             ) {
               tireEmitMode = hardRailScrape
@@ -3802,7 +4206,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   isLaunchBurnout ? 0.58 : 0,
                   hardRailScrape ? 0.8 : 0,
                   isRainMist ? 0.48 : 0,
-                  isDirtTrailRoost ? 0.52 : 0
+                  isDirtTrailRoost ? 0.62 : 0
                 )
               );
             }
@@ -4080,7 +4484,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               }
             }
 
-            // 2-LANE HIGHWAY TRAFFIC SIMULATION (Overtakes, Near Misses, Yielding & Collisions!)
+            // 2-LANE HIGHWAY TRAFFIC SIMULATION (Overtakes, Near Misses, Yielding & Solid-Body Collisions!)
             if (isHighwayMode && roadCheck.closestPoint) {
               const cp = roadCheck.closestPoint;
               const playerS =
@@ -4089,6 +4493,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
               stepTrafficCars(trafficCars, simDt);
               const curRoadHalfW = roadCheck.halfWidth || 4.9;
+              resolveTrafficInterCarSpacing(trafficCars, curRoadHalfW);
               for (let ti = 0; ti < trafficCars.length; ti++) {
                 const tc = trafficCars[ti];
                 if (tc.crashed) {
@@ -4150,15 +4555,29 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   damage: activeDamageState,
                   impactZone: impulse.isFatalCrash ? 'front' : impulse.sideBias < 0 ? 'right' : 'left',
                   impactSpeed: impulse.closingSpeed,
-                  minDamageSpeed: 9.5,
-                  highSpeedThreshold: hit.isOncoming ? 24.0 : 14.5,
-                  hitQuality: impulse.hitQuality,
+                  minDamageSpeed: 5.5,
+                  highSpeedThreshold: hit.isOncoming ? 22.0 : 13.5,
+                  hitQuality: Math.max(impulse.hitQuality, 0.45),
                   sideBias: impulse.sideBias,
-                  allowTotaling: impulse.isFatalCrash,
+                  allowTotaling: impulse.isFatalCrash || impulse.closingSpeed >= 13.5,
                 });
                 activeDamageState = tDmg.nextDamage;
+                if (!impulse.isFatalCrash && impulse.closingSpeed >= 10.5) {
+                  const crunchRes = applyImpactToCarDamage({
+                    damage: activeDamageState,
+                    impactZone: impulse.sideBias < 0 ? 'right' : 'left',
+                    severity: Math.min(0.68, 0.25 + impulse.closingSpeed * 0.025),
+                    sideBias: impulse.sideBias,
+                  });
+                  activeDamageState = crunchRes.nextDamage;
+                  for (let cd = 0; cd < crunchRes.newlyDetached.length; cd++) {
+                    if (!tDmg.newlyDetached.includes(crunchRes.newlyDetached[cd])) {
+                      tDmg.newlyDetached.push(crunchRes.newlyDetached[cd]);
+                    }
+                  }
+                }
 
-                const fatalCrash = impulse.isFatalCrash || tDmg.isTotaled;
+                const fatalCrash = impulse.isFatalCrash || tDmg.isTotaled || isCarTotaled(activeDamageState);
                 if (fatalCrash && !isCarTotaled(activeDamageState)) {
                   const wreckCrush = applyImpactToCarDamage({
                     damage: activeDamageState,
@@ -4524,6 +4943,48 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
                   trafficSpawnCursor = playerS + 290;
                 }
               }
+
+              // Unconditional solid-body OBB separation against ALL traffic cars (prevents ghosting during cooldowns/crashes)
+              const solidPlayerLatNow =
+                (driftState.x - cp.x) * cp.nx + (driftState.z - cp.z) * cp.nz;
+              const solidPlayerSNow =
+                cp.index * STEP_DIST +
+                ((driftState.x - cp.x) * cp.tx + (driftState.z - cp.z) * cp.tz);
+              const solidFwdVel = driftState.vx * cp.tx + driftState.vz * cp.tz;
+              const solidLatVel = driftState.vx * cp.nx + driftState.vz * cp.nz;
+              const solidPlayerMass =
+                currentCar.bodyShape === 'semi' || currentCar.bodyShape === 'truck' ? 2.15 : 1.32;
+              const solidRes = resolveHighwayTrafficSolidPass({
+                playerS: solidPlayerSNow,
+                playerLat: solidPlayerLatNow,
+                playerHeadingRelRoad: normalizeAngle(driftState.heading - cp.heading),
+                playerFwdVel: solidFwdVel,
+                playerLatVel: solidLatVel,
+                playerMass: solidPlayerMass,
+                roadHalfWidth: curRoadHalfW,
+                trafficCars,
+              });
+              if (solidRes.primaryCar) {
+                const baseAlongS = solidRes.nextPlayerS - cp.index * STEP_DIST;
+                driftState.x = cp.x + cp.tx * baseAlongS + cp.nx * solidRes.nextPlayerLat;
+                driftState.z = cp.z + cp.tz * baseAlongS + cp.nz * solidRes.nextPlayerLat;
+                driftState.vx = cp.tx * solidRes.nextPlayerFwdVel + cp.nx * solidRes.nextPlayerLatVel;
+                driftState.vz = cp.tz * solidRes.nextPlayerFwdVel + cp.nz * solidRes.nextPlayerLatVel;
+                if (isTrafficCrash) {
+                  crashBody.x = driftState.x;
+                  crashBody.z = driftState.z;
+                  crashBody.vx = driftState.vx;
+                  crashBody.vz = driftState.vz;
+                } else if (
+                  !trafficEval.collidedCar &&
+                  (!solidRes.primaryCar.scrapeCooldown || solidRes.primaryCar.scrapeCooldown <= 0) &&
+                  solidRes.impactSpeed > 1.2
+                ) {
+                  solidRes.primaryCar.scrapeCooldown = 0.35;
+                  soundFX.playTrafficCrunch(0.28);
+                  cameraTrauma = Math.min(1, cameraTrauma + 0.16);
+                }
+              }
             }
         }
         }
@@ -4881,27 +5342,26 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           const hw = roadCheckNow.halfWidth || 4.9;
           if (cpNow) {
             crashGroundY = cpNow.y + 0.04;
-            if (Math.abs(latOff) > hw + 0.35) {
-              // Impact blasted hero car straight through the bridge guardrail into the canyon/valley!
-              isFalling = true;
-              isTrafficCrash = false;
-              fallTimer = 0;
-              groundImpacted = false;
-              groundRestTimer = 0;
-              breachedSide = latOff >= 0 ? 1 : -1;
-              breachedSliceIdx = cpNow.index;
-              soundFX.playFallAndDestroy();
-              pushCallout(driftState.x, driftState.y + 1.8, driftState.z, 'GUARDRAIL BREACH!', '#fbbf24', 0.85);
-            } else if (Math.abs(latOff) > hw - 0.55) {
-              // Bounce hero car inward off highway steel guardrail with sparks
+            const maxCrashCenterLat = Math.max(1.1, hw - 0.86);
+            if (Math.abs(latOff) > maxCrashCenterLat) {
+              // Keep wrecked car contained solidly inside steel highway guardrails with sparks
               const sign = latOff >= 0 ? 1 : -1;
+              const alongS = (crashBody.x - cpNow.x) * cpNow.tx + (crashBody.z - cpNow.z) * cpNow.tz;
+              const clampedCrashLat = sign * maxCrashCenterLat;
+              crashBody.x = cpNow.x + cpNow.tx * alongS + cpNow.nx * clampedCrashLat;
+              crashBody.z = cpNow.z + cpNow.tz * alongS + cpNow.nz * clampedCrashLat;
+              driftState.x = crashBody.x;
+              driftState.z = crashBody.z;
               const latVel = crashBody.vx * cpNow.nx + crashBody.vz * cpNow.nz;
               if (latVel * sign > 0) {
                 crashBody.vx -= cpNow.nx * latVel * 1.48;
                 crashBody.vz -= cpNow.nz * latVel * 1.48;
                 crashBody.yawVel = -crashBody.yawVel * 0.65;
-                cameraTrauma = Math.min(1, cameraTrauma + 0.35);
-                soundFX.playGuardrailSpark();
+                cameraTrauma = Math.min(1, cameraTrauma + 0.32);
+                if (sparkAudioCooldown <= 0) {
+                  sparkAudioCooldown = 0.15;
+                  soundFX.playGuardrailSpark();
+                }
                 for (let sp = 0; sp < 8; sp++) {
                   const ang = Math.random() * Math.PI * 2;
                   const spd = 3 + Math.random() * 8;
@@ -5014,8 +5474,35 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           if (isFalling) {
             const targetFallCamY = Math.max(crashGroundY + 0.4, driftState.y + 0.75);
             camFocusY += (targetFallCamY - camFocusY) * Math.min(1, 7.5 * dt);
+          } else if (isMountainMode) {
+            const mtnSurfCam = sampleMountainSurface(
+              driftState.x,
+              driftState.z,
+              track,
+              STEP_DIST,
+              stats.roadAllowanceBonus
+            );
+            const mtnCpCam = mtnSurfCam.closestPoint;
+            const mtnAheadPt = mtnCpCam
+              ? track[Math.min(track.length - 1, Math.max(0, (mtnCpCam.index - (track[0]?.index ?? 0)) + 3))]
+              : null;
+            const mtnCamGoal = computeMountainCameraTarget({
+              carY: driftState.y,
+              carVy: mountainState?.vy ?? carVy,
+              roadSlope: (mountainState?.currentSlopePct || 0) / 100,
+              isAirborne: Boolean(mountainState?.isAirborne),
+              inChasmGap: mtnSurfCam.inChasmGap,
+              referenceGroundY: mtnSurfCam.referenceGroundY,
+              roadY: mtnSurfCam.roadY,
+              aheadRoadY: mtnAheadPt ? mtnAheadPt.y : undefined,
+              isTitle: false,
+            });
+            camFocusY += (mtnCamGoal.focusY - camFocusY) * Math.min(1, (mountainState?.isAirborne ? 7.2 : 10.5) * dt);
           } else {
-            camFocusY += (driftState.y - camFocusY) * Math.min(1, 10 * dt);
+            const heroAltNow = Math.max(0, driftState.y - carGroundY);
+            const targetCamY =
+              heroAltNow > 0.05 ? carGroundY * 0.45 + driftState.y * 0.55 : driftState.y;
+            camFocusY += (targetCamY - camFocusY) * Math.min(1, (heroAltNow > 0.05 ? 5.8 : 10) * dt);
           }
           camFocusZ += (targetCamZ - camFocusZ) * Math.min(1, 11 * dt);
         }
@@ -5173,7 +5660,15 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       const isPortrait = pxW < pxH;
       const curSpeedVal = Math.hypot(driftState.vx, driftState.vz);
       const speedRushFactor = Math.max(0, Math.min(1, (curSpeedVal - 20) / 16));
-      const fovScale = pxH * (isPortrait ? 0.74 + speedRushFactor * 0.05 : 0.90 + speedRushFactor * 0.06);
+      const pedalFovShift =
+        phase === 'playing' && !isParkingMode
+          ? keyDown || pedalBrakeRef.current
+            ? -0.014
+            : keyUp || pedalGasRef.current
+            ? 0.015
+            : 0
+          : 0;
+      const fovScale = pxH * (isPortrait ? 0.74 + speedRushFactor * 0.05 + pedalFovShift : 0.90 + speedRushFactor * 0.06 + pedalFovShift);
       const horizonY = cachedHorizonY;
 
       const targetDiag = Math.max(-1, Math.min(1, visualDriftAngle));
@@ -5191,10 +5686,40 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       const rightX = -fwdZ;
       const rightZ = fwdX;
 
-      const baseDistBack = isParkingMode ? 12.4 : (isHighwayMode ? 9.4 : 8.4) + camSpeedZoom * 0.85;
-      const camDistBack = phase === 'title' && !isParkingMode ? baseDistBack + 2.0 : baseDistBack;
+      const isAirborneRender = carAirborne || Boolean(isMountainMode && mountainState?.isAirborne);
+      const mtnCamMetrics = isMountainMode
+        ? computeMountainCameraTarget({
+            carY: driftState.y,
+            carVy: mountainState?.vy ?? carVy,
+            roadSlope: activeRoadSlope,
+            isAirborne: isAirborneRender,
+            inChasmGap: false,
+            referenceGroundY: driftState.y,
+            roadY: driftState.y,
+            isTitle: phase === 'title',
+            speedZoom: camSpeedZoom,
+          })
+        : null;
+      const airPitchSlopeShift = isAirborneRender
+        ? -Math.max(-0.22, Math.min(0.22, carVy / Math.max(12, curSpeedVal))) * 0.22
+        : 0;
+      const targetCamPitchSlope = isParkingMode
+        ? 0.068
+        : mtnCamMetrics
+        ? mtnCamMetrics.pitchSlope
+        : Math.max(-0.14, Math.min(0.26, 0.068 - activeRoadSlope * 0.42 + airPitchSlopeShift));
+      fCamPitchSlope += (targetCamPitchSlope - fCamPitchSlope) * Math.min(1, 7.5 * dt);
+
+      const baseDistBack = isParkingMode
+        ? 12.4
+        : mtnCamMetrics
+        ? mtnCamMetrics.camDistBack
+        : (isHighwayMode ? 9.4 : 8.4) + camSpeedZoom * 0.85;
+      const camDistBack = phase === 'title' && !isParkingMode && !mtnCamMetrics ? baseDistBack + 2.0 : baseDistBack;
       const camHeight = isParkingMode
         ? 5.05
+        : mtnCamMetrics
+        ? mtnCamMetrics.camHeight
         : phase === 'title'
         ? isHighwayMode
           ? 2.35
@@ -5247,27 +5772,29 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
         const tireId = currentCustom?.tires || 'stock';
         const isSprayOnly = tireEmitMode === 'spray';
-        const markColor = isMountainMode
-          ? '#46301f'
-          : tireId === 'drag_slick'
-          ? '#090b10'
-          : tireId === 'rain_groove'
-          ? '#0c1624'
-          : tireId === 'semi_slick'
-          ? '#0d1017'
-          : '#11141c';
+        const markColor =
+          isMountainMode || isOffRoad
+            ? '#46301f'
+            : tireId === 'drag_slick'
+            ? '#090b10'
+            : tireId === 'rain_groove'
+            ? '#0c1624'
+            : tireId === 'semi_slick'
+            ? '#0d1017'
+            : '#11141c';
         const markWidth =
           anchors.tireWidthScale *
-          (tireBrakingNow ? 1.16 : tireEmitMode === 'burnout' ? 1.12 : isMountainMode ? 1.1 : 1.0);
-        const markAlpha = isMountainMode
-          ? isSprayOnly
-            ? 0.34
-            : 0.58
-          : isSprayOnly
-          ? 0.42
-          : tireBrakingNow
-          ? 0.88
-          : Math.min(0.90, 0.54 + tireSlipIntensity * 0.36);
+          (tireBrakingNow ? 1.16 : tireEmitMode === 'burnout' ? 1.12 : isMountainMode || isOffRoad ? 1.12 : 1.0);
+        const markAlpha =
+          isMountainMode || isOffRoad
+            ? isSprayOnly
+              ? 0.36
+              : 0.60
+            : isSprayOnly
+            ? 0.42
+            : tireBrakingNow
+            ? 0.88
+            : Math.min(0.90, 0.54 + tireSlipIntensity * 0.36);
 
         const prevSkid = getLastSkidMark();
         const moveDist = prevSkid
@@ -5341,19 +5868,20 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             : Math.min(0.92, 0.45 + tireSlipIntensity * 0.55);
 
         if (Math.random() < smokeChance) {
-          const smokeTint: SmokePuff['tint'] = isMountainMode
-            ? isFever
+          const smokeTint: SmokePuff['tint'] =
+            isMountainMode || isOffRoad
+              ? isFever
+                ? 'cyan'
+                : 'dirt'
+              : isFever
               ? 'cyan'
-              : 'dirt'
-            : isFever
-            ? 'cyan'
-            : tireId === 'rain_groove'
-            ? 'aqua'
-            : tireId === 'drift_spec'
-            ? 'pink'
-            : tireId === 'semi_slick' || tireId === 'drag_slick'
-            ? 'warm'
-            : 'white';
+              : tireId === 'rain_groove'
+              ? 'aqua'
+              : tireId === 'drift_spec'
+              ? 'pink'
+              : tireId === 'semi_slick' || tireId === 'drag_slick'
+              ? 'warm'
+              : 'white';
           const compoundScale =
             (isMountainMode ? 1.24 : 1.0) *
             (tireId === 'drift_spec'
@@ -5406,8 +5934,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               });
             }
 
-            // Flung dirt clods & pebbles on mountain terrain, or sparks on paved curbs
-            if (isMountainMode && Math.random() < (tireGassingNow ? 0.55 : 0.32)) {
+            // Flung dirt clods & pebbles on mountain/off-road terrain, or sparks on paved curbs
+            if ((isMountainMode || isOffRoad) && Math.random() < (tireGassingNow ? 0.55 : 0.35)) {
               pushDebrisChunk({
                 x: wx,
                 y: driftState.y + 0.08,
@@ -5493,12 +6021,13 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           camWorldZ,
           fwdX,
           fwdZ,
+          camPitchSlope: fCamPitchSlope,
           biome,
           sky,
           inDeepCave,
         });
 
-        // Soft high-altitude atmospheric cirrus wisps (cached offscreen sprite, zero per-frame gradient allocation)
+        // Soft high-altitude atmospheric cirrus wisps + distant soaring bird flock (zero allocs)
         const cloudDrift = (camHeading + Math.PI / 2) * 28;
         ctx.save();
         ctx.globalAlpha = sky.isNight ? 0.16 : 0.28;
@@ -5513,11 +6042,30 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           const ry = (11 + (w % 2) * 5) * HD_UI_SCALE;
           ctx.drawImage(wispImg, wx - rx, wy - ry, rx * 2, ry * 2);
         }
+        if (!sky.isNight) {
+          ctx.globalAlpha = 0.42;
+          ctx.strokeStyle = sky.id === 'golden_sunset' ? '#451a03' : '#1e293b';
+          ctx.lineWidth = Math.max(1, 1.25 * HD_UI_SCALE);
+          for (let b = 0; b < 6; b++) {
+            const bSpan = pxW + 180 * HD_UI_SCALE;
+            const bxRaw = (0.15 + b * 0.095) * pxW + now * (0.009 + (b % 3) * 0.002) - cloudDrift * 0.38;
+            const bx = (((bxRaw % bSpan) + bSpan) % bSpan) - 90 * HD_UI_SCALE;
+            const by = horizonY * (0.34 + Math.sin(b * 1.4) * 0.09) + Math.sin(now * 0.002 + b) * 3 * HD_UI_SCALE;
+            const flap = Math.sin(now * 0.009 + b * 1.9) * 2.8 * HD_UI_SCALE;
+            const wing = (4.2 + (b % 2) * 1.6) * HD_UI_SCALE;
+            ctx.beginPath();
+            ctx.moveTo(bx - wing, by - flap);
+            ctx.quadraticCurveTo(bx - wing * 0.45, by - Math.abs(flap) - 1.5 * HD_UI_SCALE, bx, by);
+            ctx.quadraticCurveTo(bx + wing * 0.45, by - Math.abs(flap) - 1.5 * HD_UI_SCALE, bx + wing, by - flap);
+            ctx.stroke();
+          }
+        }
         ctx.restore();
       } else {
         // Fallback 2D Sky Gradient, Stars/Aurora & Celestial Disc (also used inside deep caves)
+        const skySplitY = Math.max(0, Math.min(pxH, horizonY + (0.068 - fCamPitchSlope) * fovScale));
         ctx.fillStyle = cachedSkyGrad || sky.skyStops[1];
-        ctx.fillRect(0, 0, pxW, horizonY + Math.round(14 * HD_UI_SCALE));
+        ctx.fillRect(0, 0, pxW, skySplitY + Math.round(14 * HD_UI_SCALE));
 
         const logPxW = pxW / HD_UI_SCALE;
         const logHorizonY = horizonY / HD_UI_SCALE;
@@ -5649,13 +6197,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         }
       }
 
+      const dynamicGroundCutY = Math.max(0, Math.min(pxH, horizonY + (0.068 - fCamPitchSlope) * fovScale));
       if (!useWebglBackdrop) {
         if (playerAdvZone) {
           ctx.fillStyle = playerAdvZone.caveBlend > 0.45 ? playerAdvZone.chapter.caveCeiling : '#1e3522';
         } else {
           ctx.fillStyle = cachedMeadowGrad || biome.valleyStops[1];
         }
-        ctx.fillRect(0, horizonY, pxW, pxH - horizonY);
+        ctx.fillRect(0, dynamicGroundCutY, pxW, pxH - dynamicGroundCutY);
 
         if (!playerAdvZone || playerAdvZone.caveBlend <= 0.65) {
           renderBackgroundVista3D({
@@ -5679,7 +6228,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       } else if (isAdventureMode) {
         // Adventure forest hillside ground color when WebGL sky horizon sits behind
         ctx.fillStyle = '#1e3522';
-        ctx.fillRect(0, horizonY, pxW, pxH - horizonY);
+        ctx.fillRect(0, dynamicGroundCutY, pxW, pxH - dynamicGroundCutY);
       }
 
       // In Adventure Mode, place horizon mist & subterranean sky darkening BEHIND foreground hills/caves
@@ -5995,7 +6544,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           drawQuadPts(pScratch0, far.pR, near.pR, pScratch1, shoulderTint);
         }
 
-        // Specular Wet-Night / Golden-Hour Center Reflection Sheen (zero allocations using scratch pts)
+        // Specular Wet-Night / Golden-Hour Center Reflection Sheen + Damp Puddle Glints (zero allocations)
         if ((biome.isNight || sky.id === 'golden_sunset') && far.rawZ < 92) {
           const sheenCol =
             sky.id === 'red_moon'
@@ -6014,6 +6563,15 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           pScratch3.x = near.pL.x + (near.pR.x - near.pL.x) * 0.34;
           pScratch3.y = near.pL.y + (near.pR.y - near.pL.y) * 0.34;
           drawQuadPts(pScratch0, pScratch1, pScratch2, pScratch3, sheenCol);
+          if (far.pt.index % 7 === 3 && far.rawZ < 58) {
+            const pLatFrac = far.pt.index % 14 === 3 ? 0.24 : 0.76;
+            const pxPud = far.pL.x + (far.pR.x - far.pL.x) * pLatFrac;
+            const pyPud = (far.pL.y + near.pL.y) * 0.5;
+            ctx.fillStyle = biome.id === 'neon' ? 'rgba(56, 189, 248, 0.14)' : 'rgba(254, 215, 170, 0.13)';
+            ctx.beginPath();
+            ctx.ellipse(pxPud, pyPud, Math.max(3, 0.72 * far.cM.scale), Math.max(1.2, 0.18 * far.cM.scale), 0, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
 
         if (isNearMid && far.pt.index % 6 === 0) {
@@ -6797,6 +7355,10 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               : 'coast';
 
           // Grounded Chassis Contact Shadow + Airborne Mountain Jump Shadow + Underglow
+          const heroAirAltitude = Math.max(0, driftState.y - carGroundY);
+          const showAirborneShadow =
+            !isParkingMode &&
+            (isAirborneRender || heroAirAltitude > 0.08);
           if (isFalling || isTrafficCrash) {
             if (projectInto(driftState.x, crashGroundY, driftState.z, pScratchTmp)) {
               const alt = Math.max(0, driftState.y - crashGroundY);
@@ -6811,15 +7373,19 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               ctx.fill();
               ctx.restore();
             }
-          } else if (isMountainMode && mountainState?.isAirborne) {
-            const jumpSurf = sampleMountainSurface(
-              driftState.x,
-              driftState.z,
-              track,
-              STEP_DIST,
-              stats.roadAllowanceBonus
-            );
-            const floorShadowY = jumpSurf.inChasmGap ? jumpSurf.terrainY : jumpSurf.roadY;
+          } else if (showAirborneShadow) {
+            const floorShadowY = isMountainMode
+              ? (() => {
+                  const jumpSurf = sampleMountainSurface(
+                    driftState.x,
+                    driftState.z,
+                    track,
+                    STEP_DIST,
+                    stats.roadAllowanceBonus
+                  );
+                  return jumpSurf.inChasmGap ? jumpSurf.terrainY : jumpSurf.roadY;
+                })()
+              : carGroundY;
             if (projectInto(driftState.x, floorShadowY, driftState.z, pScratchTmp)) {
               const alt = Math.max(0, driftState.y - floorShadowY);
               const altScale = Math.max(0.28, 1 - alt * 0.055);
@@ -6836,8 +7402,9 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           } else {
             ctx.save();
             const shadowCy = getHeroGroundedShadowY(item.proj.y, carDrawH);
-            const shadowRx = carDrawW * 0.42;
-            const shadowRy = carDrawH * 0.14;
+            const suspScale = Math.max(0.86, 1 - Math.max(0, suspensionY) * 0.65);
+            const shadowRx = carDrawW * 0.42 * suspScale;
+            const shadowRy = carDrawH * 0.14 * suspScale;
             ctx.globalAlpha = 0.44;
             ctx.fillStyle = '#020617';
             ctx.beginPath();
@@ -6876,7 +7443,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             ctx.save();
             ctx.translate(cx, cy);
             if (isFalling || isTrafficCrash) ctx.rotate(fallRotation);
-            else ctx.rotate(heroRollRad + heroAirPitchRad * 0.18);
+            else ctx.rotate(heroRollRad);
             if (visualDriftAngle < 0) ctx.scale(-1, 1);
             ctx.drawImage(customImgEl, -carDrawW * 0.5, -carDrawH * 0.5, carDrawW, carDrawH);
             ctx.restore();
@@ -6891,6 +7458,11 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               highBeamTimer > 0
                 ? isHighBeamPulse
                 : headlightsOnRef.current && (isDarkOrCave || isParkingMode);
+            const effectiveHeroPitch = isParkingMode
+              ? 0.37
+              : isFalling || isTrafficCrash
+              ? Math.max(0.14, Math.min(0.62, 0.37 + crashBody.pitch * 0.5))
+              : heroPitchRad;
             const spriteCanvas = getPixelCarCanvas(
               currentCar,
               visualDriftAngle,
@@ -6901,7 +7473,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               activePedalMode,
               spriteHeadlightsOn,
               heroYawOverride,
-              0.37,
+              effectiveHeroPitch,
               activeDamageState,
               visualFrontSteer
             );
@@ -6910,7 +7482,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             if (isFalling || isTrafficCrash) {
               ctx.rotate(fallRotation);
             } else {
-              ctx.rotate(heroRollRad + heroAirPitchRad * 0.18);
+              ctx.rotate(heroRollRad);
             }
             ctx.drawImage(spriteCanvas, -carDrawW * 0.5, -carDrawH * 0.5, carDrawW, carDrawH);
             ctx.restore();

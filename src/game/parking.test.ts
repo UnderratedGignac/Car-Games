@@ -185,3 +185,35 @@ test('evaluateParkingProximity and evaluateParkingBayStatus detect clearances an
     'Ultrasonic sensors report nearby barrier/cars inside tight parallel spot'
   );
 });
+
+test('stepParkingObstacles uses rotated OBB extents to keep car outside barriers, parked cars, and plaza curbs', () => {
+  const stage = createParkingStages().find((s) => s.barriers.length > 0)!;
+  const state = createInitialParkingState(stage);
+
+  // Drive nose-first diagonally into first barrier -> rotated OBB pushes back without ghosting
+  const barrier = stage.barriers[0];
+  state.x = barrier.x;
+  state.z = barrier.z + barrier.halfL + 1.25; // Overlapping rotated corner (player halfL ~ 1.94)
+  state.heading = -Math.PI / 2 + 0.35;
+  state.vx = 1.5;
+  state.vz = -4.0;
+  const barRes = stepParkingObstacles(state, stage, 0.016);
+  assert.equal(barRes.barrierHit, true);
+  assert.ok(Math.hypot(state.x - barrier.x, state.z - barrier.z) > 1.5);
+
+  // Diagonal heading near side plaza curb must keep rotated car corner inside halfPlaza
+  const halfPlaza = stage.plazaWidth * 0.5;
+  state.x = halfPlaza - 0.85; // Too close for rotated car center!
+  state.z = stage.spawn.z;
+  state.heading = -Math.PI / 2 + 0.65;
+  state.vx = 3.0;
+  state.vz = 0;
+  const curbRes = stepParkingObstacles(state, stage, 0.016);
+  assert.equal(curbRes.barrierHit, true);
+  const lateralExtent =
+    Math.abs(Math.cos(state.heading)) * 1.94 + Math.abs(Math.sin(state.heading)) * 0.90;
+  assert.ok(
+    Math.abs(state.x) + lateralExtent <= halfPlaza + 0.01,
+    `Expected rotated car edge (${(Math.abs(state.x) + lateralExtent).toFixed(2)}) <= halfPlaza (${halfPlaza})`
+  );
+});

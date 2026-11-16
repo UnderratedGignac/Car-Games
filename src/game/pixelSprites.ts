@@ -583,6 +583,42 @@ export function computeFrontWheelSteerRad(params: FrontWheelSteerParams): number
   return params.isCustomYaw ? 0 : -0.30 * Math.max(0, Math.min(1, params.driftAbsNorm));
 }
 
+/**
+ * Computes view-rotated 3D automotive clearcoat shading multiplier:
+ * - Rotates car-local surface normal by camera yaw & pitch into view space
+ * - Combines directional sun wrap, lower-sill asphalt bounce shadow, and Fresnel rim sheen
+ */
+export function computeAutomotiveNormalShade(
+  nx: number,
+  ny: number,
+  nz: number,
+  cosY: number,
+  sinY: number,
+  cosP: number,
+  sinP: number
+): number {
+  const nLen = Math.hypot(nx, ny, nz);
+  if (nLen <= 1e-4) return 1.0;
+  const lnx = nx / nLen;
+  const lny = ny / nLen;
+  const lnz = nz / nLen;
+
+  // Rotate local normal into camera view space matching project(v)
+  const rnx = lnx * cosY + lnz * sinY;
+  const tempZ = -lnx * sinY + lnz * cosY;
+  const rny = lny * cosP + tempZ * sinP;
+  const viewZ = tempZ * cosP - lny * sinP;
+
+  // Directional top-front-right sunlight wrap + asphalt underside shadow
+  const sunDot = Math.max(-0.45, Math.min(1.0, 0.28 * rnx + 0.78 * rny + 0.34 * viewZ));
+  const groundBounce = rny < -0.1 ? Math.max(-0.14, (rny + 0.1) * 0.22) : 0;
+  // Automotive clearcoat Fresnel sheen on grazing body panels
+  const viewAlign = Math.min(1, Math.abs(viewZ));
+  const fresnel = Math.pow(1 - viewAlign, 2.3) * (rny > -0.15 ? 0.14 : 0.04);
+
+  return Math.max(0.8, Math.min(1.25, 0.92 + sunDot * 0.19 + fresnel + groundBounce));
+}
+
 export function getPixelCarCanvas(
   car: CarSpec,
   driftAngleNorm: number, // -1.0 ('\') .. 0 .. +1.0 ('/')
@@ -620,7 +656,11 @@ export function getPixelCarCanvas(
   const absNorm = isCustomYaw ? 0.5 : Math.abs(angleBucket) / HERO_BUCKETS; // 0 .. 1
 
   const yaw = isCustomYaw ? customYawRad : absNorm * 0.74;
-  const pitch = typeof customPitchRad === 'number' ? customPitchRad : 0.37; // elevated chase tilt
+  const rawPitch = typeof customPitchRad === 'number' ? customPitchRad : 0.37; // elevated chase tilt
+  const clampedPitch = Math.max(0.12, Math.min(0.64, rawPitch));
+  const pitchBucket = Math.round(clampedPitch * 24);
+  const defaultPitchBucket = Math.round(0.37 * 24);
+  const pitch = pitchBucket === defaultPitchBucket ? 0.37 : pitchBucket / 24;
 
   const spinFrame = ((Math.floor(wheelPhase) % 4) + 4) % 4;
   const angleKey = isCustomYaw
@@ -628,7 +668,8 @@ export function getPixelCarCanvas(
     : `${angleBucket}`;
   const steerBucket = Math.max(-5, Math.min(5, Math.round(Math.max(-1, Math.min(1, frontSteerNorm)) * 5)));
   const dmgKey = getDamageVisualCacheKey(damageState);
-  const key = `${car.id}_${angleKey}_${isFever ? 1 : 0}_${isWrecked ? 1 : 0}_${spinFrame}_${pedalMode}_${isFlashing ? 1 : 0}_${modKey}_${dmgKey}_s${steerBucket}`;
+  const pitchSuffix = pitchBucket === defaultPitchBucket ? '' : `_p${pitchBucket}`;
+  const key = `${car.id}_${angleKey}_${isFever ? 1 : 0}_${isWrecked ? 1 : 0}_${spinFrame}_${pedalMode}_${isFlashing ? 1 : 0}_${modKey}_${dmgKey}_s${steerBucket}${pitchSuffix}`;
 
   const cached = spriteCache.get(key);
   if (cached) return cached;
@@ -678,15 +719,14 @@ export function getPixelCarCanvas(
     }
   };
 
-  const applyCurvatureShade = (abgr: number, nyAbs: number): number => {
-    const shade = 0.94 + nyAbs * 0.13;
+  const applyCurvatureShade = (abgr: number, shade: number): number => {
     const r = Math.min(255, Math.round((abgr & 0xff) * shade));
     const g = Math.min(255, Math.round(((abgr >> 8) & 0xff) * shade));
     const b = Math.min(255, Math.round(((abgr >> 16) & 0xff) * shade));
     return (abgr & 0xff000000) | (b << 16) | (g << 8) | r;
   };
 
-  // Scanline triangle rasterizer with interpolated depth and subtle sky-normal shading
+  // Scanline triangle rasterizer with interpolated depth and 3D rotated automotive clearcoat shading
   const fillTri3D = (a: Vec3, b: Vec3, c: Vec3, col: number, zBias = 0) => {
     const p0 = project(a);
     const p1 = project(b);
@@ -701,7 +741,7 @@ export function getPixelCarCanvas(
     if (Math.abs(area) < 0.05) return;
     const invArea = 1 / area;
 
-    // Preserve exact colWhite (door roundels) & glowing lamps untouched; gently shade car panels by 3D slope
+    // Preserve exact colWhite (door roundels) & glowing lamps untouched; gently shade car panels by 3D normal + Fresnel
     let shadedCol = col;
     if (
       col !== colWhite &&
@@ -709,7 +749,8 @@ export function getPixelCarCanvas(
       col !== colTailCore &&
       col !== colAmber &&
       col !== colHeadlightLens &&
-      col !== colHeadlightBeam
+      col !== colHeadlightBeam &&
+      col !== colRimSpec
     ) {
       const ux = b.x - a.x;
       const uy = b.y - a.y;
@@ -720,10 +761,8 @@ export function getPixelCarCanvas(
       const nx = uy * vz - uz * vy;
       const ny = uz * vx - ux * vz;
       const nz = ux * vy - uy * vx;
-      const nLen = Math.hypot(nx, ny, nz);
-      if (nLen > 1e-4) {
-        shadedCol = applyCurvatureShade(col, Math.abs(ny / nLen));
-      }
+      const shade = computeAutomotiveNormalShade(nx, ny, nz, cosY, sinY, cosP, sinP);
+      shadedCol = applyCurvatureShade(col, shade);
     }
 
     for (let y = minY; y <= maxY; y++) {
@@ -1095,10 +1134,11 @@ export function getPixelCarCanvas(
         }
       }
 
-      // Steel brake rotor disc + Brembo painted caliper inside wheel spokes
+      // Steel brake rotor disc (glows red-hot under heavy braking!) + Brembo painted caliper inside wheel spokes
+      const rotorCol = isBraking ? colBrakeGlow : colCarbonSpec;
       for (let i = 0; i < segs; i++) {
         const n = (i + 1) % segs;
-        fillTri3D(centerOuter, rimOffsetPts[i], rimOffsetPts[n], colCarbonSpec, -0.036);
+        fillTri3D(centerOuter, rimOffsetPts[i], rimOffsetPts[n], rotorCol, -0.036);
       }
       const caliperCol = isGt3 || isPrototype || isSupercar ? colEngineHeader : colBrakeGlow;
       fillTri3D(centerOuter, rimInnerPts[2], rimOffsetPts[3], caliperCol, -0.052);
@@ -3905,6 +3945,13 @@ export function getTrafficVehicleCanvas(
     }
   };
 
+  const applyTrafficShade = (abgr: number, shade: number): number => {
+    const r = Math.min(255, Math.round((abgr & 0xff) * shade));
+    const g = Math.min(255, Math.round(((abgr >> 8) & 0xff) * shade));
+    const b = Math.min(255, Math.round(((abgr >> 16) & 0xff) * shade));
+    return (abgr & 0xff000000) | (b << 16) | (g << 8) | r;
+  };
+
   const fillTri3D = (a: Vec3, b: Vec3, c: Vec3, col: number, zBias = 0) => {
     const p0 = project(a);
     const p1 = project(b);
@@ -3916,6 +3963,29 @@ export function getTrafficVehicleCanvas(
     const area = (p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x);
     if (Math.abs(area) < 0.05) return;
     const invArea = 1 / area;
+
+    let shadedCol = col;
+    if (
+      col !== colTail &&
+      col !== colTailBright &&
+      col !== colHeadlight &&
+      col !== colHeadlightRim &&
+      col !== colAmber &&
+      col !== colPlate
+    ) {
+      const ux = b.x - a.x;
+      const uy = b.y - a.y;
+      const uz = b.z - a.z;
+      const vx = c.x - a.x;
+      const vy = c.y - a.y;
+      const vz = c.z - a.z;
+      const nx = uy * vz - uz * vy;
+      const ny = uz * vx - ux * vz;
+      const nz = ux * vy - uy * vx;
+      const shade = computeAutomotiveNormalShade(nx, ny, nz, cosY, sinY, cosP, sinP);
+      shadedCol = applyTrafficShade(col, shade);
+    }
+
     for (let y = minY; y <= maxY; y++) {
       const py = y + 0.5;
       for (let x = minX; x <= maxX; x++) {
@@ -3924,7 +3994,7 @@ export function getTrafficVehicleCanvas(
         const w1 = ((p2.x - px) * (p0.y - py) - (p2.y - py) * (p0.x - px)) * invArea;
         const w2 = 1 - w0 - w1;
         if (w0 >= -0.02 && w1 >= -0.02 && w2 >= -0.02) {
-          plot(x, y, w0 * p0.z + w1 * p1.z + w2 * p2.z + zBias, col);
+          plot(x, y, w0 * p0.z + w1 * p1.z + w2 * p2.z + zBias, shadedCol);
         }
       }
     }

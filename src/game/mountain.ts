@@ -714,8 +714,27 @@ export function stepMountainPhysics(
         fellReason = 'Fell Off Mountain Cliff';
       }
     } else {
-      nextY = nextSurf.roadY;
-      nextVy = 0;
+      // Cresting a sharp convex hilltop at high speed launches the car ballistically into the air!
+      const prevExpectedVy = vForward * curSurf.roadSlope;
+      const ballisticPredY = state.y + prevExpectedVy * clampedDt - 0.5 * MOUNTAIN_GRAVITY * clampedDt * clampedDt;
+      const slopeDrop = curSurf.roadSlope - nextSurf.roadSlope;
+      const crestLiftAccel = slopeDrop > 0.01 ? (nextVForward * slopeDrop) / clampedDt : 0;
+      if (
+        nextVForward >= 17.5 &&
+        crestLiftAccel > MOUNTAIN_GRAVITY * 1.05 &&
+        ballisticPredY > nextSurf.roadY + 0.01
+      ) {
+        nextAirborne = true;
+        nextAirTime = 0;
+        justLaunched = true;
+        nextLaunchX = state.x;
+        nextLaunchZ = state.z;
+        nextVy = Math.max(1.2, prevExpectedVy * 0.95);
+        nextY = ballisticPredY;
+      } else {
+        nextY = nextSurf.roadY;
+        nextVy = nextVForward * nextSurf.roadSlope;
+      }
     }
 
     return {
@@ -845,3 +864,68 @@ export function stepMountainPhysics(
     fellReason,
   };
 }
+
+export interface MountainCameraTarget {
+  focusY: number;
+  pitchSlope: number;
+  camHeight: number;
+  camDistBack: number;
+}
+
+/**
+ * Computes stable Mountain Drive chase camera framing across steep climbs,
+ * descents, launch ramps, and deep chasms without snapping down to canyon floors.
+ */
+export function computeMountainCameraTarget(params: {
+  carY: number;
+  carVy: number;
+  roadSlope: number;
+  isAirborne: boolean;
+  inChasmGap: boolean;
+  referenceGroundY: number;
+  roadY: number;
+  aheadRoadY?: number;
+  isTitle?: boolean;
+  speedZoom?: number;
+}): MountainCameraTarget {
+  const {
+    carY,
+    carVy,
+    roadSlope,
+    isAirborne,
+    inChasmGap,
+    referenceGroundY,
+    roadY,
+    aheadRoadY,
+    isTitle = false,
+    speedZoom = 0,
+  } = params;
+
+  // Never track the -22m canyon bottom during chasm flight; anchor to the ridge/lip deck instead.
+  const safeGroundY = inChasmGap || isAirborne ? referenceGroundY : roadY;
+  const clampedSlope = Math.max(-0.42, Math.min(0.42, roadSlope));
+
+  let focusY: number;
+  if (isAirborne) {
+    const vyLead = Math.max(-0.85, Math.min(0.75, carVy * 0.045));
+    focusY = safeGroundY * 0.22 + carY * 0.78 + vyLead;
+  } else {
+    const aheadDelta =
+      aheadRoadY !== undefined ? Math.max(-1.8, Math.min(1.8, (aheadRoadY - carY) * 0.18)) : 0;
+    focusY = carY + aheadDelta;
+  }
+
+  // Keep horizon pitch controlled: never invert negative into the sky on +39% ramps,
+  // and gently look down toward landing rim once descending across a chasm.
+  const descentLookDown = isAirborne ? Math.max(0, Math.min(0.055, (2.0 - carVy) * 0.0055)) : 0;
+  const rawPitchSlope = 0.098 - clampedSlope * 0.145 + descentLookDown;
+  const pitchSlope = Number(Math.max(0.045, Math.min(0.175, rawPitchSlope)).toFixed(4));
+
+  return {
+    focusY,
+    pitchSlope,
+    camHeight: isTitle ? 3.05 : 4.55,
+    camDistBack: (isTitle ? 10.6 : 9.3) + speedZoom * 0.85,
+  };
+}
+

@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { computeWebGLCameraSyncParams } from './realisticWorldWebGL';
+import { computeWebGLCameraSyncParams, resolveAtmosphereProfile } from './realisticWorldWebGL';
+import { ROAD_BIOMES } from './rules';
+import { resolveSkyAtmosphere } from './skyArt';
 
 test('computeWebGLCameraSyncParams aligns Three.js camera projection with SceneCanvas projectInto', () => {
   const pxW = 1280;
@@ -41,4 +43,22 @@ test('computeWebGLCameraSyncParams aligns Three.js camera projection with SceneC
   const ndc = worldHorizonPt.project(cam);
   const screenY = (1 - ndc.y) * 0.5 * pxH;
   assert.ok(Math.abs(screenY - horizonY) < 0.75, `Expected screenY ~ ${horizonY}, got ${screenY}`);
+});
+
+test('resolveAtmosphereProfile returns distinct PBR atmosphere, cloud tint, and IBL intensities per biome/sky', () => {
+  const alpineBiome = ROAD_BIOMES.alpine;
+  const canyonBiome = ROAD_BIOMES.canyon;
+  const sunSky = resolveSkyAtmosphere('sun_day', alpineBiome);
+  const sunsetSky = resolveSkyAtmosphere('golden_sunset', canyonBiome);
+  const auroraSky = resolveSkyAtmosphere('aurora_night', alpineBiome);
+
+  const dayProf = resolveAtmosphereProfile(alpineBiome, sunSky);
+  const sunsetProf = resolveAtmosphereProfile(canyonBiome, sunsetSky);
+  const nightProf = resolveAtmosphereProfile(alpineBiome, auroraSky);
+
+  assert.ok(dayProf.cloudOpacity > nightProf.cloudOpacity);
+  assert.ok(dayProf.envIntensity > nightProf.envIntensity);
+  assert.ok(sunsetProf.keyLightIntensity > nightProf.keyLightIntensity);
+  assert.ok(nightProf.auroraOpacity > 0.5);
+  assert.equal(dayProf.starOpacity, 0);
 });

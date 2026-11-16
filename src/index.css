@@ -6,6 +6,18 @@
     --font-display: 'Chakra Petch', sans-serif;
     --font-sans: 'Plus Jakarta Sans', sans-serif;
     --font-mono: 'JetBrains Mono', monospace;
+
+    /* Tokyo Pit Obsidian Menu Palette (60-30-10) */
+    --nr-bg-scrim: rgba(6, 9, 18, 0.86);
+    --nr-bg-base: #080c16;
+    --nr-surface: #0f1524;
+    --nr-surface-elevated: #141c2f;
+    --nr-border: rgba(148, 163, 184, 0.16);
+    --nr-border-strong: rgba(148, 163, 184, 0.28);
+    --nr-accent-gold: #f59e0b;
+    --nr-accent-cyan: #22d3ee;
+    --nr-accent-mint: #34d399;
+    --nr-accent-crimson: #f43f5e;
   }
 
   html, body {
@@ -26,7 +38,7 @@
 
   body {
     font-family: var(--font-sans);
-    background-color: #050811;
+    background-color: var(--nr-bg-base);
     color: #f8fafc;
   }
 
@@ -60,4 +72,56 @@
 }
 .pr-safe {
   padding-right: env(safe-area-inset-right, 0px);
+}
+
+/* Unified Menu Surface Helpers (Zero backdrop-filter over WebGL canvas) */
+.nr-sheet-backdrop {
+  background-color: var(--nr-bg-scrim);
+}
+
+.nr-sheet-panel {
+  background-color: var(--nr-surface);
+  border: 1px solid var(--nr-border);
+}
+
+.nr-card-inset {
+  background-color: var(--nr-bg-base);
+  border: 1px solid var(--nr-border);
+}
+
+@keyframes sheet-slide-up {
+  from {
+    transform: translate3d(0, 12px, 0);
+  }
+  to {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.animate-sheet-in {
+  animation: sheet-slide-up 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes critical-damage-pulse {
+  0%, 100% {
+    background-color: rgba(244, 63, 94, 0.18);
+    border-color: rgba(251, 113, 133, 0.72);
+    box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.55), 0 0 10px rgba(244, 63, 94, 0.25);
+  }
+  50% {
+    background-color: rgba(244, 63, 94, 0.36);
+    border-color: rgba(253, 164, 175, 0.98);
+    box-shadow: 0 0 0 4px rgba(244, 63, 94, 0), 0 0 16px rgba(244, 63, 94, 0.65);
+  }
+}
+
+.animate-critical-damage {
+  animation: critical-damage-pulse 1.05s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-critical-damage,
+  .animate-sheet-in {
+    animation: none;
+  }
 }

@@ -604,23 +604,24 @@ export function renderWorldObject3D(params: {
     const th = Math.max(6, Math.round(by - wp0.y));
     const rad = Math.max(3, Math.round(th * 0.44));
     const trunkW = Math.max(2, Math.round(th * 0.16));
+    const swayPx = rawZ < 110 ? Math.sin(nowMs * 0.0021 + prop.z * 0.19 + prop.x * 0.27) * Math.min(3.5, th * 0.045) : 0;
     ctx.fillStyle = '#4a3525';
     ctx.fillRect(bx - Math.round(trunkW * 0.5), by - Math.round(th * 0.52), trunkW, Math.round(th * 0.52));
 
     ctx.fillStyle = '#db2777';
     ctx.beginPath();
-    ctx.arc(bx + Math.round(rad * 0.25), by - Math.round(th * 0.68), Math.round(rad * 0.85), 0, Math.PI * 2);
+    ctx.arc(bx + swayPx * 0.8 + Math.round(rad * 0.25), by - Math.round(th * 0.68), Math.round(rad * 0.85), 0, Math.PI * 2);
     ctx.fill();
 
     ctx.fillStyle = '#f472b6';
     ctx.beginPath();
-    ctx.arc(bx, by - Math.round(th * 0.74), rad, 0, Math.PI * 2);
+    ctx.arc(bx + swayPx, by - Math.round(th * 0.74), rad, 0, Math.PI * 2);
     ctx.fill();
 
     if (rawZ < 95) {
       ctx.fillStyle = '#fce7f3';
       ctx.beginPath();
-      ctx.arc(bx - Math.round(rad * 0.25), by - Math.round(th * 0.84), Math.max(2, Math.round(rad * 0.58)), 0, Math.PI * 2);
+      ctx.arc(bx + swayPx * 1.1 - Math.round(rad * 0.25), by - Math.round(th * 0.84), Math.max(2, Math.round(rad * 0.58)), 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.globalAlpha = 1.0;
@@ -746,6 +747,7 @@ export function renderWorldObject3D(params: {
   const tw = Math.max(5, Math.round(th * 0.56));
   const trunkH = Math.max(2, Math.round(th * 0.18));
   const trunkW = Math.max(1, Math.round(tw * 0.2));
+  const pineSway = rawZ < 105 ? Math.sin(nowMs * 0.002 + prop.z * 0.17 + prop.x * 0.23) * Math.min(3.2, th * 0.042) : 0;
 
   ctx.fillStyle = '#47362b';
   ctx.fillRect(bx - Math.round(trunkW * 0.5), by - trunkH, trunkW, trunkH);
@@ -762,37 +764,41 @@ export function renderWorldObject3D(params: {
   const t2Bot = by - Math.round(th * 0.62);
   const t2HW = Math.round(tw * 0.28);
 
+  const bx0 = bx + pineSway * 0.45;
+  const bx1 = bx + pineSway * 0.75;
+  const bx2 = bx + pineSway;
+
   // Batch 1: Lit left faces across all 3 tiers
   ctx.fillStyle = prop.shade > 0.5 ? '#5b926c' : '#4e805e';
   ctx.beginPath();
-  ctx.moveTo(bx, t0Top);
+  ctx.moveTo(bx0, t0Top);
   ctx.lineTo(bx, t0Bot);
   ctx.lineTo(bx - t0HW, t0Bot);
   ctx.closePath();
-  ctx.moveTo(bx, t1Top);
-  ctx.lineTo(bx, t1Bot);
-  ctx.lineTo(bx - t1HW, t1Bot);
+  ctx.moveTo(bx1, t1Top);
+  ctx.lineTo(bx0, t1Bot);
+  ctx.lineTo(bx0 - t1HW, t1Bot);
   ctx.closePath();
-  ctx.moveTo(bx, t2Top);
-  ctx.lineTo(bx, t2Bot);
-  ctx.lineTo(bx - t2HW, t2Bot);
+  ctx.moveTo(bx2, t2Top);
+  ctx.lineTo(bx1, t2Bot);
+  ctx.lineTo(bx1 - t2HW, t2Bot);
   ctx.closePath();
   ctx.fill();
 
   // Batch 2: Shaded right faces across all 3 tiers
   ctx.fillStyle = prop.shade > 0.5 ? '#355c44' : '#2d4f3b';
   ctx.beginPath();
-  ctx.moveTo(bx, t0Top);
+  ctx.moveTo(bx0, t0Top);
   ctx.lineTo(bx + t0HW, t0Bot);
   ctx.lineTo(bx, t0Bot);
   ctx.closePath();
-  ctx.moveTo(bx, t1Top);
-  ctx.lineTo(bx + t1HW, t1Bot);
-  ctx.lineTo(bx, t1Bot);
+  ctx.moveTo(bx1, t1Top);
+  ctx.lineTo(bx0 + t1HW, t1Bot);
+  ctx.lineTo(bx0, t1Bot);
   ctx.closePath();
-  ctx.moveTo(bx, t2Top);
-  ctx.lineTo(bx + t2HW, t2Bot);
-  ctx.lineTo(bx, t2Bot);
+  ctx.moveTo(bx2, t2Top);
+  ctx.lineTo(bx1 + t2HW, t2Bot);
+  ctx.lineTo(bx1, t2Bot);
   ctx.closePath();
   ctx.fill();
 
@@ -801,17 +807,17 @@ export function renderWorldObject3D(params: {
     ctx.strokeStyle = '#14241c';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(bx, t0Top);
+    ctx.moveTo(bx0, t0Top);
     ctx.lineTo(bx + t0HW, t0Bot);
     ctx.lineTo(bx - t0HW, t0Bot);
     ctx.closePath();
-    ctx.moveTo(bx, t1Top);
-    ctx.lineTo(bx + t1HW, t1Bot);
-    ctx.lineTo(bx - t1HW, t1Bot);
+    ctx.moveTo(bx1, t1Top);
+    ctx.lineTo(bx0 + t1HW, t1Bot);
+    ctx.lineTo(bx0 - t1HW, t1Bot);
     ctx.closePath();
-    ctx.moveTo(bx, t2Top);
-    ctx.lineTo(bx + t2HW, t2Bot);
-    ctx.lineTo(bx - t2HW, t2Bot);
+    ctx.moveTo(bx2, t2Top);
+    ctx.lineTo(bx1 + t2HW, t2Bot);
+    ctx.lineTo(bx1 - t2HW, t2Bot);
     ctx.closePath();
     ctx.stroke();
   }
@@ -1052,8 +1058,9 @@ export function renderRealisticRoadsideLandmarks3D(params: {
         ctx.lineTo(Math.round(wp3.x), Math.round(wp3.y + 4));
         ctx.stroke();
 
-        // Calm aviation marker dots on top of towers
-        ctx.fillStyle = '#f43f5e';
+        // Pulsing aviation marker beacons on top of suspension towers
+        const beaconPulse = 0.55 + 0.45 * Math.sin((params.nowMs ?? 0) * 0.0045 + idx * 0.7);
+        ctx.fillStyle = beaconPulse > 0.65 ? '#fb7185' : '#9f1239';
         ctx.fillRect(Math.round(wp2.x) - 1, Math.round(wp2.y) - 2, 2, 2);
         ctx.fillRect(Math.round(wp3.x) - 1, Math.round(wp3.y) - 2, 2, 2);
       }
@@ -2032,11 +2039,13 @@ export function renderAdventureProp3D(params: {
   const th = Math.max(10, Math.round(by - wp0.y));
   const tw = Math.max(8, Math.round(th * (treeSprite.width / treeSprite.height)));
   const mirror = prop.shade > 0.5;
+  const canopySway = rawZ < 95 ? Math.sin(nowMs * 0.0023 + prop.z * 0.18 + prop.x * 0.25) * 0.022 : 0;
 
-  if (mirror && rawZ < 85) {
+  if ((mirror && rawZ < 85) || Math.abs(canopySway) > 0.002) {
     ctx.save();
     ctx.translate(bx, by);
-    ctx.scale(-1, 1);
+    if (canopySway !== 0) ctx.transform(1, 0, canopySway, 1, 0, 0);
+    if (mirror && rawZ < 85) ctx.scale(-1, 1);
     ctx.drawImage(treeSprite, Math.round(-tw * 0.5), -th + 3, tw, th);
     ctx.restore();
   } else {

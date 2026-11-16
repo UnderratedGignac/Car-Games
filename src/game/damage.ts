@@ -15,7 +15,11 @@ export type CarPartId =
   | 'left_door'
   | 'right_door'
   | 'rear_bumper'
-  | 'spoiler';
+  | 'spoiler'
+  | 'front_left_wheel'
+  | 'front_right_wheel'
+  | 'rear_left_wheel'
+  | 'rear_right_wheel';
 
 export type ImpactZone =
   | 'front'
@@ -47,16 +51,27 @@ export interface CarPartMeta {
 
 export const CAR_PARTS_META: CarPartMeta[] = [
   { id: 'front_bumper', label: 'Front Bumper & Splitter', shortLabel: 'F. Bumper', baseRepairCost: 24, inspectTarget: 'hood' },
-  { id: 'hood', label: 'Hood / Bonnet', shortLabel: 'Hood', baseRepairCost: 28, inspectTarget: 'hood' },
+  { id: 'hood', label: 'Hood / Engine Cover', shortLabel: 'Hood', baseRepairCost: 28, inspectTarget: 'hood' },
   { id: 'windshield', label: 'Windshield & A-Pillars', shortLabel: 'Windshield', baseRepairCost: 26, inspectTarget: 'all' },
-  { id: 'roof', label: 'Roof & Cabin Frame', shortLabel: 'Roof', baseRepairCost: 30, inspectTarget: 'all' },
+  { id: 'roof', label: 'Roof & Roll Frame', shortLabel: 'Roof', baseRepairCost: 30, inspectTarget: 'all' },
   { id: 'left_door', label: 'Left Door & Mirror', shortLabel: 'L. Door', baseRepairCost: 22, inspectTarget: 'wheels' },
   { id: 'right_door', label: 'Right Door & Mirror', shortLabel: 'R. Door', baseRepairCost: 22, inspectTarget: 'wheels' },
   { id: 'rear_bumper', label: 'Rear Bumper & Diffuser', shortLabel: 'R. Bumper', baseRepairCost: 24, inspectTarget: 'exhaust' },
   { id: 'spoiler', label: 'Rear Wing / Decklid', shortLabel: 'Rear Wing', baseRepairCost: 26, inspectTarget: 'aero' },
+  { id: 'front_left_wheel', label: 'Front Left Wheel & Hub', shortLabel: 'FL Wheel', baseRepairCost: 25, inspectTarget: 'wheels' },
+  { id: 'front_right_wheel', label: 'Front Right Wheel & Hub', shortLabel: 'FR Wheel', baseRepairCost: 25, inspectTarget: 'wheels' },
+  { id: 'rear_left_wheel', label: 'Rear Left Wheel & Hub', shortLabel: 'RL Wheel', baseRepairCost: 25, inspectTarget: 'wheels' },
+  { id: 'rear_right_wheel', label: 'Rear Right Wheel & Hub', shortLabel: 'RR Wheel', baseRepairCost: 25, inspectTarget: 'wheels' },
 ];
 
 export const CAR_PART_IDS: CarPartId[] = CAR_PARTS_META.map((p) => p.id);
+
+export const WHEEL_PART_IDS: CarPartId[] = [
+  'front_left_wheel',
+  'front_right_wheel',
+  'rear_left_wheel',
+  'rear_right_wheel',
+];
 
 export const DAMAGE_STORAGE_KEY = 'apex_slash_damage_v1';
 
@@ -70,6 +85,10 @@ export function createMintDamageState(): CarDamageState {
     right_door: { integrity: 100, bendAngle: 0, detached: false },
     rear_bumper: { integrity: 100, bendAngle: 0, detached: false },
     spoiler: { integrity: 100, bendAngle: 0, detached: false },
+    front_left_wheel: { integrity: 100, bendAngle: 0, detached: false },
+    front_right_wheel: { integrity: 100, bendAngle: 0, detached: false },
+    rear_left_wheel: { integrity: 100, bendAngle: 0, detached: false },
+    rear_right_wheel: { integrity: 100, bendAngle: 0, detached: false },
   };
 }
 
@@ -158,6 +177,16 @@ export function countDamagedParts(damage?: CarDamageState | null): {
   };
 }
 
+export function getMissingWheelCount(damage?: CarDamageState | null): number {
+  if (!damage) return 0;
+  let missing = 0;
+  for (const wid of WHEEL_PART_IDS) {
+    const p = damage[wid];
+    if (p && (p.detached || p.integrity <= 0)) missing++;
+  }
+  return missing;
+}
+
 /**
  * Returns true if the vehicle is severely damaged and MUST be repaired before racing again.
  */
@@ -165,7 +194,40 @@ export function isCarTotaled(damage?: CarDamageState | null): boolean {
   if (!damage) return false;
   const overall = getCarOverallIntegrity(damage);
   const { detachedCount } = countDamagedParts(damage);
-  return overall < 55 || detachedCount >= 3;
+  const missingWheels = getMissingWheelCount(damage);
+  return overall < 58 || detachedCount >= 3 || missingWheels >= 1;
+}
+
+export const CRITICAL_DAMAGE_THRESHOLD = 30;
+
+/**
+ * Returns IDs of all car parts whose integrity has fallen critically below `threshold` (default 30%)
+ * or that have detached completely.
+ */
+export function getCriticalDamagedParts(
+  damage?: CarDamageState | null,
+  threshold: number = CRITICAL_DAMAGE_THRESHOLD
+): CarPartId[] {
+  if (!damage) return [];
+  const critical: CarPartId[] = [];
+  for (const id of CAR_PART_IDS) {
+    const p = damage[id];
+    if (!p) continue;
+    if (p.detached || p.integrity < threshold) {
+      critical.push(id);
+    }
+  }
+  return critical;
+}
+
+/**
+ * Returns true when at least one car part has sustained critical damage (< 30% integrity or detached).
+ */
+export function hasCriticalPartDamage(
+  damage?: CarDamageState | null,
+  threshold: number = CRITICAL_DAMAGE_THRESHOLD
+): boolean {
+  return getCriticalDamagedParts(damage, threshold).length > 0;
 }
 
 /**
@@ -198,63 +260,79 @@ export function getDamageVisualCacheKey(damage?: CarDamageState | null): string 
 const IMPACT_WEIGHTS: Record<ImpactZone, Partial<Record<CarPartId, number>>> = {
   front: {
     front_bumper: 1.0,
-    hood: 0.85,
-    windshield: 0.55,
+    hood: 0.92,
+    windshield: 0.62,
+    front_left_wheel: 0.56,
+    front_right_wheel: 0.56,
     left_door: 0.25,
     right_door: 0.25,
-    roof: 0.15,
+    roof: 0.18,
   },
   rear: {
     rear_bumper: 1.0,
-    spoiler: 0.92,
+    spoiler: 0.94,
+    rear_left_wheel: 0.56,
+    rear_right_wheel: 0.56,
     left_door: 0.2,
     right_door: 0.2,
     roof: 0.15,
   },
   left: {
     left_door: 1.0,
+    front_left_wheel: 0.78,
+    rear_left_wheel: 0.72,
     front_bumper: 0.52,
     rear_bumper: 0.48,
     windshield: 0.35,
     roof: 0.30,
-    hood: 0.25,
+    hood: 0.28,
   },
   right: {
     right_door: 1.0,
+    front_right_wheel: 0.78,
+    rear_right_wheel: 0.72,
     front_bumper: 0.52,
     rear_bumper: 0.48,
     windshield: 0.35,
     roof: 0.30,
-    hood: 0.25,
+    hood: 0.28,
   },
   rollover: {
     roof: 1.0,
-    windshield: 0.88,
-    spoiler: 0.82,
-    hood: 0.65,
-    left_door: 0.65,
-    right_door: 0.65,
-    front_bumper: 0.55,
-    rear_bumper: 0.55,
+    windshield: 0.92,
+    spoiler: 0.88,
+    hood: 0.74,
+    left_door: 0.72,
+    right_door: 0.72,
+    front_left_wheel: 0.65,
+    front_right_wheel: 0.65,
+    rear_left_wheel: 0.62,
+    rear_right_wheel: 0.62,
+    front_bumper: 0.60,
+    rear_bumper: 0.60,
   },
   ground_slam: {
     front_bumper: 1.0,
-    rear_bumper: 0.94,
-    hood: 0.92,
-    spoiler: 0.95,
-    roof: 0.80,
-    windshield: 0.85,
-    left_door: 0.72,
-    right_door: 0.72,
+    rear_bumper: 0.96,
+    hood: 0.98,
+    spoiler: 0.96,
+    roof: 0.86,
+    windshield: 0.90,
+    left_door: 0.78,
+    right_door: 0.78,
+    front_left_wheel: 0.94,
+    front_right_wheel: 0.86,
+    rear_left_wheel: 0.84,
+    rear_right_wheel: 0.76,
   },
 };
 
 export interface ApplyImpactParams {
   damage: CarDamageState;
   impactZone: ImpactZone;
-  /** 0.1 (light scrape) .. 1.0 (major collision) .. 1.4 (hard valley slam) */
+  /** 0.1 (light scrape) .. 1.0 (major collision) .. 1.45 (hard valley slam) */
   severity: number;
-  /** Optional directional bias (-1..1) so impacts bend symmetrically or toward hit side */
+  /** Optional directional bias (-1..1) so impacts bend/shear toward hit side */
   sideBias?: number;
 }
 
@@ -279,14 +357,27 @@ export function applyImpactToCarDamage({
 
   for (let i = 0; i < CAR_PART_IDS.length; i++) {
     const id = CAR_PART_IDS[i];
-    const w = weights[id] ?? 0;
+    let w = weights[id] ?? 0;
     if (w <= 0) continue;
+
+    // Bias ground slams and front/rear collisions toward the impacted side so wheels/doors shear asymmetrically
+    if (impactZone === 'ground_slam' || impactZone === 'front' || impactZone === 'rear') {
+      const isLeftPart = id === 'left_door' || id === 'front_left_wheel' || id === 'rear_left_wheel';
+      const isRightPart = id === 'right_door' || id === 'front_right_wheel' || id === 'rear_right_wheel';
+      if (sign < 0) {
+        if (isLeftPart) w *= 1.16;
+        else if (isRightPart) w *= 0.74;
+      } else {
+        if (isRightPart) w *= 1.18;
+        else if (isLeftPart) w *= 0.74;
+      }
+    }
 
     const prev = next[id];
     if (prev.detached || prev.integrity <= 0) continue;
 
     const wasIntact = prev.integrity >= 90;
-    const rawLoss = clampedSev * w * 78;
+    const rawLoss = clampedSev * w * 92;
     const nextIntegrity = Math.max(0, Math.round(prev.integrity - rawLoss));
 
     if (nextIntegrity <= 0) {
@@ -322,7 +413,7 @@ export function applyImpactToCarDamage({
 }
 
 /**
- * Applies physical driving penalties when driving with bent or missing car parts.
+ * Applies physical driving penalties when driving with bent or missing car parts & wheels.
  */
 export function computeDamagedStats(
   stats: EffectiveCarStats,
@@ -338,9 +429,24 @@ export function computeDamagedStats(
     (damage.front_bumper.detached ? 0.04 : ((100 - damage.front_bumper.integrity) / 100) * 0.03) +
     (damage.rear_bumper.detached ? 0.03 : 0);
 
-  const speedMult = Math.max(0.76, 1 - hoodLoss - bumperLoss);
-  const gripMult = Math.max(0.78, 1 - spoilerLoss - (100 - overall) * 0.0012);
-  const handlingMult = Math.max(0.80, 1 - (100 - overall) * 0.0018);
+  let wheelGripLoss = 0;
+  let wheelSpeedLoss = 0;
+  for (const wid of WHEEL_PART_IDS) {
+    const wp = damage[wid];
+    if (!wp) continue;
+    if (wp.detached || wp.integrity <= 0) {
+      wheelGripLoss += 0.08;
+      wheelSpeedLoss += 0.07;
+    } else if (wp.integrity < 90) {
+      const frac = (100 - wp.integrity) / 100;
+      wheelGripLoss += frac * 0.04;
+      wheelSpeedLoss += frac * 0.03;
+    }
+  }
+
+  const speedMult = Math.max(0.62, 1 - hoodLoss - bumperLoss - wheelSpeedLoss);
+  const gripMult = Math.max(0.60, 1 - spoilerLoss - wheelGripLoss - (100 - overall) * 0.0012);
+  const handlingMult = Math.max(0.65, 1 - wheelGripLoss * 0.85 - (100 - overall) * 0.0018);
 
   return {
     ...stats,

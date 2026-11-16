@@ -6,6 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  computeMountainCameraTarget,
   createInitialMountainState,
   extendMountainTrack,
   generateMountainTrack,
@@ -234,4 +235,90 @@ test('low-speed or shallow mountain edge contact bounces off rocky berm instead 
   assert.equal(shallowFastRes.fellReason, null);
   assert.equal(shallowFastRes.bermBounce, true);
 });
+
+test('high-speed car catches air over a convex mountain hilltop crest and lands cleanly', () => {
+  const track = generateMountainTrack(80, 3.4, 42);
+  // Construct a sharp synthetic convex hilltop crest followed by an extended landing downslope
+  const crestTrack = track.slice(0, 40).map((p, idx) => {
+    const crestY = idx <= 10 ? idx * 1.15 : 11.5 - (idx - 10) * 0.95;
+    return {
+      ...p,
+      index: idx,
+      y: crestY,
+      isMountainRamp: false,
+      isChasmGap: false,
+    };
+  });
+
+  let state = createInitialMountainState(
+    crestTrack[7].x,
+    crestTrack[7].z,
+    crestTrack[7].y,
+    crestTrack[7].heading,
+    28
+  );
+  let sawCrestLaunch = false;
+  let sawCrestLand = false;
+  for (let i = 0; i < 160; i++) {
+    const res = stepMountainPhysics(
+      state,
+      { steerInput: 0, throttle: 1.0, isFever: true },
+      { topSpeed: 30, driftGrip: 0.85, handlingRate: 2.5 },
+      crestTrack,
+      3.4,
+      0.016
+    );
+    state = res.state;
+    if (res.justLaunched) sawCrestLaunch = true;
+    if (res.justLanded) {
+      sawCrestLand = true;
+      break;
+    }
+    assert.equal(res.fellReason, null);
+  }
+  assert.equal(sawCrestLaunch, true, 'Fast cresting should launch car airborne');
+  assert.equal(sawCrestLand, true, 'Airborne crest jump should land back on downslope');
+});
+
+test('computeMountainCameraTarget anchors focus above chasms and keeps ramp pitch positive', () => {
+  const chasmTarget = computeMountainCameraTarget({
+    carY: 9.8,
+    carVy: 1.2,
+    roadSlope: 0,
+    isAirborne: true,
+    inChasmGap: true,
+    referenceGroundY: 8.5,
+    roadY: -22.0,
+  });
+  assert.ok(chasmTarget.focusY > 8.0, `Camera focusY (${chasmTarget.focusY}) must stay anchored above chasm`);
+  assert.ok(chasmTarget.pitchSlope >= 0.045 && chasmTarget.pitchSlope <= 0.175);
+
+  const rampTarget = computeMountainCameraTarget({
+    carY: 12.0,
+    carVy: 0,
+    roadSlope: 0.39,
+    isAirborne: false,
+    inChasmGap: false,
+    referenceGroundY: 12.0,
+    roadY: 12.0,
+    aheadRoadY: 14.5,
+  });
+  assert.ok(rampTarget.pitchSlope >= 0.045, `Ramp pitchSlope (${rampTarget.pitchSlope}) must not invert negative`);
+  assert.ok(rampTarget.pitchSlope <= 0.175);
+  assert.equal(rampTarget.camHeight, 4.55);
+
+  const descentTitle = computeMountainCameraTarget({
+    carY: 15.0,
+    carVy: 0,
+    roadSlope: -0.35,
+    isAirborne: false,
+    inChasmGap: false,
+    referenceGroundY: 15.0,
+    roadY: 15.0,
+    isTitle: true,
+  });
+  assert.ok(descentTitle.pitchSlope >= 0.045 && descentTitle.pitchSlope <= 0.175);
+  assert.equal(descentTitle.camHeight, 3.05);
+});
+
 

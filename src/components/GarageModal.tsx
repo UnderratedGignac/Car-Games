@@ -102,6 +102,12 @@ function getInspectionYawForPart(partId: CarPartId): number {
     case 'rear_bumper':
     case 'spoiler':
       return -0.35;
+    case 'front_left_wheel':
+    case 'rear_left_wheel':
+      return -Math.PI * 0.56;
+    case 'front_right_wheel':
+    case 'rear_right_wheel':
+      return Math.PI * 0.56;
   }
 }
 
@@ -148,6 +154,12 @@ function getPartStatImpactHint(partId: CarPartId): string {
       return 'Rear diffuser & chassis tail';
     case 'spoiler':
       return 'Rear downforce & drift grip';
+    case 'front_left_wheel':
+    case 'front_right_wheel':
+      return 'Front steering response & turn-in grip';
+    case 'rear_left_wheel':
+    case 'rear_right_wheel':
+      return 'Rear traction & drift stability';
   }
 }
 
