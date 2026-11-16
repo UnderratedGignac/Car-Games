@@ -837,7 +837,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
         {/* ZONE B & C WRAPPER: Pinned car showcase + independently scrollable shop on ALL screens */}
         <div className="flex-1 min-h-0 flex flex-col lg:col-span-9 lg:grid lg:grid-cols-12 overflow-hidden">
           {/* ZONE B: PINNED SHOWROOM STAGE & TELEMETRY (Always visible while scrolling shop!) */}
-          <section className="shrink-0 lg:min-h-0 lg:col-span-6 lg:overflow-y-auto flex flex-col justify-between p-2.5 sm:p-4 lg:p-5 border-b lg:border-b-0 lg:border-r border-slate-800 bg-[#080c17]">
+          <section className="shrink-0 max-h-[46dvh] sm:max-h-none overflow-y-auto overscroll-contain lg:min-h-0 lg:col-span-6 lg:overflow-y-auto flex flex-col justify-between p-2.5 sm:p-4 lg:p-5 border-b lg:border-b-0 lg:border-r border-slate-800 bg-[#080c17]">
             <div>
               {/* Stage Sub-Header (Desktop/Tablet; Mobile uses compact overlay pills on stage to preserve scroll room) */}
               <div className="hidden sm:flex items-center justify-between gap-2 mb-2">
@@ -873,7 +873,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                 onPointerMove={handlePointerMove}
                 onPointerUp={handlePointerUp}
                 onPointerCancel={handlePointerUp}
-                className={`relative flex items-center justify-center h-32 sm:h-44 lg:h-60 rounded-xl overflow-hidden bg-slate-900 border select-none transition-colors ${
+                className={`relative flex items-center justify-center h-28 sm:h-44 lg:h-60 rounded-xl overflow-hidden bg-slate-900 border select-none transition-colors ${
                   hasActivePreview
                     ? isComparingSaved
                       ? 'border-slate-500'
@@ -918,7 +918,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                   type="button"
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={() => setIsAutoSpin((s) => !s)}
-                  className={`sm:hidden absolute top-1.5 right-1.5 z-20 min-h-[26px] px-2 py-0.5 rounded-md border text-[10px] font-mono font-semibold ${
+                  className={`sm:hidden absolute top-1.5 right-1.5 z-20 min-h-[32px] px-2 py-0.5 rounded-md border text-[10px] font-mono font-semibold ${
                     isAutoSpin
                       ? 'bg-amber-400/20 text-amber-300 border-amber-400/50'
                       : 'bg-slate-950/80 text-slate-300 border-slate-700'
@@ -1051,7 +1051,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                         setPreviewYawRad(preset.rad);
                         setIsAutoSpin(false);
                       }}
-                      className={`shrink-0 min-h-[30px] sm:min-h-[32px] px-2.5 sm:px-1 py-0.5 sm:py-1 rounded-md text-[10px] font-mono font-semibold transition-colors whitespace-nowrap ${
+                      className={`shrink-0 min-h-[36px] px-2.5 sm:px-1 py-0.5 sm:py-1 rounded-md text-[10px] font-mono font-semibold transition-colors whitespace-nowrap ${
                         isSelected
                           ? 'bg-amber-400 text-slate-950 font-bold'
                           : 'bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-800'
@@ -1085,7 +1085,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                 <button
                   type="button"
                   onClick={triggerTestFlash}
-                  className={`min-h-[32px] sm:min-h-[38px] px-1.5 py-0.5 sm:py-1 rounded-lg border text-[10px] sm:text-[11px] font-mono font-semibold whitespace-nowrap inline-flex items-center justify-center gap-1 transition-colors ${
+                  className={`min-h-[36px] sm:min-h-[38px] px-1.5 py-0.5 sm:py-1 rounded-lg border text-[10px] sm:text-[11px] font-mono font-semibold whitespace-nowrap inline-flex items-center justify-center gap-1 transition-colors ${
                     previewFlashing
                       ? 'bg-cyan-400 border-white text-slate-950 font-bold'
                       : 'bg-slate-900 hover:bg-slate-800 border-slate-800 text-cyan-300'
@@ -1097,7 +1097,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                 <button
                   type="button"
                   onClick={triggerTestHorn}
-                  className="min-h-[32px] sm:min-h-[38px] px-1.5 py-0.5 sm:py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[10px] sm:text-[11px] font-mono font-semibold text-amber-300 whitespace-nowrap inline-flex items-center justify-center gap-1"
+                  className="min-h-[36px] sm:min-h-[38px] px-1.5 py-0.5 sm:py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[10px] sm:text-[11px] font-mono font-semibold text-amber-300 whitespace-nowrap inline-flex items-center justify-center gap-1"
                 >
                   <Volume2 className="w-3 h-3 shrink-0 hidden sm:inline" />
                   <span>Test Horn</span>
@@ -1105,7 +1105,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                 <button
                   type="button"
                   onClick={triggerTestRev}
-                  className={`min-h-[32px] sm:min-h-[38px] px-1.5 py-0.5 sm:py-1 rounded-lg border text-[10px] sm:text-[11px] font-mono font-semibold whitespace-nowrap inline-flex items-center justify-center gap-1 transition-colors ${
+                  className={`min-h-[36px] sm:min-h-[38px] px-1.5 py-0.5 sm:py-1 rounded-lg border text-[10px] sm:text-[11px] font-mono font-semibold whitespace-nowrap inline-flex items-center justify-center gap-1 transition-colors ${
                     previewRevving
                       ? 'bg-rose-500 border-white text-slate-950 font-bold'
                       : 'bg-slate-900 hover:bg-slate-800 border-slate-800 text-rose-300'
@@ -1123,7 +1123,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                     setIsComparingSaved(false);
                     onResetCustomization(previewCar);
                   }}
-                  className="min-h-[32px] sm:min-h-[38px] px-1.5 py-0.5 sm:py-1 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 border border-slate-800 text-[10px] sm:text-[11px] font-mono font-semibold text-slate-300 whitespace-nowrap inline-flex items-center justify-center gap-1"
+                  className="min-h-[36px] sm:min-h-[38px] px-1.5 py-0.5 sm:py-1 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 border border-slate-800 text-[10px] sm:text-[11px] font-mono font-semibold text-slate-300 whitespace-nowrap inline-flex items-center justify-center gap-1"
                 >
                   <RotateCcw className="w-3 h-3 shrink-0 hidden sm:inline" />
                   <span>Reset Stock</span>
@@ -1224,7 +1224,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
           >
             {/* Sticky Workshop Navigation Tabs */}
             <div
-              className="sticky top-0 z-10 shrink-0 flex overflow-x-auto touch-pan-x lg:flex-wrap scrollbar-none gap-1.5 px-3 sm:px-4 pt-2.5 pb-2 border-b border-slate-800 bg-[#0b101d]"
+              className="sticky top-0 z-10 shrink-0 flex flex-wrap scrollbar-none gap-1.5 px-3 sm:px-4 pt-2.5 pb-2 border-b border-slate-800 bg-[#0b101d]"
               role="tablist"
               aria-label="Mod Shop Categories"
             >
@@ -1250,7 +1250,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                       setActiveTab(tabId);
                       if (tabId !== 'repair') setHighlightedPart(null);
                     }}
-                    className={`min-h-[38px] px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
+                    className={`min-h-[32px] sm:min-h-[38px] px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg text-[10px] sm:text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-1 sm:gap-1.5 ${
                       activeTab === tabId
                         ? isRepair && previewTotaled
                           ? 'bg-rose-500 text-white font-bold'
@@ -2412,7 +2412,7 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                   className="w-full min-h-[40px] pl-8 pr-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 focus:border-amber-400 focus:outline-none text-xs text-white placeholder-slate-500 font-mono"
                 />
               </div>
-              <div className="flex overflow-x-auto touch-pan-x scrollbar-none gap-1.5">
+              <div className="flex flex-wrap scrollbar-none gap-1.5">
                 {CATEGORY_TABS.map((tab) => {
                   const count = categoryCounts[tab.id] || 0;
                   const isActive = categoryFilter === tab.id;

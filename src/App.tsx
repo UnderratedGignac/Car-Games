@@ -1554,18 +1554,18 @@ export default function App() {
 
       {/* Smooth Animated Soundtrack Title Popup */}
       {jukeboxToast && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 pointer-events-none transition-all duration-300">
-          <div className="px-4 py-2 rounded-2xl bg-slate-950/95 border border-cyan-400/80 shadow-[0_0_24px_rgba(6,182,212,0.45)] flex items-center gap-2.5">
-            <span className="text-lg">🎵</span>
-            <div>
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 max-w-[calc(100vw-1.5rem)] pointer-events-none transition-all duration-300">
+          <div className="px-4 py-2 rounded-2xl bg-slate-950/95 border border-cyan-400/80 shadow-[0_0_24px_rgba(6,182,212,0.45)] flex items-center gap-2.5 min-w-0">
+            <span className="text-lg shrink-0">🎵</span>
+            <div className="min-w-0 flex-1">
               <div className="text-[9px] font-mono tracking-widest text-cyan-400 uppercase font-bold">
                 NOW PLAYING · {jukeboxToast.track.genre}
               </div>
-              <div className="text-xs sm:text-sm font-bold font-display text-white">
+              <div className="text-xs sm:text-sm font-bold font-display text-white truncate">
                 {jukeboxToast.track.title}
               </div>
             </div>
-            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-amber-400/20 text-amber-300 border border-amber-400/40">
+            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-amber-400/20 text-amber-300 border border-amber-400/40 shrink-0 whitespace-nowrap">
               {jukeboxToast.track.bpm} BPM
             </span>
           </div>
@@ -1575,7 +1575,7 @@ export default function App() {
       {/* 2. TITLE SCREEN OVERLAY (Motorsport Command Deck + Bespoke SVG Emblem, Phone-Vertical Friendly) */}
       {gamePhase === 'title' && (
         <div
-          className="fixed inset-0 z-20 flex flex-col justify-between items-center p-2.5 sm:p-6 pointer-events-none"
+          className="fixed inset-0 z-20 flex flex-col justify-between items-center p-2.5 sm:p-6 pt-[max(0.625rem,env(safe-area-inset-top))] pl-[max(0.625rem,env(safe-area-inset-left))] pr-[max(0.625rem,env(safe-area-inset-right))] pointer-events-none"
           style={{
             background:
               'linear-gradient(180deg, rgba(7,10,19,0.62) 0%, rgba(7,10,19,0.0) 34%, rgba(7,10,19,0.0) 62%, rgba(7,10,19,0.88) 100%)',
@@ -1585,12 +1585,12 @@ export default function App() {
           <div className="w-full max-w-6xl flex flex-wrap items-center justify-between gap-1.5 sm:gap-2.5 pointer-events-auto">
             <div className="order-1 flex-1 sm:flex-none flex items-center gap-1.5 sm:gap-2 text-[11px] sm:text-xs font-mono tabular-nums text-slate-100 px-2 sm:px-3 py-1.5 rounded-lg bg-slate-900/95 border border-slate-700/90 shadow-sm min-w-0">
               <span
-                className="w-2.5 h-2.5 rounded-sm border border-white/40 shrink-0"
+                className="hidden sm:block w-2.5 h-2.5 rounded-sm border border-white/40 shrink-0"
                 style={{ backgroundColor: activeAppearance.primaryColor }}
                 aria-hidden="true"
               />
               <span className="font-semibold truncate">{selectedCar.name}</span>
-              <span aria-hidden="true" className="text-slate-500 shrink-0">·</span>
+              <span aria-hidden="true" className="hidden sm:inline text-slate-500 shrink-0">·</span>
               <span className="text-amber-400 font-bold shrink-0 whitespace-nowrap">{Math.round(coins)} CR</span>
             </div>
 
@@ -1599,11 +1599,11 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleSkipTrack}
-                className="min-h-[36px] sm:min-h-[40px] px-2 sm:px-3 py-1 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-slate-700/90 text-[11px] sm:text-xs font-mono text-cyan-300 hover:text-cyan-200 transition-colors flex items-center gap-1 shrink-0"
+                className="min-h-[36px] sm:min-h-[40px] px-1.5 sm:px-3 py-1 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-slate-700/90 text-[11px] sm:text-xs font-mono text-cyan-300 hover:text-cyan-200 transition-colors flex items-center gap-1 shrink-0"
                 title="Tap to skip soundtrack"
               >
                 <span className="text-amber-400">🎵</span>
-                <span className="font-semibold text-white truncate max-w-[54px] sm:max-w-[160px]">
+                <span className="font-semibold text-white truncate max-w-[40px] sm:max-w-[160px]">
                   {audioDeck.currentTrack?.genre || audioDeck.activeTrackTitle}
                 </span>
               </button>
@@ -1641,7 +1641,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setIsDailySpinOpen(true)}
-                className="relative min-h-[38px] sm:min-h-[40px] px-1.5 sm:px-3 py-1 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-amber-500/50 text-[11px] sm:text-xs font-semibold text-amber-300 transition-colors whitespace-nowrap flex items-center justify-center gap-1"
+                className="relative min-h-[38px] sm:min-h-[40px] px-1 sm:px-3 py-1 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-amber-500/50 text-[9.5px] sm:text-xs font-semibold text-amber-300 transition-colors whitespace-nowrap flex items-center justify-center gap-1"
               >
                 <span>🎡</span>
                 <span className="truncate">Spin</span>
@@ -1655,7 +1655,7 @@ export default function App() {
                   setMissionModalTab(gameMode === 'parking' ? 'tech' : 'daily');
                   setIsMissionsOpen(true);
                 }}
-                className="relative min-h-[38px] sm:min-h-[40px] px-1.5 sm:px-3 py-1 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-purple-500/50 text-[11px] sm:text-xs font-semibold text-purple-300 transition-colors whitespace-nowrap flex items-center justify-center gap-1"
+                className="relative min-h-[38px] sm:min-h-[40px] px-1 sm:px-3 py-1 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-purple-500/50 text-[9.5px] sm:text-xs font-semibold text-purple-300 transition-colors whitespace-nowrap flex items-center justify-center gap-1"
               >
                 <span>📋</span>
                 <span className="truncate">Missions</span>
@@ -1668,7 +1668,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setIsLeaderboardOpen(true)}
-                className="min-h-[38px] sm:min-h-[40px] px-1.5 sm:px-3 py-1 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-slate-700/90 text-[11px] sm:text-xs font-semibold text-slate-100 transition-colors whitespace-nowrap flex items-center justify-center gap-1"
+                className="min-h-[38px] sm:min-h-[40px] px-1 sm:px-3 py-1 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-slate-700/90 text-[9.5px] sm:text-xs font-semibold text-slate-100 transition-colors whitespace-nowrap flex items-center justify-center gap-1"
               >
                 <span>🏆</span>
                 <span className="truncate">Ranks</span>
@@ -1676,7 +1676,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setIsArtGalleryOpen(true)}
-                className="min-h-[38px] sm:min-h-[40px] px-1.5 sm:px-3 py-1 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-slate-700/90 text-[11px] sm:text-xs font-semibold text-cyan-300 transition-colors whitespace-nowrap flex items-center justify-center gap-1"
+                className="min-h-[38px] sm:min-h-[40px] px-1 sm:px-3 py-1 rounded-lg bg-slate-900/95 hover:bg-slate-800 border border-slate-700/90 text-[9.5px] sm:text-xs font-semibold text-cyan-300 transition-colors whitespace-nowrap flex items-center justify-center gap-1"
               >
                 <span>🖼️</span>
                 <span className="truncate">Gallery</span>
@@ -1685,10 +1685,10 @@ export default function App() {
           </div>
 
           {/* Upper Negative-Space Motorsport SVG Title Emblem */}
-          <div className="w-full max-w-lg text-center mt-0.5 sm:mt-1 pointer-events-auto">
+          <div className="w-full max-w-lg landscape:max-w-[240px] text-center mt-0.5 sm:mt-1 pointer-events-auto flex-1 min-h-[60px] landscape:min-h-[24px] flex items-center justify-center">
             <svg
               viewBox="0 0 440 112"
-              className="w-full max-w-[260px] sm:max-w-[390px] mx-auto drop-shadow-[0_8px_24px_rgba(0,0,0,0.9)]"
+              className="w-full max-w-[260px] sm:max-w-[390px] landscape:max-w-[180px] mx-auto max-h-full drop-shadow-[0_8px_24px_rgba(0,0,0,0.9)]"
               role="img"
               aria-label="Neon Redline: Touge & Highway Drift"
             >
@@ -1735,14 +1735,12 @@ export default function App() {
             </svg>
           </div>
 
-          {/* Open Center Road Preview */}
-          <div className="my-auto" />
-
           {/* Lower Motorsport Pit Command Deck */}
           <div
-            className="w-full max-w-lg rounded-2xl border border-slate-700/80 p-2.5 sm:p-4 space-y-1.5 sm:space-y-2.5 max-h-[64dvh] sm:max-h-none overflow-y-auto overscroll-contain pointer-events-auto shadow-2xl"
+            className="w-full max-w-lg rounded-2xl border border-slate-700/80 p-2.5 sm:p-4 shadow-2xl pointer-events-auto shrink-0"
             style={{ backgroundColor: 'rgba(9, 14, 26, 0.94)' }}
           >
+            <div className="space-y-1.5 sm:space-y-2.5 max-h-[44dvh] sm:max-h-[52dvh] landscape:max-h-[38dvh] overflow-y-auto overscroll-contain scrollbar-none">
             {/* Active Build Telemetry Strip */}
             <div className="flex items-center justify-between gap-2 pb-1.5 sm:pb-2 border-b border-slate-800/90 text-xs">
               <div className="min-w-0 truncate">
@@ -1865,7 +1863,7 @@ export default function App() {
             </div>
 
             <div
-              className="grid grid-cols-5 gap-1 sm:gap-1.5"
+              className="grid grid-cols-3 sm:grid-cols-5 gap-1 sm:gap-1.5"
               role="group"
               aria-label="Select Road Route"
             >
@@ -1919,12 +1917,45 @@ export default function App() {
                       style={{ backgroundColor: opt.dotColor }}
                       aria-hidden="true"
                     />
-                    <span>{opt.shortLabel}</span>
+                    <span className="truncate min-w-0" title={opt.label}>{opt.shortLabel}</span>
                   </button>
                 );
               })}
             </div>
 
+            <button
+              type="button"
+              data-testid="btn-quick-guide"
+              onClick={() => setIsQuickGuideOpen(true)}
+              className="w-full min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 hover:border-cyan-500/60 flex items-center justify-between gap-2 text-xs transition-colors"
+            >
+              <span className="flex items-center gap-2 font-display font-bold text-slate-100 whitespace-nowrap shrink-0">
+                <BookOpen className="w-3.5 h-3.5 text-cyan-400 shrink-0" aria-hidden="true" />
+                <span>Quick Guide</span>
+              </span>
+              <span className="flex items-center gap-1 min-w-0 font-mono text-[10px] sm:text-[11px] text-slate-300">
+                <span className="truncate">
+                  {gameMode === 'parking'
+                    ? 'Parking'
+                    : gameMode === 'highway_traffic'
+                    ? 'Traffic'
+                    : gameMode === 'mountain_drive'
+                    ? 'Mountain'
+                    : 'S-Curve'}
+                  {' · '}
+                  {gameSettings.controlScheme === 'swipe'
+                    ? 'Swipe · Pedals'
+                    : gameSettings.controlScheme === 'wheel'
+                    ? 'Wheel · Pedals'
+                    : 'Arrows · Pedals'}
+                </span>
+                <ChevronRight className="w-3.5 h-3.5 text-cyan-400 shrink-0" aria-hidden="true" />
+              </span>
+            </button>
+            </div>
+
+            {/* Pinned launch actions — always visible without scrolling on any phone */}
+            <div className="pt-1.5 sm:pt-2 space-y-1.5 sm:space-y-2">
             {/* Primary Launch CTA (Blocked cleanly to Repair Bay if Chassis is Totaled) */}
             <button
               type="button"
@@ -1968,48 +1999,19 @@ export default function App() {
                 🖼️ Art Gallery
               </button>
             </div>
-
-            <button
-              type="button"
-              data-testid="btn-quick-guide"
-              onClick={() => setIsQuickGuideOpen(true)}
-              className="w-full min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 hover:border-cyan-500/60 flex items-center justify-between gap-2 text-xs transition-colors"
-            >
-              <span className="flex items-center gap-2 font-display font-bold text-slate-100 whitespace-nowrap shrink-0">
-                <BookOpen className="w-3.5 h-3.5 text-cyan-400 shrink-0" aria-hidden="true" />
-                <span>Quick Guide</span>
-              </span>
-              <span className="flex items-center gap-1 min-w-0 font-mono text-[10px] sm:text-[11px] text-slate-300">
-                <span className="truncate">
-                  {gameMode === 'parking'
-                    ? 'Parking'
-                    : gameMode === 'highway_traffic'
-                    ? 'Traffic'
-                    : gameMode === 'mountain_drive'
-                    ? 'Mountain'
-                    : 'S-Curve'}
-                  {' · '}
-                  {gameSettings.controlScheme === 'swipe'
-                    ? 'Swipe · Pedals'
-                    : gameSettings.controlScheme === 'wheel'
-                    ? 'Wheel · Pedals'
-                    : 'Arrows · Pedals'}
-                </span>
-                <ChevronRight className="w-3.5 h-3.5 text-cyan-400 shrink-0" aria-hidden="true" />
-              </span>
-            </button>
+            </div>
           </div>
         </div>
       )}
 
       {/* 4. PLAYING HUD (World-Matched, Perimeter-Only <= 15% Footprint, Tabular-Nums Integer Readouts) */}
       {gamePhase === 'playing' && (
-        <div className="fixed inset-0 z-20 pointer-events-none flex flex-col justify-between p-2 sm:p-4 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+        <div className="fixed inset-0 z-20 pointer-events-none flex flex-col justify-between p-2 sm:p-4 pt-[max(0.5rem,env(safe-area-inset-top))] pl-[max(0.5rem,env(safe-area-inset-left))] pr-[max(0.5rem,env(safe-area-inset-right))] pb-[max(0.5rem,env(safe-area-inset-bottom))]">
           {/* Top Perimeter Row: Left Score/Combo Cluster + Track Skip + Right Utility Icon Buttons */}
-          <div className="w-full max-w-5xl mx-auto flex items-center justify-between gap-1.5 sm:gap-3">
+          <div className="w-full max-w-5xl mx-auto flex flex-wrap items-center justify-between gap-1.5 sm:gap-3">
             {/* Top-Left Score & Combo Cluster */}
             <div
-              className={`px-2 py-1 sm:px-3.5 sm:py-2 rounded-xl sm:rounded-2xl border shadow-lg transition-colors shrink-0 ${
+              className={`px-1.5 py-1 sm:px-3.5 sm:py-2 rounded-xl sm:rounded-2xl border shadow-lg transition-colors shrink-0 ${
                 telemetry.isFever
                   ? 'border-cyan-400/90'
                   : telemetry.combo >= 3
@@ -2018,25 +2020,25 @@ export default function App() {
               }`}
               style={{ backgroundColor: 'rgba(9, 13, 22, 0.86)' }}
             >
-              <div className="flex items-baseline gap-1.5 sm:gap-3">
+              <div className="flex items-baseline gap-1 sm:gap-3">
                 <div>
                   <span className="block text-[8px] sm:text-[10px] font-semibold tracking-wider text-slate-400">
                     SCORE
                   </span>
                   <span
-                    className="text-lg sm:text-3xl font-bold font-display tabular-nums text-white"
+                    className="text-base sm:text-3xl font-bold font-display tabular-nums text-white"
                     data-testid="hud-score"
                   >
-                    {Math.round(telemetry.score)}
+                    {telemetry.score >= 1000000 ? `${(telemetry.score / 1000000).toFixed(1)}M` : Math.round(telemetry.score)}
                   </span>
                 </div>
 
-                <div className="pl-1.5 sm:pl-3 border-l border-slate-800">
+                <div className="pl-1 sm:pl-3 border-l border-slate-800">
                   <span className="block text-[8px] sm:text-[10px] font-semibold tracking-wider text-amber-400">
                     COMBO
                   </span>
                   <span
-                    className={`inline-block text-base sm:text-2xl font-bold font-mono tabular-nums transition-transform ${
+                    className={`inline-block text-sm sm:text-2xl font-bold font-mono tabular-nums transition-transform ${
                       telemetry.isFever
                         ? 'text-cyan-300 scale-110'
                         : telemetry.combo >= 3
@@ -2048,7 +2050,7 @@ export default function App() {
                   </span>
                 </div>
 
-                <div className="pl-1.5 sm:pl-3 border-l border-slate-800">
+                <div className="pl-1 sm:pl-3 border-l border-slate-800">
                   <span className="block text-[8px] sm:text-[10px] font-semibold tracking-wider text-slate-400">
                     {gameMode === 'parking'
                       ? 'STAGE'
@@ -2059,7 +2061,7 @@ export default function App() {
                       : 'DIR'}
                   </span>
                   <span
-                    className="text-base sm:text-2xl font-bold font-mono tabular-nums text-cyan-400"
+                    className="text-sm sm:text-2xl font-bold font-mono tabular-nums text-cyan-400"
                     data-testid={
                       gameMode === 'parking'
                         ? 'hud-stage'
@@ -2090,7 +2092,7 @@ export default function App() {
               tabIndex={-1}
               onClick={handleSkipTrack}
               aria-label={`Next Track: ${audioDeck.currentTrack?.title || audioDeck.activeTrackTitle}`}
-              className="pointer-events-auto min-h-[36px] sm:min-h-[38px] px-2 sm:px-3 py-1 sm:py-1.5 rounded-full border border-slate-700/80 hover:border-cyan-400/90 text-[10px] sm:text-[11px] font-mono flex items-center gap-1 sm:gap-1.5 shadow-lg transition-all active:scale-95 group min-w-0"
+              className="pointer-events-auto shrink-0 min-h-[36px] sm:min-h-[38px] px-1.5 sm:px-3 py-1 sm:py-1.5 rounded-full border border-slate-700/80 hover:border-cyan-400/90 text-[10px] sm:text-[11px] font-mono flex items-center gap-1 sm:gap-1.5 shadow-lg transition-all active:scale-95 group"
               style={{ backgroundColor: 'rgba(9, 13, 22, 0.92)' }}
               title="Tap to skip soundtrack"
             >
@@ -2098,9 +2100,7 @@ export default function App() {
               <span className="hidden sm:inline font-semibold text-slate-100 max-w-[200px] truncate">
                 {audioDeck.currentTrack?.title || audioDeck.activeTrackTitle}
               </span>
-              <span className="sm:hidden font-semibold text-slate-200 text-[9px] whitespace-nowrap">
-                SKIP
-              </span>
+              <span className="sr-only">Skip track</span>
             </button>
 
             {/* Top-Right Compact Square SVG Utility Buttons (Mute [M], Restart [R], Pause [P]) */}
@@ -2190,10 +2190,10 @@ export default function App() {
 
           {/* Mission Completion Dopamine Juice Callout Banner */}
           {missionToast && (
-            <div className="mx-auto mt-2 px-4 py-1.5 rounded-xl bg-gradient-to-r from-amber-400 via-rose-500 to-purple-500 text-slate-950 font-display font-black text-sm tracking-wide shadow-[0_0_20px_rgba(251,191,36,0.6)] animate-bounce border border-amber-300 flex items-center gap-1.5">
-              <span>🎯 MISSION COMPLETED:</span>
-              <span className="text-white">{missionToast.title.toUpperCase()}</span>
-              <span className="text-amber-200 font-mono">(+{missionToast.reward.toLocaleString()} CR)</span>
+            <div className="mx-auto mt-2 max-w-[calc(100vw-1rem)] px-4 py-1.5 rounded-xl bg-gradient-to-r from-amber-400 via-rose-500 to-purple-500 text-slate-950 font-display font-black text-sm tracking-wide shadow-[0_0_20px_rgba(251,191,36,0.6)] animate-bounce border border-amber-300 flex items-center gap-1.5">
+              <span className="shrink-0">🎯 MISSION COMPLETED:</span>
+              <span className="text-white truncate min-w-0">{missionToast.title.toUpperCase()}</span>
+              <span className="text-amber-200 font-mono shrink-0">(+{missionToast.reward.toLocaleString()} CR)</span>
             </div>
           )}
 
@@ -2250,7 +2250,7 @@ export default function App() {
                     {pk.instruction}
                   </p>
 
-                  <div className="flex items-center gap-3 text-[10px] font-mono tabular-nums">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-0 text-[10px] font-mono tabular-nums whitespace-nowrap">
                     <span className={pk.distM <= 1.1 ? 'text-emerald-400 font-bold' : 'text-cyan-300'}>
                       BAY {pk.distM.toFixed(1)}m
                     </span>
@@ -2484,7 +2484,7 @@ export default function App() {
                   >
                     ▾ Hide Cockpit [H]
                   </button>
-                  <div className="w-full flex items-center justify-between sm:justify-center gap-2 sm:gap-3 px-1.5 sm:px-3.5 sm:py-1.5 sm:rounded-2xl sm:border sm:border-slate-700/80 sm:bg-[rgba(9,14,26,0.90)] sm:shadow-xl min-w-0">
+                  <div className="w-full flex flex-wrap items-center justify-between sm:justify-center gap-x-2 gap-y-1 sm:gap-3 px-1.5 sm:px-3.5 sm:py-1.5 sm:rounded-2xl sm:border sm:border-slate-700/80 sm:bg-[rgba(9,14,26,0.90)] sm:shadow-xl min-w-0">
                     <div className="flex items-center gap-1.5 sm:gap-2 font-mono tabular-nums text-[10px] sm:text-[11px] min-w-0">
                     <span className="text-slate-300 whitespace-nowrap">
                       <strong
@@ -2525,7 +2525,7 @@ export default function App() {
                   </div>
 
                   {/* Quick Utility Buttons: Headlights ON/OFF [L], High-Beam Flash [F] & Horn [E] */}
-                  <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+                  <div className="flex items-center gap-1 sm:gap-1.5 shrink-0 ml-auto">
                     <button
                       type="button"
                       data-hud-btn="true"
@@ -2538,7 +2538,7 @@ export default function App() {
                         e.currentTarget.blur();
                         toggleHeadlightsAction();
                       }}
-                      className={`min-h-[32px] sm:min-h-[34px] px-2 py-1 rounded-lg border flex items-center gap-1 transition-colors whitespace-nowrap ${
+                      className={`min-h-[34px] px-2 py-1 rounded-lg border flex items-center gap-1 transition-colors whitespace-nowrap ${
                         headlightsOn
                           ? 'bg-amber-300 border-amber-100 text-slate-950'
                           : 'bg-slate-900 border-slate-600/80 hover:bg-slate-800 text-slate-400'
@@ -2547,7 +2547,7 @@ export default function App() {
                       <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 fill-current shrink-0" aria-hidden="true">
                         <path d="M9 6C5.69 6 3 8.69 3 12s2.69 6 6 6h3V6H9zm5 1v2h7V7h-7zm0 4v2h8v-2h-8zm0 4v2h7v-2h-7z" />
                       </svg>
-                      <span className="text-[9px] font-mono font-bold">
+                      <span className="hidden sm:inline text-[9px] font-mono font-bold">
                         {headlightsOn ? 'LIGHTS ON' : 'LIGHTS OFF'}
                       </span>
                     </button>
@@ -2562,7 +2562,7 @@ export default function App() {
                         e.currentTarget.blur();
                         triggerFlashAction();
                       }}
-                      className={`min-h-[32px] sm:min-h-[34px] px-2 py-1 rounded-lg border flex items-center gap-1 transition-colors whitespace-nowrap ${
+                      className={`min-h-[34px] px-2 py-1 rounded-lg border flex items-center gap-1 transition-colors whitespace-nowrap ${
                         flashPulse
                           ? 'bg-cyan-400 border-white text-slate-950'
                           : 'bg-slate-900 border-cyan-500/50 hover:bg-slate-800 text-cyan-300'
@@ -2571,7 +2571,7 @@ export default function App() {
                       <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 fill-current shrink-0" aria-hidden="true">
                         <path d="M5 7c-1.7 0-3 2.2-3 5s1.3 5 3 5h5V7H5zm8 0v2h8V7h-8zm0 4v2h9v-2h-9zm0 4v2h8v-2h-8z" />
                       </svg>
-                      <span className="text-[9px] font-mono font-bold">FLASH</span>
+                      <span className="hidden sm:inline text-[9px] font-mono font-bold">FLASH</span>
                     </button>
 
                     <button
@@ -2584,7 +2584,7 @@ export default function App() {
                         e.currentTarget.blur();
                         triggerHornAction();
                       }}
-                      className={`min-h-[32px] sm:min-h-[34px] px-2 py-1 rounded-lg border flex items-center gap-1 transition-colors whitespace-nowrap ${
+                      className={`min-h-[34px] px-2 py-1 rounded-lg border flex items-center gap-1 transition-colors whitespace-nowrap ${
                         hornPulse
                           ? 'bg-amber-400 border-white text-slate-950'
                           : 'bg-slate-900 border-amber-500/50 hover:bg-slate-800 text-amber-300'
@@ -2593,16 +2593,55 @@ export default function App() {
                       <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 fill-current shrink-0" aria-hidden="true">
                         <path d="M3 10v4h4l5 5V5L7 10H3zm13.5 2c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
                       </svg>
-                      <span className="text-[9px] font-mono font-bold">HORN</span>
+                      <span className="hidden sm:inline text-[9px] font-mono font-bold">HORN</span>
                     </button>
                     </div>
                   </div>
                 </div>
 
+                {/* Mobile horizontal P/R/D gear row (parking) — big thumb targets without widening the steer pod */}
+                {gameMode === 'parking' && (
+                  <div
+                    className="sm:hidden flex items-center justify-center gap-1 pb-1"
+                    role="group"
+                    aria-label="Parking Transmission Gear"
+                    data-testid="parking-shifter-mobile"
+                  >
+                    {(['P', 'R', 'D'] as const).map((g) => {
+                      const active = (telemetry.parking?.gear || parkingGear) === g;
+                      return (
+                        <button
+                          key={g}
+                          type="button"
+                          tabIndex={-1}
+                          data-hud-btn="true"
+                          data-gear={g}
+                          onClick={(e) => {
+                            e.currentTarget.blur();
+                            setParkingGear(g);
+                            soundFX.playGearShift();
+                          }}
+                          className={`min-w-[44px] h-[28px] rounded-lg text-[11px] font-mono font-bold transition-colors ${
+                            active
+                              ? g === 'R'
+                                ? 'bg-rose-500 text-white'
+                                : g === 'P'
+                                ? 'bg-amber-400 text-slate-950'
+                                : 'bg-emerald-400 text-slate-950'
+                              : 'bg-slate-900 text-slate-400 hover:bg-slate-800 hover:text-white'
+                          }`}
+                        >
+                          {g}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
                 {/* Mobile Single Row / Desktop Split Left & Right Corner Pods */}
-                <div className="order-2 flex items-center justify-between gap-1.5 sm:contents">
+                <div className="order-2 flex flex-wrap items-center justify-between gap-1.5 sm:contents">
                   {/* Bottom-Left Pod: Steer Left Nudge + Interactive Steering Wheel + Steer Right Nudge + P/R/D */}
-                  <div className="sm:order-1 flex items-center gap-1 sm:gap-1.5 sm:rounded-2xl sm:border sm:border-slate-700/80 sm:px-2.5 sm:py-2 sm:bg-[rgba(9,14,26,0.90)] sm:shadow-2xl shrink-0">
+                  <div className="sm:order-1 flex items-center gap-0.5 sm:gap-1.5 sm:rounded-2xl sm:border sm:border-slate-700/80 sm:px-2.5 sm:py-2 sm:bg-[rgba(9,14,26,0.90)] sm:shadow-2xl shrink-0">
                     <button
                       type="button"
                       data-hud-btn="true"
@@ -2634,7 +2673,7 @@ export default function App() {
                           setSteerHold(0);
                         }
                       }}
-                      className={`touch-none select-none w-[34px] h-[54px] sm:w-[40px] sm:h-[60px] rounded-xl border flex items-center justify-center font-bold text-xs transition-colors ${
+                      className={`touch-none select-none w-[32px] h-[54px] sm:w-[40px] sm:h-[60px] rounded-xl border flex items-center justify-center font-bold text-xs transition-colors ${
                         (steerHold < -0.15 || keySteerVisual < 0)
                           ? 'bg-cyan-500/30 border-cyan-300 text-cyan-200'
                           : 'bg-slate-900/90 border-slate-700 text-slate-300 hover:border-cyan-400/70'
@@ -2681,7 +2720,7 @@ export default function App() {
                           setSteerHold(0);
                         }
                       }}
-                      className={`touch-none select-none w-[34px] h-[54px] sm:w-[40px] sm:h-[60px] rounded-xl border flex items-center justify-center font-bold text-xs transition-colors ${
+                      className={`touch-none select-none w-[32px] h-[54px] sm:w-[40px] sm:h-[60px] rounded-xl border flex items-center justify-center font-bold text-xs transition-colors ${
                         (steerHold > 0.15 || keySteerVisual > 0)
                           ? 'bg-cyan-500/30 border-cyan-300 text-cyan-200'
                           : 'bg-slate-900/90 border-slate-700 text-slate-300 hover:border-cyan-400/70'
@@ -2693,7 +2732,7 @@ export default function App() {
                     {/* Electronic P / R / D Gear Shifter (Parking Mode) */}
                     {gameMode === 'parking' && (
                       <div
-                        className="flex flex-col gap-0.5 p-0.5 sm:p-1 rounded-xl bg-slate-950 border border-slate-700/90 shrink-0"
+                        className="hidden sm:flex flex-col gap-0.5 p-0.5 sm:p-1 rounded-xl bg-slate-950 border border-slate-700/90 shrink-0"
                         role="group"
                         aria-label="Parking Transmission Gear"
                         data-testid="parking-shifter"
@@ -2732,7 +2771,7 @@ export default function App() {
 
                   {/* Bottom-Right Pod: Handbrake / Nitro + Metal Brake & Gas Pedals */}
                   <div
-                    className="sm:order-3 flex items-end gap-1 sm:gap-1.5 sm:rounded-2xl sm:border sm:border-slate-700/80 sm:px-2.5 sm:py-2 sm:bg-[rgba(9,14,26,0.90)] sm:shadow-2xl shrink-0"
+                    className="sm:order-3 flex items-end gap-0.5 sm:gap-1.5 sm:rounded-2xl sm:border sm:border-slate-700/80 sm:px-2.5 sm:py-2 sm:bg-[rgba(9,14,26,0.90)] sm:shadow-2xl shrink-0"
                     data-testid="cockpit-pedals"
                   >
                     {gameMode === 'parking' ? (
@@ -2767,7 +2806,7 @@ export default function App() {
                             setPedalHandbrake(false);
                           }
                         }}
-                        className={`touch-none select-none w-[40px] sm:w-[46px] h-[54px] rounded-lg border flex flex-col items-center justify-between py-1.5 px-1 transition-transform ${
+                        className={`touch-none select-none w-[38px] sm:w-[46px] h-[54px] rounded-lg border flex flex-col items-center justify-between py-1.5 px-1 transition-transform ${
                           pedalHandbrake || keyHandbrakeVisual
                             ? 'scale-95 bg-amber-500/25 border-amber-400 text-amber-300'
                             : 'bg-slate-900 border-slate-600 text-slate-300 hover:border-amber-500/60'
@@ -2790,7 +2829,7 @@ export default function App() {
                           e.currentTarget.blur();
                           setBoostTriggerCount((c) => c + 1);
                         }}
-                        className={`touch-none select-none w-[44px] sm:w-[50px] h-[54px] rounded-lg border flex flex-col items-center justify-between py-1 px-1 transition-transform whitespace-nowrap ${
+                        className={`touch-none select-none w-[40px] sm:w-[50px] h-[54px] rounded-lg border flex flex-col items-center justify-between py-1 px-1 transition-transform whitespace-nowrap ${
                           telemetry.isFever
                             ? 'bg-cyan-500/35 border-cyan-300 text-cyan-200 shadow-[0_0_14px_rgba(34,211,238,0.45)]'
                             : telemetry.fever >= 40
@@ -2837,7 +2876,7 @@ export default function App() {
                           setPedalBrake(false);
                         }
                       }}
-                      className={`touch-none select-none w-[48px] sm:w-[56px] h-[54px] sm:h-[58px] rounded-lg border flex flex-col items-center justify-between py-1.5 px-1 transition-transform ${
+                      className={`touch-none select-none w-[46px] sm:w-[56px] h-[54px] sm:h-[58px] rounded-lg border flex flex-col items-center justify-between py-1.5 px-1 transition-transform ${
                         pedalBrake || keyBrakeVisual
                           ? 'scale-95 bg-rose-500/30 border-rose-400 text-rose-200'
                           : 'bg-slate-800/90 border-slate-600 text-slate-200 hover:border-rose-500/60'
@@ -2882,7 +2921,7 @@ export default function App() {
                           setPedalGas(false);
                         }
                       }}
-                      className={`touch-none select-none w-[48px] sm:w-[56px] h-[62px] sm:h-[66px] rounded-lg border flex flex-col items-center justify-between py-1.5 px-1 transition-transform ${
+                      className={`touch-none select-none w-[46px] sm:w-[56px] h-[62px] sm:h-[66px] rounded-lg border flex flex-col items-center justify-between py-1.5 px-1 transition-transform ${
                         pedalGas || keyGasVisual
                           ? 'scale-95 bg-cyan-500/30 border-cyan-300 text-cyan-200'
                           : 'bg-slate-800/95 border-slate-500 text-slate-100 hover:border-cyan-400/70'
@@ -2965,7 +3004,7 @@ export default function App() {
                         style={{ backgroundColor: opt.dotColor }}
                         aria-hidden="true"
                       />
-                      <span>{opt.shortLabel}</span>
+                      <span className="truncate min-w-0" title={opt.label}>{opt.shortLabel}</span>
                     </button>
                   );
                 })}
