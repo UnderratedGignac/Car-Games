@@ -681,9 +681,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
     let viewW = window.innerWidth;
     let viewH = window.innerHeight;
+    // Adaptive resolution guard: drops render scale when frames run long,
+    // recovers when there is headroom. Keeps the game smooth on any phone.
+    let perfScale = 1;
+    let perfEma = 16;
+    let perfFrames = 0;
     let pxH = isSoftwareGl
       ? Math.min(580, Math.max(480, viewH))
-      : Math.min(920, Math.max(580, Math.round(viewH * Math.min(window.devicePixelRatio || 1, 1.5))));
+      : Math.min(920, Math.max(580, Math.round(viewH * Math.min(window.devicePixelRatio || 1, 1.5) * perfScale)));
     let HD_UI_SCALE = pxH / 340;
     let pxW = Math.max(320, Math.round(pxH * (viewW / Math.max(1, viewH))));
     let cachedSkyGrad: CanvasGradient | null = null;
@@ -937,7 +942,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       viewH = window.innerHeight;
       pxH = isSoftwareGl
         ? Math.min(680, Math.max(520, viewH))
-        : Math.min(920, Math.max(580, Math.round(viewH * Math.min(window.devicePixelRatio || 1, 1.5))));
+        : Math.min(920, Math.max(580, Math.round(viewH * Math.min(window.devicePixelRatio || 1, 1.5) * perfScale)));
       HD_UI_SCALE = pxH / 340;
       pxW = Math.max(320, Math.round(pxH * (viewW / Math.max(1, viewH))));
       displayCanvas.width = pxW;
@@ -2110,6 +2115,21 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           ? smoothDt * 0.55 + clampedDt * 0.45
           : clampedDt;
       const dt = smoothDt;
+
+      perfEma = perfEma * 0.9 + rawDt * 1000 * 0.1;
+      perfFrames++;
+      if (perfFrames >= 120) {
+        perfFrames = 0;
+        if (!isSoftwareGl && phase === 'playing') {
+          if (perfEma > 27 && perfScale > 0.7) {
+            perfScale = Math.max(0.7, perfScale - 0.15);
+            resize();
+          } else if (perfEma < 16 && perfScale < 1) {
+            perfScale = Math.min(1, perfScale + 0.1);
+            resize();
+          }
+        }
+      }
 
       if (phase === 'paused') {
         if (pausedFrameDrawn && !pendingResetRef.current) {
@@ -7438,6 +7458,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
               ctx.restore();
             }
 
+
+
             // Twin red taillight / brake-light ground reflection bounce
             const brakeIntensity = activePedalMode === 'brake' ? 0.34 : isDarkOrCave ? 0.22 : 0.09;
             ctx.globalAlpha = brakeIntensity;
@@ -7446,6 +7468,39 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             ctx.ellipse(cx - carDrawW * 0.16, shadowCy + shadowRy * 0.65, shadowRx * 0.34, shadowRy * 0.72, 0, 0, Math.PI * 2);
             ctx.ellipse(cx + carDrawW * 0.16, shadowCy + shadowRy * 0.65, shadowRx * 0.34, shadowRy * 0.72, 0, 0, Math.PI * 2);
             ctx.fill();
+
+            // Wet-asphalt light pools: taillight / brake / boost / fever streaks
+            // reflected on the road behind the car (additive gradient fills — cheap).
+            const wetNight = sky.isNight ? 1 : 0.45;
+            const reflTop = shadowCy + shadowRy * 0.4;
+            const reflLen = Math.max(26, shadowRx * 1.5);
+            const tailReflA = (brakeIntensity > 0.1 ? 0.34 : 0.16) * wetNight;
+            const tailHex = currentCar.tailGlowColor || '#ef4444';
+            const tailAHex = Math.round(tailReflA * 255).toString(16).padStart(2, '0');
+            const tailAHex2 = Math.round(tailReflA * 0.4 * 255).toString(16).padStart(2, '0');
+            ctx.save();
+            ctx.globalCompositeOperation = 'lighter';
+            for (const side of [-1, 1]) {
+              const rx = cx + side * shadowRx * 0.55;
+              const tg = ctx.createLinearGradient(0, reflTop, 0, reflTop + reflLen);
+              tg.addColorStop(0, tailHex + tailAHex);
+              tg.addColorStop(0.5, tailHex + tailAHex2);
+              tg.addColorStop(1, tailHex + '00');
+              ctx.fillStyle = tg;
+              ctx.fillRect(rx - shadowRx * 0.16, reflTop, shadowRx * 0.32, reflLen);
+            }
+            if (slipstreamBoostTimer > 0 || isFever) {
+              const ng = ctx.createLinearGradient(0, reflTop, 0, reflTop + reflLen * 1.3);
+              const na = (isFever ? 0.3 : 0.22) * wetNight;
+              const naHex = Math.round(na * 255).toString(16).padStart(2, '0');
+              const naHex2 = Math.round(na * 0.35 * 255).toString(16).padStart(2, '0');
+              ng.addColorStop(0, '#38bdf8' + naHex);
+              ng.addColorStop(0.6, '#38bdf8' + naHex2);
+              ng.addColorStop(1, '#38bdf800');
+              ctx.fillStyle = ng;
+              ctx.fillRect(cx - shadowRx * 0.3, reflTop, shadowRx * 0.6, reflLen * 1.3);
+            }
+            ctx.restore();
 
             // Fever / Slipstream twin cyan-amber aero slipstream ground streak
             if (isFever || slipstreamBoostTimer > 0) {

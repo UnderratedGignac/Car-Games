@@ -741,6 +741,8 @@ export function createRealisticWorldWebGL(
     lastSizeH = h;
     renderer.setSize(w, h, false);
     composer?.setSize(w, h);
+    // Bloom at 60% resolution: visually identical soft glow, ~64% less fill cost.
+    bloomPass?.setSize(Math.max(64, Math.floor(w * 0.6)), Math.max(64, Math.floor(h * 0.6)));
   };
 
   const render = (args: RealisticWorldRenderArgs) => {
