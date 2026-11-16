@@ -6,6 +6,10 @@
 import * as THREE from 'three';
 import { Sky } from 'three/examples/jsm/objects/Sky.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import CustomShaderMaterial from 'three-custom-shader-material/vanilla';
 import { createNoise2D } from 'simplex-noise';
 import { RoadBiomeConfig, RoadBiomeId, VALLEY_BASE_Y } from './rules';
@@ -552,6 +556,20 @@ export function createRealisticWorldWebGL(
 
   const camera = new THREE.PerspectiveCamera(48, 16 / 9, 0.5, 900);
 
+  // HDR bloom pipeline (RenderPass -> UnrealBloom -> OutputPass with ACES + sRGB).
+  // Skipped on software GL to keep the low-spec fallback fast; strength/threshold
+  // are tuned per atmosphere profile below (night glows harder than daylight).
+  let composer: EffectComposer | null = null;
+  let bloomPass: UnrealBloomPass | null = null;
+  if (!isSoftwareGl) {
+    composer = new EffectComposer(renderer);
+    composer.setPixelRatio(renderer.getPixelRatio());
+    composer.addPass(new RenderPass(scene, camera));
+    bloomPass = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.42, 0.65, 0.72);
+    composer.addPass(bloomPass);
+    composer.addPass(new OutputPass());
+  }
+
   // 1. Physically Based Atmospheric Sky
   const skyObj = new Sky();
   skyObj.scale.setScalar(800);
@@ -722,6 +740,7 @@ export function createRealisticWorldWebGL(
     lastSizeW = w;
     lastSizeH = h;
     renderer.setSize(w, h, false);
+    composer?.setSize(w, h);
   };
 
   const render = (args: RealisticWorldRenderArgs) => {
@@ -805,6 +824,10 @@ export function createRealisticWorldWebGL(
       skyUniforms['sunPosition'].value.copy(sunVec);
 
       renderer.toneMappingExposure = prof.exposure;
+      if (bloomPass) {
+        bloomPass.strength = sky.isNight ? 0.62 : 0.38;
+        bloomPass.threshold = sky.isNight ? 0.55 : 0.74;
+      }
       fog.color.setHex(prof.fogColor);
       fog.density = prof.fogDensity;
       scene.environmentIntensity = prof.envIntensity;
@@ -851,7 +874,11 @@ export function createRealisticWorldWebGL(
 
     waterUniforms.uTime.value = timeSec;
 
-    renderer.render(scene, camera);
+    if (composer) {
+      composer.render();
+    } else {
+      renderer.render(scene, camera);
+    }
   };
 
   const dispose = () => {
@@ -868,6 +895,8 @@ export function createRealisticWorldWebGL(
         }
       }
     });
+    bloomPass?.dispose();
+    composer?.dispose();
     renderer.dispose();
     while (mountEl.firstChild) {
       mountEl.removeChild(mountEl.firstChild);
