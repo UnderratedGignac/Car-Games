@@ -708,14 +708,23 @@ export function getPixelCarCanvas(
   colorBuf.fill(0);
   depthBuf.fill(Infinity);
 
-  const plot = (px: number, py: number, pz: number, col: number) => {
+  const plot = (px: number, py: number, pz: number, col: number, alpha = 1) => {
     const ix = px | 0;
     const iy = py | 0;
     if (ix < 1 || ix >= W - 1 || iy < 1 || iy >= H - 1) return;
     const idx = iy * W + ix;
     if (pz <= depthBuf[idx]) {
       depthBuf[idx] = pz;
-      colorBuf[idx] = col;
+      if (alpha < 1) {
+        const d = colorBuf[idx];
+        const ia = 1 - alpha;
+        const r = ((col & 0xff) * alpha + (d & 0xff) * ia) | 0;
+        const g = (((col >>> 8) & 0xff) * alpha + ((d >>> 8) & 0xff) * ia) | 0;
+        const b = (((col >>> 16) & 0xff) * alpha + ((d >>> 16) & 0xff) * ia) | 0;
+        colorBuf[idx] = 0xff000000 | (b << 16) | (g << 8) | r;
+      } else {
+        colorBuf[idx] = col;
+      }
     }
   };
 
@@ -727,7 +736,7 @@ export function getPixelCarCanvas(
   };
 
   // Scanline triangle rasterizer with interpolated depth and 3D rotated automotive clearcoat shading
-  const fillTri3D = (a: Vec3, b: Vec3, c: Vec3, col: number, zBias = 0) => {
+  const fillTri3D = (a: Vec3, b: Vec3, c: Vec3, col: number, zBias = 0, alpha = 1) => {
     const p0 = project(a);
     const p1 = project(b);
     const p2 = project(c);
@@ -774,15 +783,53 @@ export function getPixelCarCanvas(
         const w2 = 1 - w0 - w1;
         if (w0 >= -0.02 && w1 >= -0.02 && w2 >= -0.02) {
           const z = w0 * p0.z + w1 * p1.z + w2 * p2.z + zBias;
-          plot(x, y, z, shadedCol);
+          plot(x, y, z, shadedCol, alpha);
         }
       }
     }
   };
 
-  const fillQuad3D = (a: Vec3, b: Vec3, c: Vec3, d: Vec3, col: number, zBias = 0) => {
-    fillTri3D(a, b, c, col, zBias);
-    fillTri3D(a, c, d, col, zBias);
+  const fillQuad3D = (a: Vec3, b: Vec3, c: Vec3, d: Vec3, col: number, zBias = 0, alpha = 1) => {
+    fillTri3D(a, b, c, col, zBias, alpha);
+    fillTri3D(a, c, d, col, zBias, alpha);
+  };
+
+  // Race cabin crew palette + masked, helmeted driver (revealed by alpha glass)
+  const colSuit = packHex('#181b22');
+  const colSuitDark = packHex('#10131a');
+  const colMask = packHex('#0b0d12');
+  const colEyes = packHex('#d7e2ee');
+  const drawMaskedDriver = (openCockpit: boolean) => {
+    const isRhd = car.id.startsWith('sakura') || car.id.includes('kei') || car.id.includes('scooter');
+    const dx = isRhd ? 0.32 : -0.32;
+    const zS = (zRearGlassTop + zFrontGlassTop) * 0.5 + 0.12;
+    const yS = yBeltRear + 0.02;
+    // Torso: rear + front faces, shoulder shelf
+    fillQuad3D({ x: dx - 0.16, y: yS, z: zS - 0.06 }, { x: dx + 0.16, y: yS, z: zS - 0.06 }, { x: dx + 0.14, y: yS + 0.30, z: zS - 0.02 }, { x: dx - 0.14, y: yS + 0.30, z: zS - 0.02 }, colSuit, -0.004);
+    fillQuad3D({ x: dx - 0.14, y: yS, z: zS + 0.10 }, { x: dx + 0.14, y: yS, z: zS + 0.10 }, { x: dx + 0.13, y: yS + 0.28, z: zS + 0.08 }, { x: dx - 0.13, y: yS + 0.28, z: zS + 0.08 }, colSuitDark, -0.004);
+    fillQuad3D({ x: dx - 0.16, y: yS + 0.28, z: zS - 0.06 }, { x: dx + 0.16, y: yS + 0.28, z: zS - 0.06 }, { x: dx + 0.13, y: yS + 0.31, z: zS + 0.10 }, { x: dx - 0.13, y: yS + 0.31, z: zS + 0.10 }, colSuit, -0.004);
+    // Suit accent stripe down the back
+    fillQuad3D({ x: dx - 0.03, y: yS + 0.02, z: zS - 0.065 }, { x: dx + 0.03, y: yS + 0.02, z: zS - 0.065 }, { x: dx + 0.03, y: yS + 0.28, z: zS - 0.025 }, { x: dx - 0.03, y: yS + 0.28, z: zS - 0.025 }, colAccent, -0.006);
+    // Arms reaching forward to the wheel
+    for (const ax of [-0.13, 0.13]) {
+      fillQuad3D({ x: dx + ax - 0.04, y: yS + 0.24, z: zS + 0.02 }, { x: dx + ax + 0.04, y: yS + 0.24, z: zS + 0.02 }, { x: dx + ax * 0.7 + 0.03, y: yS + 0.15, z: zS + 0.30 }, { x: dx + ax * 0.7 - 0.03, y: yS + 0.15, z: zS + 0.30 }, colSuitDark, -0.004);
+    }
+    // Helmet shell: rear face, top, upper front
+    fillQuad3D({ x: dx - 0.11, y: yS + 0.32, z: zS - 0.10 }, { x: dx + 0.11, y: yS + 0.32, z: zS - 0.10 }, { x: dx + 0.10, y: yS + 0.53, z: zS - 0.08 }, { x: dx - 0.10, y: yS + 0.53, z: zS - 0.08 }, colAccent, -0.005);
+    fillQuad3D({ x: dx - 0.10, y: yS + 0.53, z: zS - 0.08 }, { x: dx + 0.10, y: yS + 0.53, z: zS - 0.08 }, { x: dx + 0.09, y: yS + 0.54, z: zS + 0.09 }, { x: dx - 0.09, y: yS + 0.54, z: zS + 0.09 }, colAccentDark, -0.005);
+    fillQuad3D({ x: dx - 0.10, y: yS + 0.46, z: zS + 0.10 }, { x: dx + 0.10, y: yS + 0.46, z: zS + 0.10 }, { x: dx + 0.09, y: yS + 0.53, z: zS + 0.09 }, { x: dx - 0.09, y: yS + 0.53, z: zS + 0.09 }, colAccent, -0.005);
+    // Balaclava lower face + dark visor band + pale eye slit = the mask
+    fillQuad3D({ x: dx - 0.09, y: yS + 0.32, z: zS + 0.105 }, { x: dx + 0.09, y: yS + 0.32, z: zS + 0.105 }, { x: dx + 0.09, y: yS + 0.42, z: zS + 0.105 }, { x: dx - 0.09, y: yS + 0.42, z: zS + 0.105 }, colMask, -0.006);
+    fillQuad3D({ x: dx - 0.095, y: yS + 0.42, z: zS + 0.11 }, { x: dx + 0.095, y: yS + 0.42, z: zS + 0.11 }, { x: dx + 0.095, y: yS + 0.475, z: zS + 0.11 }, { x: dx - 0.095, y: yS + 0.475, z: zS + 0.11 }, colMask, -0.007);
+    fillQuad3D({ x: dx - 0.075, y: yS + 0.437, z: zS + 0.115 }, { x: dx + 0.075, y: yS + 0.437, z: zS + 0.115 }, { x: dx + 0.075, y: yS + 0.458, z: zS + 0.115 }, { x: dx - 0.075, y: yS + 0.458, z: zS + 0.115 }, colEyes, -0.008);
+    // Helmet rear center stripe
+    fillQuad3D({ x: dx - 0.025, y: yS + 0.34, z: zS - 0.105 }, { x: dx + 0.025, y: yS + 0.34, z: zS - 0.105 }, { x: dx + 0.025, y: yS + 0.51, z: zS - 0.085 }, { x: dx - 0.025, y: yS + 0.51, z: zS - 0.085 }, colWhite, -0.007);
+    // Steering wheel rim + column spoke
+    fillQuad3D({ x: dx - 0.10, y: yS + 0.17, z: zS + 0.32 }, { x: dx + 0.10, y: yS + 0.17, z: zS + 0.32 }, { x: dx + 0.09, y: yS + 0.20, z: zS + 0.33 }, { x: dx - 0.09, y: yS + 0.20, z: zS + 0.33 }, colCarbon, -0.006);
+    fillQuad3D({ x: dx - 0.015, y: yS + 0.10, z: zS + 0.32 }, { x: dx + 0.015, y: yS + 0.10, z: zS + 0.32 }, { x: dx + 0.015, y: yS + 0.18, z: zS + 0.33 }, { x: dx - 0.015, y: yS + 0.18, z: zS + 0.33 }, colCarbon, -0.006);
+    if (openCockpit) {
+      fillQuad3D({ x: dx - 0.13, y: yS + 0.30, z: zS - 0.14 }, { x: dx + 0.13, y: yS + 0.30, z: zS - 0.14 }, { x: dx + 0.12, y: yS + 0.56, z: zS - 0.13 }, { x: dx - 0.12, y: yS + 0.56, z: zS - 0.13 }, colSuitDark, -0.003);
+    }
   };
 
   // Palette setup for 3-tone crisp cel/pixel shading (preserve car paint even when wrecked so damage stands out!)
@@ -1693,6 +1740,23 @@ export function getPixelCarCanvas(
       { x: rtx + 0.04, y: headY + 0.16, z: 0.52 },
       colVisor,
       -0.07
+    );
+    // Balaclava lower face + eye slit behind the visor
+    fillQuad3D(
+      { x: rtx - 0.13, y: headY - 0.01, z: 0.565 },
+      { x: rtx + 0.13, y: headY - 0.01, z: 0.565 },
+      { x: rtx + 0.12, y: headY + 0.055, z: 0.57 },
+      { x: rtx - 0.12, y: headY + 0.055, z: 0.57 },
+      packHex('#0b0d12'),
+      -0.065
+    );
+    fillQuad3D(
+      { x: rtx - 0.10, y: headY + 0.085, z: 0.575 },
+      { x: rtx + 0.10, y: headY + 0.085, z: 0.575 },
+      { x: rtx + 0.10, y: headY + 0.11, z: 0.58 },
+      { x: rtx - 0.10, y: headY + 0.11, z: 0.58 },
+      packHex('#d7e2ee'),
+      -0.075
     );
   } else {
     // -----------------------------------------------------------------------
@@ -2705,7 +2769,8 @@ export function getPixelCarCanvas(
           { x: rw * 0.64, y: yRoof + 0.01, z: zFrontGlassTop - 0.14 },
           { x: -rw * 0.64, y: yRoof + 0.01, z: zFrontGlassTop - 0.14 },
           colGlassDark,
-          -0.02
+          -0.02,
+          0.72
         );
       } else if (resolved.roof === 'roof_scoop') {
         fillQuad3D(
@@ -2784,6 +2849,44 @@ export function getPixelCarCanvas(
         }
       }
 
+      // Cabin interior seen through alpha-blended glass: tub floor, rear bench,
+      // dashboard, passenger headrest and the masked driver.
+      const isRhdCar = car.id.startsWith('sakura') || car.id.includes('kei') || car.id.includes('scooter');
+      const drvX = isRhdCar ? 0.32 : -0.32;
+      fillQuad3D(
+        { x: -rw * 0.9, y: yBeltRear + 0.01, z: zTrunk + 0.06 },
+        { x: rw * 0.9, y: yBeltRear + 0.01, z: zTrunk + 0.06 },
+        { x: rw * 0.9, y: yBeltRear + 0.01, z: zFrontGlassTop },
+        { x: -rw * 0.9, y: yBeltRear + 0.01, z: zFrontGlassTop },
+        colSuitDark,
+        -0.002
+      );
+      fillQuad3D(
+        { x: -rw * 0.8, y: yBeltRear + 0.02, z: zRearGlassTop + 0.22 },
+        { x: rw * 0.8, y: yBeltRear + 0.02, z: zRearGlassTop + 0.22 },
+        { x: rw * 0.8, y: yBeltRear + 0.16, z: zRearGlassTop + 0.26 },
+        { x: -rw * 0.8, y: yBeltRear + 0.16, z: zRearGlassTop + 0.26 },
+        colSuit,
+        -0.003
+      );
+      fillQuad3D(
+        { x: -rw * 0.85, y: yBeltFront + 0.02, z: zFrontGlassTop - 0.08 },
+        { x: rw * 0.85, y: yBeltFront + 0.02, z: zFrontGlassTop - 0.08 },
+        { x: rw * 0.85, y: yBeltFront + 0.12, z: zFrontGlassTop - 0.02 },
+        { x: -rw * 0.85, y: yBeltFront + 0.12, z: zFrontGlassTop - 0.02 },
+        colCarbon,
+        -0.003
+      );
+      fillQuad3D(
+        { x: -drvX - 0.12, y: yBeltRear + 0.12, z: ((zRearGlassTop + zFrontGlassTop) * 0.5 + 0.12) - 0.08 },
+        { x: -drvX + 0.12, y: yBeltRear + 0.12, z: ((zRearGlassTop + zFrontGlassTop) * 0.5 + 0.12) - 0.08 },
+        { x: -drvX + 0.11, y: yBeltRear + 0.42, z: ((zRearGlassTop + zFrontGlassTop) * 0.5 + 0.12) - 0.05 },
+        { x: -drvX - 0.11, y: yBeltRear + 0.42, z: ((zRearGlassTop + zFrontGlassTop) * 0.5 + 0.12) - 0.05 },
+        colSuit,
+        -0.004
+      );
+      drawMaskedDriver(false);
+
       // Rear Fastback Glass + Interior Bucket Seat Headrests Silhouette
       if (arch !== 'truck_cyber') {
         fillQuad3D(
@@ -2791,7 +2894,9 @@ export function getPixelCarCanvas(
           { x: hw * 0.84, y: yBeltRear + 0.04, z: zTrunk },
           { x: rw, y: yRoof, z: zRearGlassTop },
           { x: -rw, y: yRoof, z: zRearGlassTop },
-          colGlassMid
+          colGlassMid,
+          0,
+          0.60
         );
         // Subtle twin bucket-seat headrests behind glass for interior depth
         for (const sxSeat of [-0.30, 0.30]) {
@@ -2865,7 +2970,9 @@ export function getPixelCarCanvas(
           { x: hw * 0.84, y: yBeltFront + 0.06, z: zHoodBase },
           { x: rw * 0.96, y: yRoof - roofSag, z: zFrontGlassTop },
           { x: -rw * 0.96, y: yRoof - roofSag, z: zFrontGlassTop },
-          colGlassDark
+          colGlassDark,
+          0,
+          0.55
         );
         fillQuad3D(
           { x: -rw * 0.86, y: yRoof - roofSag - 0.06, z: zFrontGlassTop + 0.06 },
@@ -2874,6 +2981,15 @@ export function getPixelCarCanvas(
           { x: -rw * 0.92, y: yRoof - roofSag - 0.01, z: zFrontGlassTop + 0.01 },
           winCracked ? colWhite : colGlassSpec,
           -0.02
+        );
+        fillQuad3D(
+          { x: rw * 0.10, y: yRoof - roofSag - 0.02, z: zFrontGlassTop + 0.03 },
+          { x: rw * 0.55, y: yRoof - roofSag - 0.02, z: zFrontGlassTop + 0.03 },
+          { x: hw * 0.30, y: yBeltFront + 0.14, z: zHoodBase - 0.03 },
+          { x: hw * 0.02, y: yBeltFront + 0.14, z: zHoodBase - 0.03 },
+          colGlassSpec,
+          -0.024,
+          0.22
         );
         if (winCracked) {
           // Jagged white shatter spiderweb across cracked windshield
@@ -2922,7 +3038,9 @@ export function getPixelCarCanvas(
         { x: hw * 0.86, y: yBeltFront + 0.05, z: zHoodBase - 0.04 },
         { x: rw * 0.96, y: yRoof, z: zFrontGlassTop },
         { x: rw, y: yRoof, z: zRearGlassTop },
-        colGlassMid
+        colGlassMid,
+        0,
+        0.58
       );
       fillTri3D(
         { x: hw * 0.88, y: yBeltFront + 0.08, z: zHoodBase - 0.25 },
@@ -2978,7 +3096,9 @@ export function getPixelCarCanvas(
         { x: -hw * 0.88, y: yBeltRear + 0.02, z: zTrunk + 0.04 },
         { x: -rw, y: yRoof, z: zRearGlassTop },
         { x: -rw * 0.96, y: yRoof, z: zFrontGlassTop },
-        colGlassMid
+        colGlassMid,
+        0,
+        0.58
       );
       fillTri3D(
         { x: -rw * 0.95, y: yRoof - 0.03, z: zFrontGlassTop - 0.06 },
@@ -3019,6 +3139,60 @@ export function getPixelCarCanvas(
         colBodyLight,
         -0.03
       );
+      // ---- Exterior detail pass: plates, door seams, handles, fuel cap ----
+      for (const pz of [zRear - 0.03, zFront + 0.03]) {
+        const plateOff = pz < 0 ? -0.004 : 0.004;
+        fillQuad3D(
+          { x: -0.17, y: yFloor + 0.16, z: pz },
+          { x: 0.17, y: yFloor + 0.16, z: pz },
+          { x: 0.17, y: yFloor + 0.28, z: pz },
+          { x: -0.17, y: yFloor + 0.28, z: pz },
+          colCarbon,
+          -0.028
+        );
+        fillQuad3D(
+          { x: -0.15, y: yFloor + 0.175, z: pz + plateOff },
+          { x: 0.15, y: yFloor + 0.175, z: pz + plateOff },
+          { x: 0.15, y: yFloor + 0.265, z: pz + plateOff },
+          { x: -0.15, y: yFloor + 0.265, z: pz + plateOff },
+          colWhite,
+          -0.03
+        );
+        fillQuad3D(
+          { x: -0.12, y: yFloor + 0.205, z: pz + plateOff * 1.5 },
+          { x: 0.12, y: yFloor + 0.205, z: pz + plateOff * 1.5 },
+          { x: 0.12, y: yFloor + 0.235, z: pz + plateOff * 1.5 },
+          { x: -0.12, y: yFloor + 0.235, z: pz + plateOff * 1.5 },
+          colAccentDark,
+          -0.032
+        );
+      }
+      for (const sgn of [-1, 1]) {
+        fillQuad3D(
+          { x: sgn * hw * 0.905, y: yFloor + 0.08, z: bPillarZ - 0.006 },
+          { x: sgn * hw * 0.905, y: yFloor + 0.08, z: bPillarZ + 0.006 },
+          { x: sgn * hw * 0.885, y: yBeltFront - 0.02, z: bPillarZ + 0.006 },
+          { x: sgn * hw * 0.885, y: yBeltFront - 0.02, z: bPillarZ - 0.006 },
+          colBodyDark,
+          -0.016
+        );
+        fillQuad3D(
+          { x: sgn * hw * 0.91, y: yBeltFront - 0.10, z: bPillarZ + 0.22 },
+          { x: sgn * hw * 0.91, y: yBeltFront - 0.10, z: bPillarZ + 0.34 },
+          { x: sgn * hw * 0.91, y: yBeltFront - 0.075, z: bPillarZ + 0.34 },
+          { x: sgn * hw * 0.91, y: yBeltFront - 0.075, z: bPillarZ + 0.22 },
+          colRimSpec,
+          -0.02
+        );
+      }
+      fillQuad3D(
+        { x: -hw * 0.91, y: yBeltRear - 0.10, z: zTrunk + 0.18 },
+        { x: -hw * 0.91, y: yBeltRear - 0.10, z: zTrunk + 0.28 },
+        { x: -hw * 0.91, y: yBeltRear - 0.02, z: zTrunk + 0.28 },
+        { x: -hw * 0.91, y: yBeltRear - 0.02, z: zTrunk + 0.18 },
+        colBodyDark,
+        -0.018
+      );
     } else {
       // Open Cockpit Roadster / Shelby Cobra / Can-Am Prototype
       fillQuad3D(
@@ -3026,7 +3200,9 @@ export function getPixelCarCanvas(
         { x: hw * 0.84, y: yBeltFront + 0.04, z: zHoodBase },
         { x: rw * 0.90, y: yRoof + 0.08, z: zFrontGlassTop + 0.15 },
         { x: -rw * 0.90, y: yRoof + 0.08, z: zFrontGlassTop + 0.15 },
-        colGlassMid
+        colGlassMid,
+        0,
+        0.50
       );
       if (arch === 'classic_cobra') {
         // Signature single brushed chrome driver roll-hoop + dark recessed seats
@@ -3062,6 +3238,7 @@ export function getPixelCarCanvas(
         { x: 0.22, y: yRoof + 0.10, z: zTrunk + 0.15 },
         arch === 'classic_cobra' ? colCarbon : colTail
       );
+      drawMaskedDriver(true);
     }
 
     // =======================================================================
@@ -4375,6 +4552,51 @@ export function getTrafficVehicleCanvas(
       { x: -hw * 0.55, y: yBeltFront + 0.10, z: zHoodBase - 0.06 },
       colGlassSpec,
       -0.02
+    );
+
+    // Masked driver: helmet + shoulders through rear glass, balaclava + eye
+    // slit through the windshield on oncoming traffic.
+    const drvX = -hw * 0.30;
+    const yDrv = yRoof - 0.15;
+    fillQuad3D(
+      { x: drvX - 0.14, y: yDrv - 0.16, z: zRearGlassTop + 0.05 },
+      { x: drvX + 0.14, y: yDrv - 0.16, z: zRearGlassTop + 0.05 },
+      { x: drvX + 0.12, y: yDrv, z: zRearGlassTop + 0.05 },
+      { x: drvX - 0.12, y: yDrv, z: zRearGlassTop + 0.05 },
+      packHex('#14171d'),
+      -0.012
+    );
+    fillQuad3D(
+      { x: drvX - 0.10, y: yDrv, z: zRearGlassTop + 0.05 },
+      { x: drvX + 0.10, y: yDrv, z: zRearGlassTop + 0.05 },
+      { x: drvX + 0.09, y: yDrv + 0.18, z: zRearGlassTop + 0.05 },
+      { x: drvX - 0.09, y: yDrv + 0.18, z: zRearGlassTop + 0.05 },
+      colChrome,
+      -0.013
+    );
+    fillQuad3D(
+      { x: drvX - 0.13, y: yDrv - 0.16, z: zFrontGlassTop - 0.05 },
+      { x: drvX + 0.13, y: yDrv - 0.16, z: zFrontGlassTop - 0.05 },
+      { x: drvX + 0.11, y: yDrv, z: zFrontGlassTop - 0.05 },
+      { x: drvX - 0.11, y: yDrv, z: zFrontGlassTop - 0.05 },
+      packHex('#14171d'),
+      -0.012
+    );
+    fillQuad3D(
+      { x: drvX - 0.09, y: yDrv, z: zFrontGlassTop - 0.05 },
+      { x: drvX + 0.09, y: yDrv, z: zFrontGlassTop - 0.05 },
+      { x: drvX + 0.08, y: yDrv + 0.17, z: zFrontGlassTop - 0.05 },
+      { x: drvX - 0.08, y: yDrv + 0.17, z: zFrontGlassTop - 0.05 },
+      packHex('#0b0d12'),
+      -0.013
+    );
+    fillQuad3D(
+      { x: drvX - 0.07, y: yDrv + 0.075, z: zFrontGlassTop - 0.055 },
+      { x: drvX + 0.07, y: yDrv + 0.075, z: zFrontGlassTop - 0.055 },
+      { x: drvX + 0.07, y: yDrv + 0.10, z: zFrontGlassTop - 0.055 },
+      { x: drvX - 0.07, y: yDrv + 0.10, z: zFrontGlassTop - 0.055 },
+      packHex('#d7e2ee'),
+      -0.014
     );
 
     // Twin Front Headlights + Amber Corner Signals
