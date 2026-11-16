@@ -490,6 +490,20 @@ export default function App() {
   const [missionModalTab, setMissionModalTab] = useState<MissionModalTab>('daily');
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isQuickGuideOpen, setIsQuickGuideOpen] = useState<boolean>(false);
+  const [showCtrlHint, setShowCtrlHint] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (gamePhase !== 'playing') return;
+    let seen = false;
+    try { seen = Boolean(localStorage.getItem('neon_ctrl_hint_v1')); } catch {}
+    if (seen) return;
+    setShowCtrlHint(true);
+    const t = setTimeout(() => {
+      setShowCtrlHint(false);
+      try { localStorage.setItem('neon_ctrl_hint_v1', '1'); } catch {}
+    }, 9000);
+    return () => clearTimeout(t);
+  }, [gamePhase]);
   const [isShareCardOpen, setIsShareCardOpen] = useState<boolean>(false);
   const [gameSettings, setGameSettings] = useState<GameSettings>(() => loadGameSettings());
   const steerPtrRef = useRef<{ id: number; dir: number } | null>(null);
@@ -1545,6 +1559,7 @@ export default function App() {
         screenShakeMultiplier={gameSettings.screenShake}
         highFpsMode={gameSettings.highFpsMode}
         controlScheme={gameSettings.controlScheme}
+        steerSensitivity={gameSettings.steerSensitivity}
         onTelemetryUpdate={handleTelemetryUpdate}
         onGameOver={handleGameOver}
       />
@@ -2188,6 +2203,26 @@ export default function App() {
             </div>
           )}
 
+          {showCtrlHint && gamePhase === 'playing' && (
+            <button
+              type="button"
+              onClick={() => {
+                setShowCtrlHint(false);
+                try { localStorage.setItem('neon_ctrl_hint_v1', '1'); } catch {}
+              }}
+              className="pointer-events-auto mx-auto mt-2 max-w-[calc(100vw-1rem)] px-3 py-2 rounded-xl bg-slate-950/90 border border-cyan-400/60 text-cyan-100 text-[11px] sm:text-xs font-medium shadow-2xl flex items-center gap-2 text-left"
+            >
+              <span className="text-base shrink-0">🚗</span>
+              <span>
+                {gameMode === 'parking' ? (
+                  <>Hold <b className="text-amber-300">GAS</b> to creep into the bay · <b className="text-white">P/R/D</b> picks gear · <b className="text-rose-300">BRAKE</b> to stop. Tap to dismiss.</>
+                ) : (
+                  <><b className="text-white">Auto-cruise is ON</b> — the car drives itself. Steer with ◀ ▶, the wheel, or swipe the road. <b className="text-amber-300">GAS</b> = boost · <b className="text-rose-300">BRAKE</b> = slow. Tap to dismiss.</>
+                )}
+              </span>
+            </button>
+          )}
+
           {/* Mission Completion Dopamine Juice Callout Banner */}
           {missionToast && (
             <div className="mx-auto mt-2 max-w-[calc(100vw-1rem)] px-4 py-1.5 rounded-xl bg-gradient-to-r from-amber-400 via-rose-500 to-purple-500 text-slate-950 font-display font-black text-sm tracking-wide shadow-[0_0_20px_rgba(251,191,36,0.6)] animate-bounce border border-amber-300 flex items-center gap-1.5">
@@ -2639,9 +2674,9 @@ export default function App() {
                 )}
 
                 {/* Mobile Single Row / Desktop Split Left & Right Corner Pods */}
-                <div className="order-2 flex flex-wrap items-center justify-between gap-1.5 sm:contents">
+                <div className={`order-2 flex flex-wrap items-center justify-between gap-1.5 sm:contents ${gameSettings.leftHanded ? 'flex-row-reverse' : ''}`}>
                   {/* Bottom-Left Pod: Steer Left Nudge + Interactive Steering Wheel + Steer Right Nudge + P/R/D */}
-                  <div className="sm:order-1 flex items-center gap-0.5 sm:gap-1.5 sm:rounded-2xl sm:border sm:border-slate-700/80 sm:px-2.5 sm:py-2 sm:bg-[rgba(9,14,26,0.90)] sm:shadow-2xl shrink-0">
+                  <div className={`${gameSettings.leftHanded ? 'sm:order-3' : 'sm:order-1'} flex items-center gap-0.5 sm:gap-1.5 sm:rounded-2xl sm:border sm:border-slate-700/80 sm:px-2.5 sm:py-2 sm:bg-[rgba(9,14,26,0.90)] sm:shadow-2xl shrink-0`}>
                     <button
                       type="button"
                       data-hud-btn="true"
@@ -2771,7 +2806,7 @@ export default function App() {
 
                   {/* Bottom-Right Pod: Handbrake / Nitro + Metal Brake & Gas Pedals */}
                   <div
-                    className="sm:order-3 flex items-end gap-0.5 sm:gap-1.5 sm:rounded-2xl sm:border sm:border-slate-700/80 sm:px-2.5 sm:py-2 sm:bg-[rgba(9,14,26,0.90)] sm:shadow-2xl shrink-0"
+                    className={`${gameSettings.leftHanded ? 'sm:order-1' : 'sm:order-3'} flex items-end gap-0.5 sm:gap-1.5 sm:rounded-2xl sm:border sm:border-slate-700/80 sm:px-2.5 sm:py-2 sm:bg-[rgba(9,14,26,0.90)] sm:shadow-2xl shrink-0`}
                     data-testid="cockpit-pedals"
                   >
                     {gameMode === 'parking' ? (
@@ -2896,6 +2931,7 @@ export default function App() {
                       data-testid="pedal-gas"
                       tabIndex={-1}
                       aria-label="Gas Pedal [W]"
+                      title="Auto-cruise in race modes — hold to boost"
                       onPointerDown={(e) => {
                         e.preventDefault();
                         e.stopPropagation();

@@ -252,6 +252,7 @@ interface SceneCanvasProps {
   screenShakeMultiplier?: number;
   highFpsMode?: boolean;
   controlScheme?: 'classic' | 'wheel' | 'swipe'; // default 'classic'
+  steerSensitivity?: 'smooth' | 'balanced' | 'sharp'; // default 'balanced'
   carDamage?: CarDamageState;
   recentRunRanks?: readonly string[];
   onCarDamageChange?: (nextDamage: CarDamageState) => void;
@@ -402,6 +403,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
   screenShakeMultiplier = 1.0,
   highFpsMode = true,
   controlScheme = 'classic',
+  steerSensitivity = 'balanced',
   carDamage,
   recentRunRanks = [],
   onCarDamageChange,
@@ -423,6 +425,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
 
   const controlSchemeRef = useRef<'classic' | 'wheel' | 'swipe'>(controlScheme);
   controlSchemeRef.current = controlScheme;
+  const steerSensRef = useRef<'smooth' | 'balanced' | 'sharp'>(steerSensitivity);
+  steerSensRef.current = steerSensitivity;
 
   const gameModeRef = useRef<GameModeId>(gameMode);
   gameModeRef.current = gameMode;
@@ -2617,7 +2621,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
             parkingState = stepParkingPhysics(
               parkingState,
               {
-                steerInput,
+                steerInput: Math.max(-1, Math.min(1, steerInput * (steerSensRef.current === 'smooth' ? 0.72 : steerSensRef.current === 'sharp' ? 1.25 : 1.0))),
                 gasInput: rawGas,
                 brakeInput: rawBrake,
                 handbrake: rawHandbrake,
@@ -2931,9 +2935,11 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
           const effectiveHandbrake = resolvedPedals.handbrake;
 
           const preSpeedNow = Math.hypot(driftState.vx, driftState.vz);
+          const sensGain = steerSensRef.current === 'smooth' ? 0.72 : steerSensRef.current === 'sharp' ? 1.25 : 1.0;
+          const sensRate = steerSensRef.current === 'smooth' ? 11.0 : steerSensRef.current === 'sharp' ? 26.0 : 18.0;
           const speedSteerWeight = 1.0 - Math.min(0.26, Math.max(0, (preSpeedNow - 18) * 0.015));
-          const weightedSteerTarget = steerInput * speedSteerWeight;
-          smoothSteerInput += (weightedSteerTarget - smoothSteerInput) * Math.min(1, 18 * simDt);
+          const weightedSteerTarget = Math.max(-1, Math.min(1, steerInput * sensGain)) * speedSteerWeight;
+          smoothSteerInput += (weightedSteerTarget - smoothSteerInput) * Math.min(1, sensRate * simDt);
           if (Math.abs(steerInput) < 0.02 && Math.abs(smoothSteerInput) < 0.02) {
             smoothSteerInput = 0;
           }

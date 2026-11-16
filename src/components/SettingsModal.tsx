@@ -44,6 +44,8 @@ export interface GameSettings {
   engineVolume: number; // 0.0 - 1.0 (default 0.7)
   screenShake: number;  // 0.0 - 1.0 (default 1.0, 0.0 = motion safe)
   controlScheme: 'classic' | 'wheel' | 'swipe'; // default 'classic'
+  leftHanded: boolean; // swap steering & pedal pods (default false)
+  steerSensitivity: 'smooth' | 'balanced' | 'sharp'; // steering response (default 'balanced')
   hapticsEnabled: boolean; // default true
   hapticDeviceMode: ActiveHapticDeviceMode; // 'auto' | specific device profile
   hapticCalibrations: HapticCalibrationsByDevice; // per-device collision & drift intensities
@@ -59,6 +61,8 @@ export const DEFAULT_SETTINGS: GameSettings = {
   engineVolume: 0.7,
   screenShake: 1.0,
   controlScheme: 'classic',
+  leftHanded: false,
+  steerSensitivity: 'balanced',
   hapticsEnabled: true,
   hapticDeviceMode: 'auto',
   hapticCalibrations: createDefaultHapticCalibrations(),
@@ -123,6 +127,11 @@ export function loadGameSettings(): GameSettings {
           engineVolume: clamp01(parsed.engineVolume, DEFAULT_SETTINGS.engineVolume),
           screenShake: clamp01(parsed.screenShake, DEFAULT_SETTINGS.screenShake),
           controlScheme: control,
+          leftHanded: typeof parsed.leftHanded === 'boolean' ? parsed.leftHanded : DEFAULT_SETTINGS.leftHanded,
+          steerSensitivity:
+            parsed.steerSensitivity === 'smooth' || parsed.steerSensitivity === 'sharp'
+              ? parsed.steerSensitivity
+              : 'balanced',
           hapticsEnabled:
             typeof parsed.hapticsEnabled === 'boolean'
               ? parsed.hapticsEnabled
@@ -865,6 +874,52 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </p>
                   </div>
                 </button>
+              </div>
+
+              {/* Left-handed cockpit + steering sensitivity */}
+              <div className="p-3.5 sm:p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <h4 className="text-xs font-semibold text-white">Left-Handed Cockpit</h4>
+                    <p className="text-[11px] text-slate-400">Steering on the right, pedals on the left.</p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={settings.leftHanded}
+                    aria-label="Left-handed cockpit"
+                    onClick={() => updateSetting('leftHanded', !settings.leftHanded)}
+                    className={`shrink-0 w-12 h-7 rounded-full border relative transition-colors ${
+                      settings.leftHanded ? 'bg-amber-500/80 border-amber-400' : 'bg-slate-800 border-slate-700'
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-[2px] left-[2px] w-[22px] h-[22px] rounded-full bg-white shadow transition-transform ${
+                        settings.leftHanded ? 'translate-x-[20px]' : ''
+                      }`}
+                    />
+                  </button>
+                </div>
+                <div>
+                  <h4 className="text-xs font-semibold text-white">Steering Sensitivity</h4>
+                  <p className="text-[11px] text-slate-400 mb-2">How sharply the car answers your steering.</p>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {(['smooth', 'balanced', 'sharp'] as const).map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => updateSetting('steerSensitivity', s)}
+                        className={`min-h-[36px] rounded-lg text-[11px] font-semibold border transition-colors ${
+                          settings.steerSensitivity === s
+                            ? 'bg-amber-500/20 border-amber-400 text-amber-300'
+                            : 'bg-slate-800 border-slate-700 text-slate-300 hover:border-slate-600'
+                        }`}
+                      >
+                        {s === 'smooth' ? '🪶 Smooth' : s === 'balanced' ? '⚖️ Balanced' : '⚡ Sharp'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
 
               {/* Compact Haptics Summary + Shortcut to Per-Device Calibration */}

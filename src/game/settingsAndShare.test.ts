@@ -64,6 +64,8 @@ test('Game Settings - Defaults and Storage Roundtrip', () => {
   assert.equal(initial.hapticDeviceMode, 'auto');
   assert.deepEqual(initial.hapticCalibrations, createDefaultHapticCalibrations());
   assert.equal(initial.highFpsMode, false);
+  assert.equal(initial.leftHanded, false);
+  assert.equal(initial.steerSensitivity, 'balanced');
 
   // 2. Save modified settings including independent per-device calibrations
   const customCalibrations = createDefaultHapticCalibrations();
@@ -81,6 +83,8 @@ test('Game Settings - Defaults and Storage Roundtrip', () => {
     hapticDeviceMode: 'mobile_android',
     hapticCalibrations: customCalibrations,
     highFpsMode: true,
+    leftHanded: true,
+    steerSensitivity: 'sharp',
   };
 
   saveGameSettings(custom);
