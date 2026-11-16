@@ -512,6 +512,10 @@ export default function App() {
   const gasPtrRef = useRef<number | null>(null);
   const [missionToast, setMissionToast] = useState<{ title: string; reward: number } | null>(null);
   const missionToastTimerRef = useRef<number | null>(null);
+  // HUD paint throttle: React re-renders at ~12.5Hz instead of every frame.
+  // Simulation, sounds, haptics and deltas below still run at full rate.
+  const lastHudPaintRef = useRef(0);
+  const latestTelemetryRef = useRef<LiveTelemetry | null>(null);
   const prevTelemetryRef = useRef({
     distance: 0,
     coinsRun: 0,
@@ -632,6 +636,8 @@ export default function App() {
   // Mirror gamePhase to document.body.dataset.state & clear held controls when leaving 'playing'
   useEffect(() => {
     document.body.dataset.state = gamePhase;
+    // Flush the freshest telemetry on phase transitions (pause / game over stats).
+    if (latestTelemetryRef.current) setTelemetry(latestTelemetryRef.current);
     if (gamePhase !== 'playing') {
       steerPtrRef.current = null;
       handbrakePtrRef.current = null;
@@ -940,7 +946,12 @@ export default function App() {
 
   const handleTelemetryUpdate = useCallback(
     (t: LiveTelemetry) => {
-      setTelemetry(t);
+      latestTelemetryRef.current = t;
+      const nowMs = performance.now();
+      if (nowMs - lastHudPaintRef.current >= 80) {
+        lastHudPaintRef.current = nowMs;
+        setTelemetry(t);
+      }
 
       if (gamePhase === 'playing') {
         const overtakes = t.overtakes || 0;

@@ -1632,6 +1632,7 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
         parkingLastSyncedPropGear = st0.spawn.gear;
         onParkingGearChangeRef.current?.(st0.spawn.gear);
         driftState = createInitialDriftState(st0.spawn.x, st0.spawn.z, 0, st0.spawn.heading, 0);
+        camSmInit = false;
         camFocusX = st0.spawn.x * 0.65;
         camFocusY = 0;
         camFocusZ = st0.spawn.z - 6;
@@ -1972,6 +1973,10 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
     let fCamX = 0;
     let fCamY = 0;
     let fCamZ = 0;
+    let camSmX = 0;
+    let camSmY = 0;
+    let camSmZ = 0;
+    let camSmInit = false;
     let fFwdX = 0;
     let fFwdZ = -1;
     let fRightX = 1;
@@ -5759,9 +5764,22 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = React.memo(({
       const camWorldZ = camFocusZ - fwdZ * camDistBack + rightZ * camSideSwing;
 
       // Update per-frame camera projection registers (zero closure allocations)
-      fCamX = camWorldX;
-      fCamY = camWorldY;
-      fCamZ = camWorldZ;
+      // Smoothed chase camera: damped follow removes micro-jitter and gives
+      // the car weight; snappier in parking for precision work.
+      if (!camSmInit) {
+        camSmX = camWorldX;
+        camSmY = camWorldY;
+        camSmZ = camWorldZ;
+        camSmInit = true;
+      } else {
+        const camRate = Math.min(1, dt * (isParkingMode ? 11 : 7.5));
+        camSmX += (camWorldX - camSmX) * camRate;
+        camSmY += (camWorldY - camSmY) * camRate;
+        camSmZ += (camWorldZ - camSmZ) * camRate;
+      }
+      fCamX = camSmX;
+      fCamY = camSmY;
+      fCamZ = camSmZ;
       fFwdX = fwdX;
       fFwdZ = fwdZ;
       fRightX = rightX;
